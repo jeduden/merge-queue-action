@@ -218,6 +218,7 @@ func runProcess(ctx context.Context) error {
 
 	// 6. CI passed — merge to main
 	if err := b.CompleteMerge(ctx, result.Branch); err != nil {
+		cleanupBranch(result.Branch)
 		requeueAll()
 		return err
 	}

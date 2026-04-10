@@ -7,12 +7,25 @@ import (
 )
 
 // mockAPI implements GitHubAPI for testing.
+// mock404Error implements HTTPError with a 404 status.
+type mock404Error struct{}
+
+func (e *mock404Error) Error() string { return "not found" }
+func (e *mock404Error) StatusCode() int { return 404 }
+
+// mock500Error implements HTTPError with a 500 status.
+type mock500Error struct{}
+
+func (e *mock500Error) Error() string { return "server error" }
+func (e *mock500Error) StatusCode() int { return 500 }
+
 type mockAPI struct {
-	prs           map[string][]PR // label -> PRs
-	labels        map[int][]string
-	comments      map[int][]string
-	createdLabels []createdLabel
-	failOn        string // method name to fail on
+	prs            map[string][]PR // label -> PRs
+	labels         map[int][]string
+	comments       map[int][]string
+	createdLabels  []createdLabel
+	failOn         string // method name to fail on
+	removeLabelErr error  // specific error for RemoveLabel
 }
 
 type createdLabel struct {
@@ -45,6 +58,9 @@ func (m *mockAPI) AddLabel(_ context.Context, prNumber int, label string) error 
 }
 
 func (m *mockAPI) RemoveLabel(_ context.Context, prNumber int, label string) error {
+	if m.removeLabelErr != nil {
+		return m.removeLabelErr
+	}
 	if m.failOn == "RemoveLabel" {
 		return fmt.Errorf("mock error")
 	}
@@ -249,5 +265,72 @@ func TestQueueLabel(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("QueueLabel(%q, %q) = %q, want %q", tt.base, tt.state, got, tt.want)
 		}
+	}
+}
+
+func TestActivate_IgnoresRemoveLabel404(t *testing.T) {
+	api := newMockAPI()
+	api.labels[1] = []string{"queue"}
+	api.removeLabelErr = &mock404Error{}
+
+	q := New(api, "queue", false, nopLog)
+	err := q.Activate(context.Background(), []PR{{Number: 1}})
+	if err != nil {
+		t.Fatalf("expected no error on 404, got: %v", err)
+	}
+	// Should still have the active label added
+	hasActive := false
+	for _, l := range api.labels[1] {
+		if l == "queue:active" {
+			hasActive = true
+		}
+	}
+	if !hasActive {
+		t.Error("PR missing active label after 404 on RemoveLabel")
+	}
+}
+
+func TestActivate_ReturnsNon404RemoveLabelError(t *testing.T) {
+	api := newMockAPI()
+	api.labels[1] = []string{"queue"}
+	api.removeLabelErr = &mock500Error{}
+
+	q := New(api, "queue", false, nopLog)
+	err := q.Activate(context.Background(), []PR{{Number: 1}})
+	if err == nil {
+		t.Fatal("expected error on 500 RemoveLabel, got nil")
+	}
+}
+
+func TestMarkFailed_IgnoresRemoveLabel404(t *testing.T) {
+	api := newMockAPI()
+	api.labels[1] = []string{"queue:active"}
+	api.removeLabelErr = &mock404Error{}
+
+	q := New(api, "queue", false, nopLog)
+	err := q.MarkFailed(context.Background(), PR{Number: 1}, "test")
+	if err != nil {
+		t.Fatalf("expected no error on 404, got: %v", err)
+	}
+}
+
+func TestRequeue_IgnoresRemoveLabel404(t *testing.T) {
+	api := newMockAPI()
+	api.labels[1] = []string{"queue:active"}
+	api.removeLabelErr = &mock404Error{}
+
+	q := New(api, "queue", false, nopLog)
+	err := q.Requeue(context.Background(), PR{Number: 1})
+	if err != nil {
+		t.Fatalf("expected no error on 404, got: %v", err)
+	}
+	hasPending := false
+	for _, l := range api.labels[1] {
+		if l == "queue" {
+			hasPending = true
+		}
+	}
+	if !hasPending {
+		t.Error("PR missing pending label after requeue with 404")
 	}
 }
