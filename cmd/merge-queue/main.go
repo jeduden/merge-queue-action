@@ -270,13 +270,6 @@ func runBisect(ctx context.Context) error {
 		prMap[pr.Number] = pr
 	}
 
-	var prs []queue.PR
-	for _, n := range prNumbers {
-		if pr, ok := prMap[n]; ok {
-			prs = append(prs, pr)
-		}
-	}
-
 	left, right := bisect.Split(prNumbers)
 	logf("Bisecting: left=%v, right=%v", left, right)
 
