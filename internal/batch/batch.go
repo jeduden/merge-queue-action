@@ -77,6 +77,10 @@ func (b *Batch) CreateAndMerge(ctx context.Context, batchID string, prs []PR) (*
 		msg := fmt.Sprintf("Merge PR #%d: %s", pr.Number, pr.Title)
 		ok, err := b.git.MergeBranch(ctx, branch, pr.HeadRef, msg)
 		if err != nil {
+			// Best-effort cleanup of the batch branch
+			if delErr := b.git.DeleteBranch(ctx, branch); delErr != nil {
+				b.log("Warning: failed to delete batch branch %s: %v", branch, delErr)
+			}
 			return nil, fmt.Errorf("merging PR #%d: %w", pr.Number, err)
 		}
 		if !ok {

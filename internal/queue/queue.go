@@ -108,7 +108,7 @@ func (q *Queue) Activate(ctx context.Context, prs []PR) error {
 		if err := q.api.AddLabel(ctx, pr.Number, QueueLabel(q.label, StateActive)); err != nil {
 			return fmt.Errorf("adding active label to #%d: %w", pr.Number, err)
 		}
-		if err := q.api.RemoveLabel(ctx, pr.Number, QueueLabel(q.label, StatePending)); err != nil {
+		if err := q.api.RemoveLabel(ctx, pr.Number, QueueLabel(q.label, StatePending)); err != nil && !isNotFoundError(err) {
 			return fmt.Errorf("removing pending label from #%d: %w", pr.Number, err)
 		}
 	}
@@ -189,10 +189,16 @@ type HTTPError interface {
 	StatusCode() int
 }
 
+// AlreadyExistsError is an optional interface for errors that indicate
+// a resource already exists (e.g. duplicate label).
+type AlreadyExistsError interface {
+	AlreadyExists() bool
+}
+
 func isAlreadyExistsError(err error) bool {
-	var httpErr HTTPError
-	if errors.As(err, &httpErr) {
-		return httpErr.StatusCode() == http.StatusUnprocessableEntity
+	var ae AlreadyExistsError
+	if errors.As(err, &ae) {
+		return ae.AlreadyExists()
 	}
 	return false
 }

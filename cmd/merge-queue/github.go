@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -15,13 +16,15 @@ import (
 // apiError wraps a go-github error and exposes the HTTP status code
 // via the queue.HTTPError interface.
 type apiError struct {
-	status int
-	err    error
+	status       int
+	alreadyExists bool
+	err          error
 }
 
-func (e *apiError) Error() string { return e.err.Error() }
-func (e *apiError) Unwrap() error { return e.err }
-func (e *apiError) StatusCode() int { return e.status }
+func (e *apiError) Error() string    { return e.err.Error() }
+func (e *apiError) Unwrap() error    { return e.err }
+func (e *apiError) StatusCode() int  { return e.status }
+func (e *apiError) AlreadyExists() bool { return e.alreadyExists }
 
 // wrapErr wraps a go-github error so it implements queue.HTTPError.
 func wrapErr(err error) error {
@@ -30,7 +33,14 @@ func wrapErr(err error) error {
 	}
 	var ghErr *github.ErrorResponse
 	if errors.As(err, &ghErr) && ghErr.Response != nil {
-		return &apiError{status: ghErr.Response.StatusCode, err: err}
+		ae := &apiError{status: ghErr.Response.StatusCode, err: err}
+		for _, e := range ghErr.Errors {
+			if e.Code == "already_exists" {
+				ae.alreadyExists = true
+				break
+			}
+		}
+		return ae
 	}
 	return err
 }
@@ -44,7 +54,8 @@ type GitHubClient struct {
 
 // NewGitHubClient creates a new GitHub API client.
 func NewGitHubClient(token string) (*GitHubClient, error) {
-	client := github.NewClient(nil).WithAuthToken(token)
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	client := github.NewClient(httpClient).WithAuthToken(token)
 
 	owner, repo, err := getOwnerRepo()
 	if err != nil {
@@ -72,26 +83,22 @@ func getOwnerRepo() (string, string, error) {
 
 func (g *GitHubClient) ListPRsWithLabel(ctx context.Context, label string) ([]queue.PR, error) {
 	var result []queue.PR
-	opts := &github.IssueListByRepoOptions{
-		State:  "open",
-		Labels: []string{label},
-		Sort:   "created",
-		Direction: "asc",
+	query := fmt.Sprintf("repo:%s/%s is:pr is:open label:%q sort:created-asc", g.owner, g.repo, label)
+	opts := &github.SearchOptions{
+		Sort:  "created",
+		Order: "asc",
 		ListOptions: github.ListOptions{
 			PerPage: 100,
 		},
 	}
 
 	for {
-		issues, resp, err := g.client.Issues.ListByRepo(ctx, g.owner, g.repo, opts)
+		issues, resp, err := g.client.Search.Issues(ctx, query, opts)
 		if err != nil {
-			return nil, fmt.Errorf("listing issues by label: %w", err)
+			return nil, fmt.Errorf("searching PRs by label: %w", err)
 		}
 
-		for _, issue := range issues {
-			if !issue.IsPullRequest() {
-				continue
-			}
+		for _, issue := range issues.Issues {
 			pr, _, err := g.client.PullRequests.Get(ctx, g.owner, g.repo, issue.GetNumber())
 			if err != nil {
 				return nil, fmt.Errorf("getting PR #%d: %w", issue.GetNumber(), err)

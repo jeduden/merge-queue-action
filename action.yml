@@ -62,8 +62,28 @@ runs:
             ;;
         esac
 
-        curl -fsSL -o merge-queue \
-          "https://github.com/${OWNER}/releases/download/${VERSION}/merge-queue-${OS}-${ARCH}"
+        ASSET="merge-queue-${OS}-${ARCH}"
+        RELEASE_URL="https://github.com/${OWNER}/releases/download/${VERSION}"
+
+        curl -fsSL -o merge-queue "${RELEASE_URL}/${ASSET}"
+        curl -fsSL -o checksums.txt "${RELEASE_URL}/checksums.txt"
+
+        EXPECTED="$(grep "${ASSET}" checksums.txt | awk '{print $1}')"
+        if [ -z "${EXPECTED}" ]; then
+          echo "No checksum found for ${ASSET}" >&2
+          exit 1
+        fi
+
+        case "${RUNNER_OS_INPUT}" in
+          Linux) ACTUAL="$(sha256sum merge-queue | awk '{print $1}')" ;;
+          macOS) ACTUAL="$(shasum -a 256 merge-queue | awk '{print $1}')" ;;
+        esac
+
+        if [ "${ACTUAL}" != "${EXPECTED}" ]; then
+          echo "SHA-256 mismatch: expected ${EXPECTED}, got ${ACTUAL}" >&2
+          exit 1
+        fi
+
         chmod +x merge-queue
     - name: Run
       shell: bash

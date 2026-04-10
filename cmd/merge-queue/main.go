@@ -129,6 +129,19 @@ func runProcess(ctx context.Context) error {
 		return err
 	}
 
+	// requeueAll is called on failure after activation to prevent PRs
+	// from getting stuck in queue:active state.
+	requeueAll := func() {
+		if cfg.dryRun {
+			return
+		}
+		for _, pr := range prs {
+			if err := q.Requeue(ctx, pr); err != nil {
+				logf("Warning: failed to requeue PR #%d after error: %v", pr.Number, err)
+			}
+		}
+	}
+
 	// 3. Create batch branch and merge PRs
 	batchPRs := make([]batch.PR, len(prs))
 	for i, pr := range prs {
@@ -138,6 +151,7 @@ func runProcess(ctx context.Context) error {
 	batchID := fmt.Sprintf("%d-%d", prs[0].Number, time.Now().Unix())
 	result, err := b.CreateAndMerge(ctx, batchID, batchPRs)
 	if err != nil {
+		requeueAll()
 		return err
 	}
 
@@ -168,12 +182,14 @@ func runProcess(ctx context.Context) error {
 	if !cfg.dryRun {
 		dispatchedAt := time.Now()
 		if err := api.TriggerWorkflow(ctx, cfg.ciWorkflow, result.Branch, nil); err != nil {
+			requeueAll()
 			return fmt.Errorf("triggering CI: %w", err)
 		}
 
 		logf("Waiting for CI result...")
 		conclusion, err := api.GetWorkflowRunStatus(ctx, cfg.ciWorkflow, result.Branch, dispatchedAt)
 		if err != nil {
+			requeueAll()
 			return fmt.Errorf("getting CI status: %w", err)
 		}
 
@@ -184,6 +200,7 @@ func runProcess(ctx context.Context) error {
 
 	// 6. CI passed — merge to main
 	if err := b.CompleteMerge(ctx, result.Branch); err != nil {
+		requeueAll()
 		return err
 	}
 
