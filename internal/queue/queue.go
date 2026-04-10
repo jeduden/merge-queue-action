@@ -76,8 +76,11 @@ type Queue struct {
 	logFunc  func(string, ...any)
 }
 
-// New creates a new Queue.
+// New creates a new Queue. If logFunc is nil, logging is silently discarded.
 func New(api GitHubAPI, label string, dryRun bool, logFunc func(string, ...any)) *Queue {
+	if logFunc == nil {
+		logFunc = func(string, ...any) {}
+	}
 	return &Queue{
 		api:     api,
 		label:   label,

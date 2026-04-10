@@ -194,7 +194,11 @@ func runProcess(ctx context.Context) error {
 		}
 
 		if conclusion != "success" {
-			return handleCIFailure(ctx, cfg, q, gitOps, prs, result, api)
+			if err := handleCIFailure(ctx, cfg, q, gitOps, prs, result, api); err != nil {
+				requeueAll()
+				return err
+			}
+			return nil
 		}
 	}
 

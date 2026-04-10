@@ -83,22 +83,28 @@ func getOwnerRepo() (string, string, error) {
 
 func (g *GitHubClient) ListPRsWithLabel(ctx context.Context, label string) ([]queue.PR, error) {
 	var result []queue.PR
-	query := fmt.Sprintf("repo:%s/%s is:pr is:open label:%q sort:created-asc", g.owner, g.repo, label)
-	opts := &github.SearchOptions{
-		Sort:  "created",
-		Order: "asc",
+	opts := &github.IssueListByRepoOptions{
+		State:     "open",
+		Labels:    []string{label},
+		Sort:      "created",
+		Direction: "asc",
 		ListOptions: github.ListOptions{
 			PerPage: 100,
 		},
 	}
 
 	for {
-		issues, resp, err := g.client.Search.Issues(ctx, query, opts)
+		issues, resp, err := g.client.Issues.ListByRepo(ctx, g.owner, g.repo, opts)
 		if err != nil {
-			return nil, fmt.Errorf("searching PRs by label: %w", err)
+			return nil, fmt.Errorf("listing issues by label: %w", err)
 		}
 
-		for _, issue := range issues.Issues {
+		for _, issue := range issues {
+			if !issue.IsPullRequest() {
+				continue
+			}
+			// Per-PR fetch is needed for head ref/SHA (not available on issue).
+			// Bounded by batch_size (default 5) so N+1 is acceptable.
 			pr, _, err := g.client.PullRequests.Get(ctx, g.owner, g.repo, issue.GetNumber())
 			if err != nil {
 				return nil, fmt.Errorf("getting PR #%d: %w", issue.GetNumber(), err)
