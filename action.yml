@@ -1,0 +1,44 @@
+name: merge-queue
+description: Bors-style merge queue with batching and bisection
+
+inputs:
+  token:
+    description: >-
+      GitHub token with contents:write and
+      pull-requests:write
+    required: true
+  ci_workflow:
+    description: >-
+      Reusable workflow to run against batch branch
+      (e.g. .github/workflows/ci-reusable.yml)
+    required: true
+  batch_size:
+    description: Max PRs per batch
+    default: "5"
+  queue_label:
+    description: Label that enqueues a PR
+    default: queue
+  dry_run:
+    description: Log intent without mutating
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Download merge-queue binary
+      shell: bash
+      run: |
+        VERSION="${{ github.action_ref }}"
+        OWNER="${{ github.action_repository }}"
+        curl -fsSL -o merge-queue \
+          "https://github.com/${OWNER}/releases/download/${VERSION}/merge-queue-linux-amd64"
+        chmod +x merge-queue
+    - name: Run
+      shell: bash
+      run: |
+        ./merge-queue process \
+          --token "${{ inputs.token }}" \
+          --ci-workflow "${{ inputs.ci_workflow }}" \
+          --batch-size "${{ inputs.batch_size }}" \
+          --queue-label "${{ inputs.queue_label }}" \
+          --dry-run="${{ inputs.dry_run }}"

@@ -1,0 +1,47 @@
+name: Release
+on:
+  push:
+    tags: [v*]
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - {goos: linux, goarch: amd64}
+          - {goos: linux, goarch: arm64}
+          - {goos: darwin, goarch: amd64}
+          - {goos: darwin, goarch: arm64}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: |
+          GOOS=${{ matrix.goos }} \
+          GOARCH=${{ matrix.goarch }} \
+          go build -trimpath \
+            -ldflags="-s -w" \
+            -o merge-queue-${{ matrix.goos }}-${{ matrix.goarch }} \
+            ./cmd/merge-queue
+      - uses: actions/upload-artifact@v4
+        with:
+          name: merge-queue-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: merge-queue-*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+      - run: |
+          sha256sum merge-queue-*/merge-queue-* > checksums.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            merge-queue-*/merge-queue-*
+            checksums.txt
