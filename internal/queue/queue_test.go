@@ -85,7 +85,7 @@ func TestCollect_SortsOldestFirst(t *testing.T) {
 	}
 
 	q := New(api, "queue", false, nopLog)
-	prs, err := q.Collect(context.Background())
+	prs, err := q.Collect(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestCollect_SortsOldestFirst(t *testing.T) {
 func TestCollect_Empty(t *testing.T) {
 	api := newMockAPI()
 	q := New(api, "queue", false, nopLog)
-	prs, err := q.Collect(context.Background())
+	prs, err := q.Collect(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestCollect_APIError(t *testing.T) {
 	api := newMockAPI()
 	api.failOn = "ListPRsWithLabel"
 	q := New(api, "queue", false, nopLog)
-	_, err := q.Collect(context.Background())
+	_, err := q.Collect(context.Background(), 0)
 	if err == nil {
 		t.Fatal("expected error")
 	}

@@ -91,8 +91,9 @@ func New(api GitHubAPI, label string, dryRun bool, logFunc func(string, ...any))
 }
 
 // Collect returns open PRs with the queue label, sorted oldest first.
-func (q *Queue) Collect(ctx context.Context) ([]PR, error) {
-	prs, err := q.api.ListPRsWithLabel(ctx, q.label, 0)
+// If limit > 0, at most limit PRs are returned.
+func (q *Queue) Collect(ctx context.Context, limit int) ([]PR, error) {
+	prs, err := q.api.ListPRsWithLabel(ctx, q.label, limit)
 	if err != nil {
 		return nil, fmt.Errorf("listing queued PRs: %w", err)
 	}

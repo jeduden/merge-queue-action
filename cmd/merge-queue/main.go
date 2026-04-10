@@ -108,19 +108,14 @@ func runProcess(ctx context.Context) error {
 	q := queue.New(api, cfg.queueLabel, cfg.dryRun, logf)
 	b := batch.New(gitOps, cfg.dryRun, logf)
 
-	// 1. Collect queued PRs
-	prs, err := q.Collect(ctx)
+	// 1. Collect queued PRs (limited to batch size)
+	prs, err := q.Collect(ctx, cfg.batchSize)
 	if err != nil {
 		return err
 	}
 	if len(prs) == 0 {
 		logf("No PRs in queue")
 		return nil
-	}
-
-	// Limit to batch size
-	if len(prs) > cfg.batchSize {
-		prs = prs[:cfg.batchSize]
 	}
 	logf("Processing %d PRs", len(prs))
 
@@ -277,7 +272,11 @@ func handleCIFailure(ctx context.Context, cfg config, q *queue.Queue, gitOps *Gi
 	logf("CI failed for batch, triggering bisection for PRs: %v", prNumbers)
 
 	if !cfg.dryRun {
-		return api.TriggerWorkflow(ctx, selfWorkflowFile(), "main", map[string]interface{}{
+		wf, err := selfWorkflowFile()
+		if err != nil {
+			return err
+		}
+		return api.TriggerWorkflow(ctx, wf, "main", map[string]interface{}{
 			"batch_prs": string(prJSON),
 			"bisect":    "true",
 		})
@@ -395,7 +394,11 @@ func runBisect(ctx context.Context) error {
 			rightJSON, _ := json.Marshal(right)
 			logf("Dispatching bisection for right half: %v", right)
 			if !cfg.dryRun {
-				if err := api.TriggerWorkflow(ctx, selfWorkflowFile(), "main", map[string]interface{}{
+				wf, err := selfWorkflowFile()
+				if err != nil {
+					return err
+				}
+				if err := api.TriggerWorkflow(ctx, wf, "main", map[string]interface{}{
 					"batch_prs": string(rightJSON),
 					"bisect":    "true",
 				}); err != nil {
@@ -432,7 +435,11 @@ func runBisect(ctx context.Context) error {
 			leftJSON, _ := json.Marshal(left)
 			logf("Left half failed, splitting further: %v", left)
 			if !cfg.dryRun {
-				if err := api.TriggerWorkflow(ctx, selfWorkflowFile(), "main", map[string]interface{}{
+				wf, wfErr := selfWorkflowFile()
+				if wfErr != nil {
+					return wfErr
+				}
+				if err := api.TriggerWorkflow(ctx, wf, "main", map[string]interface{}{
 					"batch_prs": string(leftJSON),
 					"bisect":    "true",
 				}); err != nil {
@@ -451,20 +458,25 @@ func runBisect(ctx context.Context) error {
 	return nil
 }
 
-// selfWorkflowFile extracts the repo-relative workflow path from GITHUB_WORKFLOW_REF.
-// GITHUB_WORKFLOW_REF is "owner/repo/.github/workflows/x.yml@refs/heads/main".
-// CreateWorkflowDispatchEventByFileName expects ".github/workflows/x.yml".
-func selfWorkflowFile() string {
+// selfWorkflowFile returns the repo-relative workflow path for dispatch.
+// Reads MERGE_QUEUE_WORKFLOW_FILE if set, otherwise parses GITHUB_WORKFLOW_REF
+// ("owner/repo/.github/workflows/x.yml@refs/heads/main" -> ".github/workflows/x.yml").
+func selfWorkflowFile() (string, error) {
+	if wf := os.Getenv("MERGE_QUEUE_WORKFLOW_FILE"); wf != "" {
+		return wf, nil
+	}
 	ref := os.Getenv("GITHUB_WORKFLOW_REF")
+	if ref == "" {
+		return "", fmt.Errorf("GITHUB_WORKFLOW_REF is not set; set MERGE_QUEUE_WORKFLOW_FILE when running outside GitHub Actions")
+	}
 	if idx := strings.Index(ref, "@"); idx > 0 {
 		ref = ref[:idx]
 	}
-	// Strip "owner/repo/" prefix
 	parts := strings.SplitN(ref, "/", 3)
-	if len(parts) == 3 {
-		return parts[2]
+	if len(parts) != 3 || parts[2] == "" {
+		return "", fmt.Errorf("invalid GITHUB_WORKFLOW_REF %q", ref)
 	}
-	return ref
+	return parts[2], nil
 }
 
 func runSetup(ctx context.Context) error {

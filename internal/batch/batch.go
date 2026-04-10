@@ -38,8 +38,11 @@ type Batch struct {
 	log    func(string, ...any)
 }
 
-// New creates a new Batch operator.
+// New creates a new Batch operator. If logFunc is nil, logging is silently discarded.
 func New(git GitOperator, dryRun bool, logFunc func(string, ...any)) *Batch {
+	if logFunc == nil {
+		logFunc = func(string, ...any) {}
+	}
 	return &Batch{
 		git:    git,
 		dryRun: dryRun,
