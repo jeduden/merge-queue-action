@@ -4,8 +4,8 @@ description: Bors-style merge queue with batching and bisection
 inputs:
   token:
     description: >-
-      GitHub token with contents:write and
-      pull-requests:write
+      GitHub token with contents:write, pull-requests:write,
+      actions:write, and issues:write permissions
     required: true
   ci_workflow:
     description: >-

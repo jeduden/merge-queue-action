@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -10,6 +11,29 @@ import (
 	"github.com/google/go-github/v68/github"
 	"github.com/jeduden/merge-queue-action/internal/queue"
 )
+
+// apiError wraps a go-github error and exposes the HTTP status code
+// via the queue.HTTPError interface.
+type apiError struct {
+	status int
+	err    error
+}
+
+func (e *apiError) Error() string { return e.err.Error() }
+func (e *apiError) Unwrap() error { return e.err }
+func (e *apiError) StatusCode() int { return e.status }
+
+// wrapErr wraps a go-github error so it implements queue.HTTPError.
+func wrapErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	var ghErr *github.ErrorResponse
+	if errors.As(err, &ghErr) && ghErr.Response != nil {
+		return &apiError{status: ghErr.Response.StatusCode, err: err}
+	}
+	return err
+}
 
 // GitHubClient implements queue.GitHubAPI using the GitHub API.
 type GitHubClient struct {
@@ -48,9 +72,10 @@ func getOwnerRepo() (string, string, error) {
 
 func (g *GitHubClient) ListPRsWithLabel(ctx context.Context, label string) ([]queue.PR, error) {
 	var result []queue.PR
-	opts := &github.PullRequestListOptions{
-		State:     "open",
-		Sort:      "created",
+	opts := &github.IssueListByRepoOptions{
+		State:  "open",
+		Labels: []string{label},
+		Sort:   "created",
 		Direction: "asc",
 		ListOptions: github.ListOptions{
 			PerPage: 100,
@@ -58,24 +83,26 @@ func (g *GitHubClient) ListPRsWithLabel(ctx context.Context, label string) ([]qu
 	}
 
 	for {
-		prs, resp, err := g.client.PullRequests.List(ctx, g.owner, g.repo, opts)
+		issues, resp, err := g.client.Issues.ListByRepo(ctx, g.owner, g.repo, opts)
 		if err != nil {
-			return nil, fmt.Errorf("listing PRs: %w", err)
+			return nil, fmt.Errorf("listing issues by label: %w", err)
 		}
 
-		for _, pr := range prs {
-			for _, l := range pr.Labels {
-				if l.GetName() == label {
-					result = append(result, queue.PR{
-						Number:    pr.GetNumber(),
-						HeadRef:   pr.GetHead().GetRef(),
-						HeadSHA:   pr.GetHead().GetSHA(),
-						Title:     pr.GetTitle(),
-						CreatedAt: pr.GetCreatedAt().Unix(),
-					})
-					break
-				}
+		for _, issue := range issues {
+			if !issue.IsPullRequest() {
+				continue
 			}
+			pr, _, err := g.client.PullRequests.Get(ctx, g.owner, g.repo, issue.GetNumber())
+			if err != nil {
+				return nil, fmt.Errorf("getting PR #%d: %w", issue.GetNumber(), err)
+			}
+			result = append(result, queue.PR{
+				Number:    pr.GetNumber(),
+				HeadRef:   pr.GetHead().GetRef(),
+				HeadSHA:   pr.GetHead().GetSHA(),
+				Title:     pr.GetTitle(),
+				CreatedAt: pr.GetCreatedAt().Unix(),
+			})
 		}
 
 		if resp.NextPage == 0 {
@@ -94,7 +121,7 @@ func (g *GitHubClient) AddLabel(ctx context.Context, prNumber int, label string)
 
 func (g *GitHubClient) RemoveLabel(ctx context.Context, prNumber int, label string) error {
 	_, err := g.client.Issues.RemoveLabelForIssue(ctx, g.owner, g.repo, prNumber, label)
-	return err
+	return wrapErr(err)
 }
 
 func (g *GitHubClient) Comment(ctx context.Context, prNumber int, body string) error {
@@ -119,12 +146,11 @@ func (g *GitHubClient) TriggerWorkflow(ctx context.Context, workflowFile string,
 	return err
 }
 
-func (g *GitHubClient) GetWorkflowRunStatus(ctx context.Context, workflowFile string, ref string) (string, error) {
+func (g *GitHubClient) GetWorkflowRunStatus(ctx context.Context, workflowFile string, ref string, dispatchedAt time.Time) (string, error) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
-	// Only consider runs created after we dispatched
-	createdAfter := time.Now().Add(-30 * time.Second)
+	createdAfter := dispatchedAt.Add(-5 * time.Second)
 
 	for i := 0; i < 360; i++ {
 		select {
@@ -164,5 +190,5 @@ func (g *GitHubClient) CreateLabel(ctx context.Context, name string, color strin
 		Color:       github.Ptr(color),
 		Description: github.Ptr(description),
 	})
-	return err
+	return wrapErr(err)
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 )
 
 // mockAPI implements GitHubAPI for testing.
@@ -84,7 +85,7 @@ func (m *mockAPI) TriggerWorkflow(_ context.Context, workflowFile string, ref st
 	return nil
 }
 
-func (m *mockAPI) GetWorkflowRunStatus(_ context.Context, _ string, _ string) (string, error) {
+func (m *mockAPI) GetWorkflowRunStatus(_ context.Context, _ string, _ string, _ time.Time) (string, error) {
 	return "success", nil
 }
 

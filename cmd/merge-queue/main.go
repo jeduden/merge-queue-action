@@ -161,12 +161,13 @@ func runProcess(ctx context.Context) error {
 	// 5. Trigger CI and wait
 	logf("Triggering CI workflow %s on %s", cfg.ciWorkflow, result.Branch)
 	if !cfg.dryRun {
+		dispatchedAt := time.Now()
 		if err := api.TriggerWorkflow(ctx, cfg.ciWorkflow, result.Branch, nil); err != nil {
 			return fmt.Errorf("triggering CI: %w", err)
 		}
 
 		logf("Waiting for CI result...")
-		conclusion, err := api.GetWorkflowRunStatus(ctx, cfg.ciWorkflow, result.Branch)
+		conclusion, err := api.GetWorkflowRunStatus(ctx, cfg.ciWorkflow, result.Branch, dispatchedAt)
 		if err != nil {
 			return fmt.Errorf("getting CI status: %w", err)
 		}
@@ -181,7 +182,7 @@ func runProcess(ctx context.Context) error {
 		return err
 	}
 
-	// Close PRs and clean up labels
+	// Clean up labels and comment on merged PRs
 	for _, pr := range prs {
 		found := false
 		for _, mp := range result.Merged {
@@ -295,7 +296,7 @@ func runBisect(ctx context.Context) error {
 		}
 	}
 
-	batchID := fmt.Sprintf("bisect-%d", left[0])
+	batchID := fmt.Sprintf("bisect-%d-%d", left[0], time.Now().Unix())
 	result, err := b.CreateAndMerge(ctx, batchID, leftPRs)
 	if err != nil {
 		return fmt.Errorf("creating bisect batch: %w", err)
@@ -305,10 +306,11 @@ func runBisect(ctx context.Context) error {
 	logf("Running CI on left half: %v", left)
 	conclusion := "success"
 	if !cfg.dryRun {
+		dispatchedAt := time.Now()
 		if err := api.TriggerWorkflow(ctx, cfg.ciWorkflow, result.Branch, nil); err != nil {
 			return fmt.Errorf("triggering CI for bisect: %w", err)
 		}
-		conclusion, err = api.GetWorkflowRunStatus(ctx, cfg.ciWorkflow, result.Branch)
+		conclusion, err = api.GetWorkflowRunStatus(ctx, cfg.ciWorkflow, result.Branch, dispatchedAt)
 		if err != nil {
 			return fmt.Errorf("getting CI status for bisect: %w", err)
 		}
@@ -375,10 +377,18 @@ func runBisect(ctx context.Context) error {
 	return nil
 }
 
+// selfWorkflowFile extracts the repo-relative workflow path from GITHUB_WORKFLOW_REF.
+// GITHUB_WORKFLOW_REF is "owner/repo/.github/workflows/x.yml@refs/heads/main".
+// CreateWorkflowDispatchEventByFileName expects ".github/workflows/x.yml".
 func selfWorkflowFile() string {
 	ref := os.Getenv("GITHUB_WORKFLOW_REF")
 	if idx := strings.Index(ref, "@"); idx > 0 {
-		return ref[:idx]
+		ref = ref[:idx]
+	}
+	// Strip "owner/repo/" prefix
+	parts := strings.SplitN(ref, "/", 3)
+	if len(parts) == 3 {
+		return parts[2]
 	}
 	return ref
 }

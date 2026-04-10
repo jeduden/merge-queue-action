@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sort"
+	"time"
 )
 
 // PR represents a pull request in the merge queue.
@@ -54,8 +55,9 @@ type GitHubAPI interface {
 	// TriggerWorkflow dispatches a workflow.
 	TriggerWorkflow(ctx context.Context, workflowFile string, ref string, inputs map[string]interface{}) error
 
-	// GetWorkflowRunStatus polls for the latest run of a workflow on a ref and returns its conclusion.
-	GetWorkflowRunStatus(ctx context.Context, workflowFile string, ref string) (conclusion string, err error)
+	// GetWorkflowRunStatus polls for the latest run of a workflow on a ref
+	// created after dispatchedAt and returns its conclusion.
+	GetWorkflowRunStatus(ctx context.Context, workflowFile string, ref string, dispatchedAt time.Time) (conclusion string, err error)
 
 	// CreateLabel creates a label in the repository.
 	CreateLabel(ctx context.Context, name string, color string, description string) error
