@@ -1,9 +1,8 @@
 package bisect
 
 import (
-	"testing"
-
 	"slices"
+	"testing"
 )
 
 func TestSplit(t *testing.T) {

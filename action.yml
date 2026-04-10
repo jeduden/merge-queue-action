@@ -9,8 +9,8 @@ inputs:
     required: true
   ci_workflow:
     description: >-
-      Reusable workflow to run against batch branch
-      (e.g. .github/workflows/ci-reusable.yml)
+      Workflow file in this repository to run against the batch branch;
+      must support workflow_dispatch (e.g. .github/workflows/ci.yml)
     required: true
   batch_size:
     description: Max PRs per batch
@@ -27,24 +27,26 @@ runs:
   steps:
     - name: Download merge-queue binary
       shell: bash
+      env:
+        VERSION: ${{ github.action_ref }}
+        OWNER: ${{ github.action_repository }}
+        RUNNER_OS_INPUT: ${{ runner.os }}
+        RUNNER_ARCH_INPUT: ${{ runner.arch }}
       run: |
-        VERSION="${{ github.action_ref }}"
-        OWNER="${{ github.action_repository }}"
-
-        case "${{ runner.os }}" in
+        case "${RUNNER_OS_INPUT}" in
           Linux)  OS="linux" ;;
           macOS)  OS="darwin" ;;
           *)
-            echo "Unsupported runner.os: ${{ runner.os }}" >&2
+            echo "Unsupported runner.os: ${RUNNER_OS_INPUT}" >&2
             exit 1
             ;;
         esac
 
-        case "${{ runner.arch }}" in
+        case "${RUNNER_ARCH_INPUT}" in
           X64)   ARCH="amd64" ;;
           ARM64) ARCH="arm64" ;;
           *)
-            echo "Unsupported runner.arch: ${{ runner.arch }}" >&2
+            echo "Unsupported runner.arch: ${RUNNER_ARCH_INPUT}" >&2
             exit 1
             ;;
         esac
@@ -54,10 +56,16 @@ runs:
         chmod +x merge-queue
     - name: Run
       shell: bash
+      env:
+        MQ_TOKEN: ${{ inputs.token }}
+        MQ_CI_WORKFLOW: ${{ inputs.ci_workflow }}
+        MQ_BATCH_SIZE: ${{ inputs.batch_size }}
+        MQ_QUEUE_LABEL: ${{ inputs.queue_label }}
+        MQ_DRY_RUN: ${{ inputs.dry_run }}
       run: |
         ./merge-queue process \
-          --token "${{ inputs.token }}" \
-          --ci-workflow "${{ inputs.ci_workflow }}" \
-          --batch-size "${{ inputs.batch_size }}" \
-          --queue-label "${{ inputs.queue_label }}" \
-          --dry-run="${{ inputs.dry_run }}"
+          --token "${MQ_TOKEN}" \
+          --ci-workflow "${MQ_CI_WORKFLOW}" \
+          --batch-size "${MQ_BATCH_SIZE}" \
+          --queue-label "${MQ_QUEUE_LABEL}" \
+          --dry-run="${MQ_DRY_RUN}"

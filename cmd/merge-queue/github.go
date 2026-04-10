@@ -123,6 +123,9 @@ func (g *GitHubClient) GetWorkflowRunStatus(ctx context.Context, workflowFile st
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
+	// Only consider runs created after we dispatched
+	createdAfter := time.Now().Add(-30 * time.Second)
+
 	for i := 0; i < 360; i++ {
 		select {
 		case <-ctx.Done():
@@ -132,6 +135,8 @@ func (g *GitHubClient) GetWorkflowRunStatus(ctx context.Context, workflowFile st
 
 		runs, _, err := g.client.Actions.ListWorkflowRunsByFileName(ctx, g.owner, g.repo, workflowFile, &github.ListWorkflowRunsOptions{
 			Branch: ref,
+			Event:  "workflow_dispatch",
+			Created: ">=" + createdAfter.Format(time.RFC3339),
 			ListOptions: github.ListOptions{
 				PerPage: 1,
 			},

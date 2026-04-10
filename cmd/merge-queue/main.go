@@ -8,6 +8,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jeduden/merge-queue-action/internal/batch"
 	"github.com/jeduden/merge-queue-action/internal/bisect"
@@ -134,7 +135,7 @@ func runProcess(ctx context.Context) error {
 		batchPRs[i] = batch.PR{Number: pr.Number, HeadRef: pr.HeadRef, Title: pr.Title}
 	}
 
-	batchID := fmt.Sprintf("%d", prs[0].Number)
+	batchID := fmt.Sprintf("%d-%d", prs[0].Number, time.Now().Unix())
 	result, err := b.CreateAndMerge(ctx, batchID, batchPRs)
 	if err != nil {
 		return err
@@ -225,7 +226,7 @@ func handleCIFailure(ctx context.Context, cfg config, q *queue.Queue, _ *batch.B
 	logf("CI failed for batch, triggering bisection for PRs: %v", prNumbers)
 
 	if !cfg.dryRun {
-		return api.TriggerWorkflow(ctx, cfg.ciWorkflow, "main", map[string]interface{}{
+		return api.TriggerWorkflow(ctx, selfWorkflowFile(), "main", map[string]interface{}{
 			"batch_prs": string(prJSON),
 			"bisect":    "true",
 		})
@@ -245,6 +246,10 @@ func runBisect(ctx context.Context) error {
 	}
 
 	prListStr := getFlag("--prs")
+	if prListStr == "" {
+		// Fall back to workflow dispatch input
+		prListStr = os.Getenv("INPUT_BATCH_PRS")
+	}
 	if prListStr == "" {
 		return fmt.Errorf("--prs is required (JSON array of PR numbers)")
 	}
@@ -330,7 +335,7 @@ func runBisect(ctx context.Context) error {
 			rightJSON, _ := json.Marshal(right)
 			logf("Dispatching bisection for right half: %v", right)
 			if !cfg.dryRun {
-				return api.TriggerWorkflow(ctx, cfg.ciWorkflow, "main", map[string]interface{}{
+				return api.TriggerWorkflow(ctx, selfWorkflowFile(), "main", map[string]interface{}{
 					"batch_prs": string(rightJSON),
 					"bisect":    "true",
 				})
@@ -359,7 +364,7 @@ func runBisect(ctx context.Context) error {
 			leftJSON, _ := json.Marshal(left)
 			logf("Left half failed, splitting further: %v", left)
 			if !cfg.dryRun {
-				return api.TriggerWorkflow(ctx, cfg.ciWorkflow, "main", map[string]interface{}{
+				return api.TriggerWorkflow(ctx, selfWorkflowFile(), "main", map[string]interface{}{
 					"batch_prs": string(leftJSON),
 					"bisect":    "true",
 				})
@@ -368,6 +373,14 @@ func runBisect(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+func selfWorkflowFile() string {
+	ref := os.Getenv("GITHUB_WORKFLOW_REF")
+	if idx := strings.Index(ref, "@"); idx > 0 {
+		return ref[:idx]
+	}
+	return ref
 }
 
 func runSetup(ctx context.Context) error {

@@ -2,9 +2,10 @@ package queue
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"sort"
-	"strings"
 )
 
 // PR represents a pull request in the merge queue.
@@ -113,10 +114,14 @@ func (q *Queue) MarkFailed(ctx context.Context, pr PR, reason string) error {
 	if q.dryRun {
 		return nil
 	}
-	// Remove active label if present
-	_ = q.api.RemoveLabel(ctx, pr.Number, QueueLabel(q.label, StateActive))
-	// Remove pending label if present
-	_ = q.api.RemoveLabel(ctx, pr.Number, QueueLabel(q.label, StatePending))
+	// Remove active label if present (ignore 404)
+	if err := q.api.RemoveLabel(ctx, pr.Number, QueueLabel(q.label, StateActive)); err != nil && !isNotFoundError(err) {
+		return fmt.Errorf("removing active label from #%d: %w", pr.Number, err)
+	}
+	// Remove pending label if present (ignore 404)
+	if err := q.api.RemoveLabel(ctx, pr.Number, QueueLabel(q.label, StatePending)); err != nil && !isNotFoundError(err) {
+		return fmt.Errorf("removing pending label from #%d: %w", pr.Number, err)
+	}
 	if err := q.api.AddLabel(ctx, pr.Number, QueueLabel(q.label, StateFailed)); err != nil {
 		return fmt.Errorf("adding failed label to #%d: %w", pr.Number, err)
 	}
@@ -132,8 +137,12 @@ func (q *Queue) Requeue(ctx context.Context, pr PR) error {
 	if q.dryRun {
 		return nil
 	}
-	_ = q.api.RemoveLabel(ctx, pr.Number, QueueLabel(q.label, StateActive))
-	_ = q.api.RemoveLabel(ctx, pr.Number, QueueLabel(q.label, StateFailed))
+	if err := q.api.RemoveLabel(ctx, pr.Number, QueueLabel(q.label, StateActive)); err != nil && !isNotFoundError(err) {
+		return fmt.Errorf("removing active label from #%d: %w", pr.Number, err)
+	}
+	if err := q.api.RemoveLabel(ctx, pr.Number, QueueLabel(q.label, StateFailed)); err != nil && !isNotFoundError(err) {
+		return fmt.Errorf("removing failed label from #%d: %w", pr.Number, err)
+	}
 	if err := q.api.AddLabel(ctx, pr.Number, QueueLabel(q.label, StatePending)); err != nil {
 		return fmt.Errorf("requeuing #%d: %w", pr.Number, err)
 	}
@@ -167,6 +176,24 @@ func (q *Queue) SetupLabels(ctx context.Context) error {
 	return nil
 }
 
+// HTTPError is an interface for errors that carry an HTTP status code.
+type HTTPError interface {
+	error
+	StatusCode() int
+}
+
 func isAlreadyExistsError(err error) bool {
-	return strings.Contains(err.Error(), "already_exists") || strings.Contains(err.Error(), "422")
+	var httpErr HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode() == http.StatusUnprocessableEntity
+	}
+	return false
+}
+
+func isNotFoundError(err error) bool {
+	var httpErr HTTPError
+	if errors.As(err, &httpErr) {
+		return httpErr.StatusCode() == http.StatusNotFound
+	}
+	return false
 }

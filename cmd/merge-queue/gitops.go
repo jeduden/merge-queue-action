@@ -43,7 +43,11 @@ func (g *GitOps) CreateBranchFromRef(ctx context.Context, branch string, baseRef
 	return nil
 }
 
-func (g *GitOps) MergeBranch(ctx context.Context, _ string, sourceBranch string, commitMsg string) (bool, error) {
+func (g *GitOps) MergeBranch(ctx context.Context, branch string, sourceBranch string, commitMsg string) (bool, error) {
+	// Ensure we're on the target branch
+	if _, err := g.run(ctx, "checkout", branch); err != nil {
+		return false, err
+	}
 	// Fetch the source branch
 	if _, err := g.run(ctx, "fetch", "origin", sourceBranch); err != nil {
 		return false, err
