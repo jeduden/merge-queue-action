@@ -81,7 +81,7 @@ func getOwnerRepo() (string, string, error) {
 	return parts[0], parts[1], nil
 }
 
-func (g *GitHubClient) ListPRsWithLabel(ctx context.Context, label string) ([]queue.PR, error) {
+func (g *GitHubClient) ListPRsWithLabel(ctx context.Context, label string, limit int) ([]queue.PR, error) {
 	var result []queue.PR
 	opts := &github.IssueListByRepoOptions{
 		State:     "open",
@@ -116,6 +116,9 @@ func (g *GitHubClient) ListPRsWithLabel(ctx context.Context, label string) ([]qu
 				Title:     pr.GetTitle(),
 				CreatedAt: pr.GetCreatedAt().Unix(),
 			})
+			if limit > 0 && len(result) >= limit {
+				return result, nil
+			}
 		}
 
 		if resp.NextPage == 0 {

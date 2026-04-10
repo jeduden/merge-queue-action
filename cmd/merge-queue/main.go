@@ -129,15 +129,31 @@ func runProcess(ctx context.Context) error {
 		return err
 	}
 
+	// Track PRs excluded from requeue (e.g. already marked failed)
+	excluded := map[int]bool{}
+
 	// requeueAll is called on failure after activation to prevent PRs
-	// from getting stuck in queue:active state.
+	// from getting stuck in queue:active state. Skips PRs already
+	// moved to queue:failed (e.g. due to merge conflicts).
 	requeueAll := func() {
 		if cfg.dryRun {
 			return
 		}
 		for _, pr := range prs {
+			if excluded[pr.Number] {
+				continue
+			}
 			if err := q.Requeue(ctx, pr); err != nil {
 				logf("Warning: failed to requeue PR #%d after error: %v", pr.Number, err)
+			}
+		}
+	}
+
+	// cleanupBranch deletes the batch branch on error paths.
+	cleanupBranch := func(branch string) {
+		if !cfg.dryRun && branch != "" {
+			if err := gitOps.DeleteBranch(ctx, branch); err != nil {
+				logf("Warning: failed to delete branch %s: %v", branch, err)
 			}
 		}
 	}
@@ -162,6 +178,7 @@ func runProcess(ctx context.Context) error {
 				if err := q.MarkFailed(ctx, pr, "merge conflict"); err != nil {
 					logf("Warning: failed to mark PR #%d as failed: %v", pr.Number, err)
 				}
+				excluded[pr.Number] = true
 				break
 			}
 		}
@@ -182,6 +199,7 @@ func runProcess(ctx context.Context) error {
 	if !cfg.dryRun {
 		dispatchedAt := time.Now()
 		if err := api.TriggerWorkflow(ctx, cfg.ciWorkflow, result.Branch, nil); err != nil {
+			cleanupBranch(result.Branch)
 			requeueAll()
 			return fmt.Errorf("triggering CI: %w", err)
 		}
@@ -189,6 +207,7 @@ func runProcess(ctx context.Context) error {
 		logf("Waiting for CI result...")
 		conclusion, err := api.GetWorkflowRunStatus(ctx, cfg.ciWorkflow, result.Branch, dispatchedAt)
 		if err != nil {
+			cleanupBranch(result.Branch)
 			requeueAll()
 			return fmt.Errorf("getting CI status: %w", err)
 		}
@@ -305,7 +324,7 @@ func runBisect(ctx context.Context) error {
 	b := batch.New(gitOps, cfg.dryRun, logf)
 
 	// Get PR details
-	allPRs, err := api.ListPRsWithLabel(ctx, queue.QueueLabel(cfg.queueLabel, queue.StateActive))
+	allPRs, err := api.ListPRsWithLabel(ctx, queue.QueueLabel(cfg.queueLabel, queue.StateActive), 0)
 	if err != nil {
 		return fmt.Errorf("listing active PRs: %w", err)
 	}
@@ -345,10 +364,12 @@ func runBisect(ctx context.Context) error {
 	if !cfg.dryRun {
 		dispatchedAt := time.Now()
 		if err := api.TriggerWorkflow(ctx, cfg.ciWorkflow, result.Branch, nil); err != nil {
+			_ = gitOps.DeleteBranch(ctx, result.Branch)
 			return fmt.Errorf("triggering CI for bisect: %w", err)
 		}
 		conclusion, err = api.GetWorkflowRunStatus(ctx, cfg.ciWorkflow, result.Branch, dispatchedAt)
 		if err != nil {
+			_ = gitOps.DeleteBranch(ctx, result.Branch)
 			return fmt.Errorf("getting CI status for bisect: %w", err)
 		}
 	}
@@ -374,10 +395,17 @@ func runBisect(ctx context.Context) error {
 			rightJSON, _ := json.Marshal(right)
 			logf("Dispatching bisection for right half: %v", right)
 			if !cfg.dryRun {
-				return api.TriggerWorkflow(ctx, selfWorkflowFile(), "main", map[string]interface{}{
+				if err := api.TriggerWorkflow(ctx, selfWorkflowFile(), "main", map[string]interface{}{
 					"batch_prs": string(rightJSON),
 					"bisect":    "true",
-				})
+				}); err != nil {
+					for _, n := range right {
+						if reqErr := q.Requeue(ctx, prMap[n]); reqErr != nil {
+							logf("Warning: failed to requeue PR #%d: %v", n, reqErr)
+						}
+					}
+					return fmt.Errorf("dispatching bisect for right half: %w", err)
+				}
 			}
 		}
 	} else {
@@ -404,10 +432,18 @@ func runBisect(ctx context.Context) error {
 			leftJSON, _ := json.Marshal(left)
 			logf("Left half failed, splitting further: %v", left)
 			if !cfg.dryRun {
-				return api.TriggerWorkflow(ctx, selfWorkflowFile(), "main", map[string]interface{}{
+				if err := api.TriggerWorkflow(ctx, selfWorkflowFile(), "main", map[string]interface{}{
 					"batch_prs": string(leftJSON),
 					"bisect":    "true",
-				})
+				}); err != nil {
+					// Requeue all affected PRs on dispatch failure
+					for _, n := range prNumbers {
+						if reqErr := q.Requeue(ctx, prMap[n]); reqErr != nil {
+							logf("Warning: failed to requeue PR #%d: %v", n, reqErr)
+						}
+					}
+					return fmt.Errorf("dispatching follow-up bisect: %w", err)
+				}
 			}
 		}
 	}

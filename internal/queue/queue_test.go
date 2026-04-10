@@ -29,7 +29,7 @@ func newMockAPI() *mockAPI {
 	}
 }
 
-func (m *mockAPI) ListPRsWithLabel(_ context.Context, label string) ([]PR, error) {
+func (m *mockAPI) ListPRsWithLabel(_ context.Context, label string, _ int) ([]PR, error) {
 	if m.failOn == "ListPRsWithLabel" {
 		return nil, fmt.Errorf("mock error")
 	}

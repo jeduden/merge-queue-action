@@ -38,7 +38,8 @@ func QueueLabel(base string, state LabelState) string {
 // GitHubAPI defines the interface for GitHub operations needed by the queue.
 type GitHubAPI interface {
 	// ListPRsWithLabel returns open PRs that have the given label, oldest first.
-	ListPRsWithLabel(ctx context.Context, label string) ([]PR, error)
+	// If limit > 0, at most limit PRs are returned.
+	ListPRsWithLabel(ctx context.Context, label string, limit int) ([]PR, error)
 
 	// AddLabel adds a label to a PR.
 	AddLabel(ctx context.Context, prNumber int, label string) error
@@ -91,7 +92,7 @@ func New(api GitHubAPI, label string, dryRun bool, logFunc func(string, ...any))
 
 // Collect returns open PRs with the queue label, sorted oldest first.
 func (q *Queue) Collect(ctx context.Context) ([]PR, error) {
-	prs, err := q.api.ListPRsWithLabel(ctx, q.label)
+	prs, err := q.api.ListPRsWithLabel(ctx, q.label, 0)
 	if err != nil {
 		return nil, fmt.Errorf("listing queued PRs: %w", err)
 	}

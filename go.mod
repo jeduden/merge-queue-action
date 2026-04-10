@@ -1,6 +1,6 @@
 module github.com/jeduden/merge-queue-action
 
-go 1.24.7
+go 1.24
 
 require github.com/google/go-github/v68 v68.0.0
 

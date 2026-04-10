@@ -59,6 +59,8 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           ci_workflow: .github/workflows/ci.yml
           batch_size: "5"
+          bisect: ${{ github.event.inputs.bisect }}
+          batch_prs: ${{ github.event.inputs.batch_prs }}
 ```
 
 ### 2. Ensure your CI workflow supports `workflow_dispatch`
@@ -70,8 +72,8 @@ on batch branches.
 ### 3. Create the queue labels (one-time)
 
 ```bash
-# Using the binary directly:
-merge-queue setup --token "$GITHUB_TOKEN"
+# Using the binary directly (GITHUB_REPOSITORY must be set):
+GITHUB_REPOSITORY=owner/repo merge-queue setup --token "$GITHUB_TOKEN"
 ```
 
 Or run the action with `setup` to create `queue`, `queue:active`, and
