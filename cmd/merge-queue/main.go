@@ -380,13 +380,27 @@ func runBisect(ctx context.Context) error {
 		if err := b.CompleteMerge(ctx, result.Branch); err != nil {
 			return err
 		}
-		for _, n := range left {
-			if pr, ok := prMap[n]; ok {
-				logf("PR #%d merged successfully", n)
-				if !cfg.dryRun {
-					_ = api.RemoveLabel(ctx, pr.Number, queue.QueueLabel(cfg.queueLabel, queue.StateActive))
-					_ = api.Comment(ctx, pr.Number, "Merge queue: merged to main")
+		// Mark conflicted PRs as failed
+		for _, cp := range result.Conflicted {
+			if pr, ok := prMap[cp.Number]; ok {
+				if err := q.MarkFailed(ctx, pr, "merge conflict"); err != nil {
+					logf("Warning: failed to mark PR #%d as failed: %v", cp.Number, err)
 				}
+			}
+		}
+		// Only clear labels for actually-merged PRs
+		mergedSet := map[int]bool{}
+		for _, mp := range result.Merged {
+			mergedSet[mp.Number] = true
+		}
+		for _, n := range left {
+			if !mergedSet[n] {
+				continue
+			}
+			logf("PR #%d merged successfully", n)
+			if !cfg.dryRun {
+				_ = api.RemoveLabel(ctx, n, queue.QueueLabel(cfg.queueLabel, queue.StateActive))
+				_ = api.Comment(ctx, n, "Merge queue: merged to main")
 			}
 		}
 
