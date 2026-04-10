@@ -14,17 +14,15 @@ type GitOps struct {
 	client *github.Client
 	owner  string
 	repo   string
-	dryRun bool
 	log    func(string, ...any)
 }
 
 // NewGitOps creates a new GitOps backed by the GitHub API.
-func NewGitOps(client *github.Client, owner, repo string, dryRun bool, logFunc func(string, ...any)) *GitOps {
+func NewGitOps(client *github.Client, owner, repo string, logFunc func(string, ...any)) *GitOps {
 	return &GitOps{
 		client: client,
 		owner:  owner,
 		repo:   repo,
-		dryRun: dryRun,
 		log:    logFunc,
 	}
 }

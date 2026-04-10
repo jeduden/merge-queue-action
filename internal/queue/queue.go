@@ -49,9 +49,14 @@ type GitHubAPI interface {
 	// Comment posts a comment on a PR.
 	Comment(ctx context.Context, prNumber int, body string) error
 
-	// ClosePR closes a pull request.
-	ClosePR(ctx context.Context, prNumber int) error
+	// CreateLabel creates a label in the repository.
+	CreateLabel(ctx context.Context, name string, color string, description string) error
+}
 
+// WorkflowAPI defines the interface for workflow dispatch and polling.
+// Kept separate from GitHubAPI to reduce coupling — the queue package
+// does not use these methods.
+type WorkflowAPI interface {
 	// TriggerWorkflow dispatches a workflow.
 	TriggerWorkflow(ctx context.Context, workflowFile string, ref string, inputs map[string]interface{}) error
 
@@ -59,8 +64,8 @@ type GitHubAPI interface {
 	// created after dispatchedAt and returns its conclusion.
 	GetWorkflowRunStatus(ctx context.Context, workflowFile string, ref string, dispatchedAt time.Time) (conclusion string, err error)
 
-	// CreateLabel creates a label in the repository.
-	CreateLabel(ctx context.Context, name string, color string, description string) error
+	// ClosePR closes a pull request.
+	ClosePR(ctx context.Context, prNumber int) error
 }
 
 // Queue manages the merge queue state machine.
@@ -100,11 +105,11 @@ func (q *Queue) Activate(ctx context.Context, prs []PR) error {
 		if q.dryRun {
 			continue
 		}
-		if err := q.api.RemoveLabel(ctx, pr.Number, QueueLabel(q.label, StatePending)); err != nil {
-			return fmt.Errorf("removing pending label from #%d: %w", pr.Number, err)
-		}
 		if err := q.api.AddLabel(ctx, pr.Number, QueueLabel(q.label, StateActive)); err != nil {
 			return fmt.Errorf("adding active label to #%d: %w", pr.Number, err)
+		}
+		if err := q.api.RemoveLabel(ctx, pr.Number, QueueLabel(q.label, StatePending)); err != nil {
+			return fmt.Errorf("removing pending label from #%d: %w", pr.Number, err)
 		}
 	}
 	return nil

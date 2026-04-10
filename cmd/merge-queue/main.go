@@ -104,7 +104,7 @@ func runProcess(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	gitOps := NewGitOps(api.client, api.owner, api.repo, cfg.dryRun, logf)
+	gitOps := NewGitOps(api.client, api.owner, api.repo, logf)
 	q := queue.New(api, cfg.queueLabel, cfg.dryRun, logf)
 	b := batch.New(gitOps, cfg.dryRun, logf)
 
@@ -155,6 +155,11 @@ func runProcess(ctx context.Context) error {
 
 	if len(result.Merged) == 0 {
 		logf("No PRs merged successfully")
+		if !cfg.dryRun {
+			if err := gitOps.DeleteBranch(ctx, result.Branch); err != nil {
+				logf("Warning: failed to delete empty batch branch: %v", err)
+			}
+		}
 		return nil
 	}
 
@@ -173,7 +178,7 @@ func runProcess(ctx context.Context) error {
 		}
 
 		if conclusion != "success" {
-			return handleCIFailure(ctx, cfg, q, b, prs, result, api)
+			return handleCIFailure(ctx, cfg, q, gitOps, prs, result, api)
 		}
 	}
 
@@ -205,8 +210,13 @@ func runProcess(ctx context.Context) error {
 	return nil
 }
 
-func handleCIFailure(ctx context.Context, cfg config, q *queue.Queue, _ *batch.Batch, prs []queue.PR, result *batch.MergeResult, api *GitHubClient) error {
+func handleCIFailure(ctx context.Context, cfg config, q *queue.Queue, gitOps *GitOps, prs []queue.PR, result *batch.MergeResult, api *GitHubClient) error {
 	logf := log.Printf
+
+	// Clean up the failed batch branch
+	if err := gitOps.DeleteBranch(ctx, result.Branch); err != nil {
+		logf("Warning: failed to delete batch branch %s: %v", result.Branch, err)
+	}
 
 	if len(result.Merged) == 1 {
 		// Single PR failed — mark it
@@ -269,7 +279,7 @@ func runBisect(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	gitOps := NewGitOps(api.client, api.owner, api.repo, cfg.dryRun, logf)
+	gitOps := NewGitOps(api.client, api.owner, api.repo, logf)
 	q := queue.New(api, cfg.queueLabel, cfg.dryRun, logf)
 	b := batch.New(gitOps, cfg.dryRun, logf)
 
@@ -285,15 +295,21 @@ func runBisect(ctx context.Context) error {
 		prMap[pr.Number] = pr
 	}
 
+	// Validate all bisect PRs exist in active queue
+	for _, n := range prNumbers {
+		if _, ok := prMap[n]; !ok {
+			return fmt.Errorf("bisect PR #%d not found in active queue", n)
+		}
+	}
+
 	left, right := bisect.Split(prNumbers)
 	logf("Bisecting: left=%v, right=%v", left, right)
 
 	// Build batch from left half
-	var leftPRs []batch.PR
+	leftPRs := make([]batch.PR, 0, len(left))
 	for _, n := range left {
-		if pr, ok := prMap[n]; ok {
-			leftPRs = append(leftPRs, batch.PR{Number: pr.Number, HeadRef: pr.HeadRef, Title: pr.Title})
-		}
+		pr := prMap[n]
+		leftPRs = append(leftPRs, batch.PR{Number: pr.Number, HeadRef: pr.HeadRef, Title: pr.Title})
 	}
 
 	batchID := fmt.Sprintf("bisect-%d-%d", left[0], time.Now().Unix())
@@ -344,21 +360,22 @@ func runBisect(ctx context.Context) error {
 			}
 		}
 	} else {
-		// Left half fails
+		// Left half fails — clean up bisect branch
+		if err := gitOps.DeleteBranch(ctx, result.Branch); err != nil {
+			logf("Warning: failed to delete bisect branch %s: %v", result.Branch, err)
+		}
+
 		if len(left) == 1 {
 			// Single PR is the culprit
-			if pr, ok := prMap[left[0]]; ok {
-				logf("PR #%d is the culprit", left[0])
-				if err := q.MarkFailed(ctx, pr, "CI failed (identified via bisection)"); err != nil {
-					return err
-				}
+			pr := prMap[left[0]]
+			logf("PR #%d is the culprit", left[0])
+			if err := q.MarkFailed(ctx, pr, "CI failed (identified via bisection)"); err != nil {
+				return err
 			}
 			// Requeue right half
 			for _, n := range right {
-				if pr, ok := prMap[n]; ok {
-					if err := q.Requeue(ctx, pr); err != nil {
-						logf("Warning: failed to requeue PR #%d: %v", n, err)
-					}
+				if err := q.Requeue(ctx, prMap[n]); err != nil {
+					logf("Warning: failed to requeue PR #%d: %v", n, err)
 				}
 			}
 		} else {

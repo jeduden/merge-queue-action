@@ -1,5 +1,7 @@
 name: merge-queue
-description: Bors-style merge queue with batching and bisection
+description: >-
+  Bors-style merge queue with batching and bisection.
+  All git operations use the GitHub API server-side — no checkout needed.
 
 inputs:
   token:
@@ -20,6 +22,15 @@ inputs:
     default: queue
   dry_run:
     description: Log intent without mutating
+    default: "false"
+  batch_prs:
+    description: >-
+      JSON array of PR numbers for bisection (set automatically
+      via workflow_dispatch, not intended for manual use)
+    default: ""
+  bisect:
+    description: >-
+      Run in bisect mode (set automatically via workflow_dispatch)
     default: "false"
 
 runs:
@@ -62,10 +73,20 @@ runs:
         MQ_BATCH_SIZE: ${{ inputs.batch_size }}
         MQ_QUEUE_LABEL: ${{ inputs.queue_label }}
         MQ_DRY_RUN: ${{ inputs.dry_run }}
+        MQ_BISECT: ${{ inputs.bisect }}
+        INPUT_BATCH_PRS: ${{ inputs.batch_prs }}
       run: |
-        ./merge-queue process \
-          --token "${MQ_TOKEN}" \
-          --ci-workflow "${MQ_CI_WORKFLOW}" \
-          --batch-size "${MQ_BATCH_SIZE}" \
-          --queue-label "${MQ_QUEUE_LABEL}" \
-          --dry-run="${MQ_DRY_RUN}"
+        if [ "${MQ_BISECT}" = "true" ]; then
+          ./merge-queue bisect \
+            --token "${MQ_TOKEN}" \
+            --ci-workflow "${MQ_CI_WORKFLOW}" \
+            --queue-label "${MQ_QUEUE_LABEL}" \
+            --dry-run="${MQ_DRY_RUN}"
+        else
+          ./merge-queue process \
+            --token "${MQ_TOKEN}" \
+            --ci-workflow "${MQ_CI_WORKFLOW}" \
+            --batch-size "${MQ_BATCH_SIZE}" \
+            --queue-label "${MQ_QUEUE_LABEL}" \
+            --dry-run="${MQ_DRY_RUN}"
+        fi

@@ -98,7 +98,7 @@ func (g *GitHubClient) ListPRsWithLabel(ctx context.Context, label string) ([]qu
 			}
 			result = append(result, queue.PR{
 				Number:    pr.GetNumber(),
-				HeadRef:   pr.GetHead().GetRef(),
+				HeadRef:   pr.GetHead().GetLabel(),
 				HeadSHA:   pr.GetHead().GetSHA(),
 				Title:     pr.GetTitle(),
 				CreatedAt: pr.GetCreatedAt().Unix(),

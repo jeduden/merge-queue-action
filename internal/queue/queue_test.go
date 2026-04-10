@@ -4,24 +4,15 @@ import (
 	"context"
 	"fmt"
 	"testing"
-	"time"
 )
 
 // mockAPI implements GitHubAPI for testing.
 type mockAPI struct {
-	prs          map[string][]PR // label -> PRs
-	labels       map[int][]string
-	comments     map[int][]string
-	closedPRs    []int
-	dispatches []dispatch
+	prs           map[string][]PR // label -> PRs
+	labels        map[int][]string
+	comments      map[int][]string
 	createdLabels []createdLabel
-	failOn       string // method name to fail on
-}
-
-type dispatch struct {
-	workflowFile string
-	ref          string
-	inputs       map[string]interface{}
+	failOn        string // method name to fail on
 }
 
 type createdLabel struct {
@@ -73,20 +64,6 @@ func (m *mockAPI) Comment(_ context.Context, prNumber int, body string) error {
 	}
 	m.comments[prNumber] = append(m.comments[prNumber], body)
 	return nil
-}
-
-func (m *mockAPI) ClosePR(_ context.Context, prNumber int) error {
-	m.closedPRs = append(m.closedPRs, prNumber)
-	return nil
-}
-
-func (m *mockAPI) TriggerWorkflow(_ context.Context, workflowFile string, ref string, inputs map[string]interface{}) error {
-	m.dispatches = append(m.dispatches, dispatch{workflowFile, ref, inputs})
-	return nil
-}
-
-func (m *mockAPI) GetWorkflowRunStatus(_ context.Context, _ string, _ string, _ time.Time) (string, error) {
-	return "success", nil
 }
 
 func (m *mockAPI) CreateLabel(_ context.Context, name string, color string, desc string) error {
