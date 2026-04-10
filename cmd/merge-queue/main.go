@@ -358,6 +358,30 @@ func runBisect(ctx context.Context) error {
 		return fmt.Errorf("creating bisect batch: %w", err)
 	}
 
+	// Handle conflicts immediately — mark failed and exclude from bisect
+	for _, cp := range result.Conflicted {
+		if pr, ok := prMap[cp.Number]; ok {
+			if err := q.MarkFailed(ctx, pr, "merge conflict"); err != nil {
+				logf("Warning: failed to mark PR #%d as failed: %v", cp.Number, err)
+			}
+		}
+	}
+
+	// Narrow left to only actually-merged PRs
+	mergedLeft := make([]int, 0, len(result.Merged))
+	for _, mp := range result.Merged {
+		mergedLeft = append(mergedLeft, mp.Number)
+	}
+	left = mergedLeft
+
+	if len(left) == 0 {
+		logf("No PRs merged in bisect batch, nothing to test")
+		if !cfg.dryRun {
+			_ = gitOps.DeleteBranch(ctx, result.Branch)
+		}
+		return nil
+	}
+
 	// Run CI on left half
 	logf("Running CI on left half: %v", left)
 	conclusion := "success"
@@ -380,23 +404,7 @@ func runBisect(ctx context.Context) error {
 		if err := b.CompleteMerge(ctx, result.Branch); err != nil {
 			return err
 		}
-		// Mark conflicted PRs as failed
-		for _, cp := range result.Conflicted {
-			if pr, ok := prMap[cp.Number]; ok {
-				if err := q.MarkFailed(ctx, pr, "merge conflict"); err != nil {
-					logf("Warning: failed to mark PR #%d as failed: %v", cp.Number, err)
-				}
-			}
-		}
-		// Only clear labels for actually-merged PRs
-		mergedSet := map[int]bool{}
-		for _, mp := range result.Merged {
-			mergedSet[mp.Number] = true
-		}
 		for _, n := range left {
-			if !mergedSet[n] {
-				continue
-			}
 			logf("PR #%d merged successfully", n)
 			if !cfg.dryRun {
 				_ = api.RemoveLabel(ctx, n, queue.QueueLabel(cfg.queueLabel, queue.StateActive))
