@@ -99,7 +99,10 @@ func runProcess(ctx context.Context) error {
 		return fmt.Errorf("--ci-workflow is required")
 	}
 
-	api := NewGitHubClient(cfg.token)
+	api, err := NewGitHubClient(cfg.token)
+	if err != nil {
+		return err
+	}
 	gitOps := NewGitOps(cfg.dryRun, logf)
 	q := queue.New(api, cfg.queueLabel, cfg.dryRun, logf)
 	b := batch.New(gitOps, cfg.dryRun, logf)
@@ -237,6 +240,9 @@ func runBisect(ctx context.Context) error {
 	if cfg.token == "" {
 		return fmt.Errorf("--token is required")
 	}
+	if cfg.ciWorkflow == "" {
+		return fmt.Errorf("--ci-workflow is required")
+	}
 
 	prListStr := getFlag("--prs")
 	if prListStr == "" {
@@ -253,7 +259,10 @@ func runBisect(ctx context.Context) error {
 		return nil
 	}
 
-	api := NewGitHubClient(cfg.token)
+	api, err := NewGitHubClient(cfg.token)
+	if err != nil {
+		return err
+	}
 	gitOps := NewGitOps(cfg.dryRun, logf)
 	q := queue.New(api, cfg.queueLabel, cfg.dryRun, logf)
 	b := batch.New(gitOps, cfg.dryRun, logf)
@@ -369,7 +378,10 @@ func runSetup(ctx context.Context) error {
 		return fmt.Errorf("--token is required")
 	}
 
-	api := NewGitHubClient(cfg.token)
+	api, err := NewGitHubClient(cfg.token)
+	if err != nil {
+		return err
+	}
 	q := queue.New(api, cfg.queueLabel, cfg.dryRun, logf)
 
 	logf("Setting up labels for merge queue")

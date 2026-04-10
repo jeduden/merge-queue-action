@@ -30,8 +30,27 @@ runs:
       run: |
         VERSION="${{ github.action_ref }}"
         OWNER="${{ github.action_repository }}"
+
+        case "${{ runner.os }}" in
+          Linux)  OS="linux" ;;
+          macOS)  OS="darwin" ;;
+          *)
+            echo "Unsupported runner.os: ${{ runner.os }}" >&2
+            exit 1
+            ;;
+        esac
+
+        case "${{ runner.arch }}" in
+          X64)   ARCH="amd64" ;;
+          ARM64) ARCH="arm64" ;;
+          *)
+            echo "Unsupported runner.arch: ${{ runner.arch }}" >&2
+            exit 1
+            ;;
+        esac
+
         curl -fsSL -o merge-queue \
-          "https://github.com/${OWNER}/releases/download/${VERSION}/merge-queue-linux-amd64"
+          "https://github.com/${OWNER}/releases/download/${VERSION}/merge-queue-${OS}-${ARCH}"
         chmod +x merge-queue
     - name: Run
       shell: bash

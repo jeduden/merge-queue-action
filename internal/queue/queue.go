@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // PR represents a pull request in the merge queue.
@@ -132,6 +133,7 @@ func (q *Queue) Requeue(ctx context.Context, pr PR) error {
 		return nil
 	}
 	_ = q.api.RemoveLabel(ctx, pr.Number, QueueLabel(q.label, StateActive))
+	_ = q.api.RemoveLabel(ctx, pr.Number, QueueLabel(q.label, StateFailed))
 	if err := q.api.AddLabel(ctx, pr.Number, QueueLabel(q.label, StatePending)); err != nil {
 		return fmt.Errorf("requeuing #%d: %w", pr.Number, err)
 	}
@@ -155,8 +157,16 @@ func (q *Queue) SetupLabels(ctx context.Context) error {
 			continue
 		}
 		if err := q.api.CreateLabel(ctx, l.name, l.color, l.desc); err != nil {
-			return fmt.Errorf("creating label %q: %w", l.name, err)
+			// Ignore "already_exists" errors to make setup idempotent
+			if !isAlreadyExistsError(err) {
+				return fmt.Errorf("creating label %q: %w", l.name, err)
+			}
+			q.logFunc("Label %q already exists, skipping", l.name)
 		}
 	}
 	return nil
+}
+
+func isAlreadyExistsError(err error) bool {
+	return strings.Contains(err.Error(), "already_exists") || strings.Contains(err.Error(), "422")
 }

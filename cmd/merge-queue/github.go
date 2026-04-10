@@ -19,28 +19,31 @@ type GitHubClient struct {
 }
 
 // NewGitHubClient creates a new GitHub API client.
-func NewGitHubClient(token string) *GitHubClient {
+func NewGitHubClient(token string) (*GitHubClient, error) {
 	client := github.NewClient(nil).WithAuthToken(token)
 
-	owner, repo := getOwnerRepo()
+	owner, repo, err := getOwnerRepo()
+	if err != nil {
+		return nil, err
+	}
 
 	return &GitHubClient{
 		client: client,
 		owner:  owner,
 		repo:   repo,
-	}
+	}, nil
 }
 
-func getOwnerRepo() (string, string) {
+func getOwnerRepo() (string, string, error) {
 	repo := os.Getenv("GITHUB_REPOSITORY")
 	if repo == "" {
-		return "", ""
+		return "", "", fmt.Errorf("GITHUB_REPOSITORY environment variable is not set")
 	}
 	parts := strings.SplitN(repo, "/", 2)
 	if len(parts) != 2 {
-		return "", ""
+		return "", "", fmt.Errorf("GITHUB_REPOSITORY %q is not in owner/repo format", repo)
 	}
-	return parts[0], parts[1]
+	return parts[0], parts[1], nil
 }
 
 func (g *GitHubClient) ListPRsWithLabel(ctx context.Context, label string) ([]queue.PR, error) {
@@ -117,9 +120,15 @@ func (g *GitHubClient) TriggerWorkflow(ctx context.Context, workflowFile string,
 }
 
 func (g *GitHubClient) GetWorkflowRunStatus(ctx context.Context, workflowFile string, ref string) (string, error) {
-	// Poll for workflow run completion
-	for i := 0; i < 360; i++ { // max ~60 min at 10s intervals
-		time.Sleep(10 * time.Second)
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+
+	for i := 0; i < 360; i++ {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-ticker.C:
+		}
 
 		runs, _, err := g.client.Actions.ListWorkflowRunsByFileName(ctx, g.owner, g.repo, workflowFile, &github.ListWorkflowRunsOptions{
 			Branch: ref,
