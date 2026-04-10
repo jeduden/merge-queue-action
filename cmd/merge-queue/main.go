@@ -104,7 +104,7 @@ func runProcess(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	gitOps := NewGitOps(cfg.dryRun, logf)
+	gitOps := NewGitOps(api.client, api.owner, api.repo, cfg.dryRun, logf)
 	q := queue.New(api, cfg.queueLabel, cfg.dryRun, logf)
 	b := batch.New(gitOps, cfg.dryRun, logf)
 
@@ -268,7 +268,7 @@ func runBisect(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	gitOps := NewGitOps(cfg.dryRun, logf)
+	gitOps := NewGitOps(api.client, api.owner, api.repo, cfg.dryRun, logf)
 	q := queue.New(api, cfg.queueLabel, cfg.dryRun, logf)
 	b := batch.New(gitOps, cfg.dryRun, logf)
 
