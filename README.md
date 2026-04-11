@@ -110,7 +110,7 @@ the ruleset for the merge-queue actor:
    - If using a **PAT (classic or fine-grained)**: add the user who owns
      the PAT, or add the user to a team and add that team.
 4. Enable whichever rules you want for regular development (require PR,
-   require status checks, require linear history, etc.).
+   require status checks, etc.).
 5. Save.
 
 The bypass ensures the action's `UpdateRef` call (fast-forward) is not
