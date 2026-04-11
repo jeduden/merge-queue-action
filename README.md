@@ -54,14 +54,22 @@ jobs:
   queue:
     runs-on: ubuntu-latest
     steps:
-      - uses: jeduden/merge-queue-action@v1
+      - uses: jeduden/merge-queue-action@v0.1.0
         with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+          token: ${{ secrets.MERGE_QUEUE_TOKEN }}
           ci_workflow: .github/workflows/ci.yml
           batch_size: "5"
           bisect: ${{ github.event.inputs.bisect }}
           batch_prs: ${{ github.event.inputs.batch_prs }}
 ```
+
+> **Note on tokens:** The default `GITHUB_TOKEN` cannot trigger
+> `workflow_dispatch` events on other workflows (GitHub prevents this to
+> avoid recursive loops). Since the action dispatches your CI workflow on
+> batch branches, you need a Personal Access Token (PAT) or GitHub App
+> token with `contents:write`, `pull-requests:write`, `actions:write`,
+> and `issues:write` scopes. Store it as a repository secret (e.g.
+> `MERGE_QUEUE_TOKEN`).
 
 ### 2. Ensure your CI workflow supports `workflow_dispatch`
 
@@ -88,7 +96,7 @@ it with any other queued PRs, runs CI, and merges on success.
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `token` | yes | — | GitHub token with `contents:write`, `pull-requests:write`, `actions:write`, `issues:write` |
+| `token` | yes | — | PAT or GitHub App token with `contents:write`, `pull-requests:write`, `actions:write`, `issues:write` (the default `GITHUB_TOKEN` cannot dispatch workflows) |
 | `ci_workflow` | yes | — | Workflow file supporting `workflow_dispatch` (e.g. `.github/workflows/ci.yml`) |
 | `batch_size` | no | `5` | Max PRs per batch |
 | `queue_label` | no | `queue` | Label that enqueues a PR |
