@@ -240,6 +240,36 @@ combined commit. The concurrency group serialises _workflow runs_, not
 individual PRs — the batch size is determined by how many PRs carry the
 `queue` label at the moment a run starts collecting.
 
+#### When does batching actually happen?
+
+With only the `pull_request: labeled` trigger, each label event fires
+its own workflow run. Because the concurrency group serialises runs,
+**in practice each run usually processes just one PR**. Batching only
+occurs when multiple PRs accumulate the `queue` label while an earlier
+run is still in progress — the next pending run will pick them all up.
+
+To get more consistent batching, add a `schedule` trigger so the
+workflow runs periodically and scoops up all queued PRs at once:
+
+```yaml
+on:
+  pull_request:
+    types: [labeled]
+  schedule:
+    - cron: "*/5 * * * *"   # every 5 minutes
+  workflow_dispatch:
+    inputs:
+      batch_prs:
+        type: string
+        required: false
+      bisect:
+        type: boolean
+        default: false
+```
+
+With a schedule trigger, PRs labelled between runs accumulate and are
+tested together in a single batch, reducing total CI runs.
+
 > **What if `cancel-in-progress` is `true`?** Run A would be cancelled
 > when run B is triggered, leaving PR #1 stuck in `queue:active` with
 > no run to finish it. Always use `cancel-in-progress: false`.
