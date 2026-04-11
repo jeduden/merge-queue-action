@@ -32,10 +32,12 @@ jobs:
           go-version-file: go.mod
           cache: false
       - run: |
+          VERSION="${{ inputs.tag || github.ref_name }}"
+          COMMIT="$(git rev-parse --short HEAD)"
           GOOS=${{ matrix.goos }} \
           GOARCH=${{ matrix.goarch }} \
           go build -trimpath \
-            -ldflags="-s -w" \
+            -ldflags="-s -w -X main.Version=${VERSION} -X main.CommitHash=${COMMIT}" \
             -o merge-queue-${{ matrix.goos }}-${{ matrix.goarch }} \
             ./cmd/merge-queue
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
