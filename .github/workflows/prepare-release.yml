@@ -53,3 +53,12 @@ jobs:
 
           git tag "${VERSION}"
           git push origin main "${VERSION}"
+
+  release:
+    needs: prepare
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ inputs.version }}
+    permissions:
+      contents: write
+      actions: read
