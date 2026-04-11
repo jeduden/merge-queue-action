@@ -222,7 +222,7 @@ func (g *GitHubClient) GetActorPermission(ctx context.Context, username string) 
 		// return 404 or 403. Treat these as "no permission" so the
 		// caller can skip gracefully instead of failing the workflow.
 		var ghErr *github.ErrorResponse
-		if errors.As(err, &ghErr) {
+		if errors.As(err, &ghErr) && ghErr.Response != nil {
 			switch ghErr.Response.StatusCode {
 			case http.StatusNotFound, http.StatusForbidden:
 				return "none", nil
