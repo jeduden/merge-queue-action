@@ -41,10 +41,11 @@ server-side through the GitHub REST API:
 2. **Server-side merges** — Each PR's head ref is merged into the batch
    branch using the
    [Merge a branch](https://docs.github.com/en/rest/branches/branches#merge-a-branch)
-   API (`POST /repos/{owner}/{repo}/merges`). This creates a merge commit
-   on the batch branch for each PR (message: `Merge PR #N: <title>`).
-   If a PR produces a merge conflict (HTTP 409), it is skipped and
-   labelled `queue:failed`; remaining PRs continue.
+   API (`POST /repos/{owner}/{repo}/merges`). This merges each PR into
+   the batch branch, typically producing a merge commit when the histories
+   have diverged (using the message `Merge PR #N: <title>` when such a
+   merge commit is created). If a PR produces a merge conflict (HTTP 409),
+   it is skipped and labelled `queue:failed`; remaining PRs continue.
 
 3. **CI verification** — The CI workflow is triggered on the batch branch
    via `workflow_dispatch`. Because the batch branch contains the result
@@ -89,7 +90,8 @@ of itself in `bisect` mode via `workflow_dispatch`:
 6. **Left fails, multiple PRs** — dispatch another bisection to split the
    left half further.
 
-Worst case: `ceil(log₂(N)) + 1` CI runs to isolate a single failing PR.
+Worst case: after the initial failed full-batch CI run, bisection needs
+`ceil(log₂(N)) + 1` additional CI runs to isolate a single failing PR.
 
 ## Repository setup
 
@@ -142,11 +144,11 @@ If you use legacy branch protection instead of rulesets:
 
 #### What about "Require linear history"?
 
-The batch branch contains merge commits (one per PR merged into the batch).
-When `main` is fast-forwarded to the batch branch, those merge commits
-land on `main`. If you enable **"Require linear history"** in your ruleset
-or branch protection, the fast-forward will be rejected because merge
-commits are present.
+When batching multiple independent PRs, the batch branch will typically
+contain merge commits. When `main` is fast-forwarded to the batch branch,
+those merge commits land on `main`. If you enable **"Require linear
+history"** in your ruleset or branch protection, the fast-forward will be
+rejected because merge commits are present.
 
 **Do not enable "Require linear history"** unless you modify the action
 to rebase/squash instead of merge. The action's merge strategy produces a
@@ -157,12 +159,12 @@ original branch context.
 
 | Setting | Compatible? | Notes |
 |---------|-------------|-------|
-| Require a pull request before merging | Yes | Merge-queue actor must be in the bypass list |
-| Require status checks to pass | Yes | Merge-queue actor must be in the bypass list |
+| Require a pull request before merging | Yes | Merge-queue actor must be in the bypass list so the direct ref update is allowed |
+| Require status checks to pass | Yes | Ensure required checks run on the batch commit SHA; bypass only if you intentionally trust the action alone |
 | Require linear history | **No** | Batch branches contain merge commits |
 | Require signed commits | Depends | The API-created merge commits are unsigned; bypass the actor or disable |
 | Restrict who can push | Yes | Merge-queue actor must be allowed |
-| Require deployments to succeed | Yes | Merge-queue actor must be in the bypass list |
+| Require deployments to succeed | Yes | Ensure required deployments are reported on the batch commit SHA; bypass only if intentional |
 | Block force pushes | Yes | The action uses `force=false` (fast-forward only) |
 
 ### Token requirements
