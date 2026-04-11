@@ -52,8 +52,10 @@ server-side through the GitHub REST API:
    exact combined commit that will become `main`** — not against each PR
    in isolation. This guarantees that the commit landing on `main` has
    passed CI. The action polls
-   `GET /repos/{owner}/{repo}/actions/workflows/{id}/runs` every 10 seconds
-   (up to 1 hour) until the run completes.
+   `GET /repos/{owner}/{repo}/actions/workflows/{workflow_id}/runs` every
+   10 seconds (up to 1 hour) until the run completes, where
+   `{workflow_id}` is the workflow file path provided by the
+   `ci_workflow` input.
 
 4. **Fast-forward to main** — When CI passes, the action updates `main` to
    point to the batch branch's HEAD SHA using the
@@ -104,7 +106,7 @@ that enforces your desired checks for normal development, then **bypass**
 the ruleset for the merge-queue actor:
 
 1. Go to **Settings → Rules → Rulesets → New ruleset → New branch ruleset**.
-2. Set **Target branches** to `main` (or your default branch).
+2. Set **Target branches** to `main`.
 3. Under **Bypass list**, add the actor whose token the action uses:
    - If using a **GitHub App**: add the app (e.g. "My Merge Queue App").
    - If using a **PAT (classic or fine-grained)**: add the user who owns
