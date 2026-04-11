@@ -54,7 +54,7 @@ jobs:
   queue:
     runs-on: ubuntu-latest
     steps:
-      - uses: jeduden/merge-queue-action@v0.1.0
+      - uses: jeduden/merge-queue-action@v0.2.0
         with:
           token: ${{ secrets.MERGE_QUEUE_TOKEN }}
           ci_workflow: .github/workflows/ci.yml
