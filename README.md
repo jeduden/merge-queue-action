@@ -13,7 +13,8 @@ Go binary.
 1. PRs labelled `queue` are collected oldest-first.
 2. Up to `batch_size` PRs are merged (server-side) into a temporary
    `merge-queue/batch-*` branch.
-3. CI is triggered on the batch branch via `workflow_dispatch`.
+3. CI is triggered on the batch branch (the merged result of all PRs
+   combined with `main`) via `workflow_dispatch`.
 4. **CI passes** — `main` is fast-forwarded, batch branch deleted.
 5. **CI fails, batch = 1** — the PR is labelled `queue:failed` with a comment.
 6. **CI fails, batch > 1** — the action dispatches itself to bisect the batch,
@@ -46,7 +47,11 @@ server-side through the GitHub REST API:
    labelled `queue:failed`; remaining PRs continue.
 
 3. **CI verification** — The CI workflow is triggered on the batch branch
-   via `workflow_dispatch`. The action polls
+   via `workflow_dispatch`. Because the batch branch contains the result
+   of merging every queued PR on top of `main`, **CI runs against the
+   exact combined commit that will become `main`** — not against each PR
+   in isolation. This guarantees that the commit landing on `main` has
+   passed CI. The action polls
    `GET /repos/{owner}/{repo}/actions/workflows/{id}/runs` every 10 seconds
    (up to 1 hour) until the run completes.
 
