@@ -2,6 +2,12 @@ name: Release
 on:
   push:
     tags: [v*]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and release (e.g. v0.2.0)"
+        required: true
+        type: string
   workflow_call:
     inputs:
       tag:
@@ -23,6 +29,15 @@ jobs:
     permissions:
       contents: read
     steps:
+      - name: Validate tag format
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::Invalid tag format '${TAG}' — expected vX.Y.Z" >&2
+            exit 1
+          fi
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ inputs.tag || github.ref }}
@@ -31,11 +46,14 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - run: |
+      - env:
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          COMMIT="$(git rev-parse --short HEAD)"
           GOOS=${{ matrix.goos }} \
           GOARCH=${{ matrix.goarch }} \
           go build -trimpath \
-            -ldflags="-s -w" \
+            -ldflags="-s -w -X main.Version=${VERSION} -X main.CommitHash=${COMMIT}" \
             -o merge-queue-${{ matrix.goos }}-${{ matrix.goarch }} \
             ./cmd/merge-queue
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

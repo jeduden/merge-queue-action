@@ -15,24 +15,35 @@ import (
 	"github.com/jeduden/merge-queue-action/internal/queue"
 )
 
+// Version and CommitHash are set at build time via -ldflags.
+var (
+	Version    = "dev"
+	CommitHash = "unknown"
+)
+
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintf(os.Stderr, "Usage: merge-queue <process|bisect|setup>\n")
+		fmt.Fprintf(os.Stderr, "Usage: merge-queue <process|bisect|setup|version>\n")
 		os.Exit(1)
 	}
 
 	ctx := context.Background()
 
 	switch os.Args[1] {
+	case "version":
+		fmt.Printf("merge-queue %s (%s)\n", Version, CommitHash)
 	case "process":
+		log.Printf("merge-queue %s (%s)", Version, CommitHash)
 		if err := runProcess(ctx); err != nil {
 			log.Fatalf("process: %v", err)
 		}
 	case "bisect":
+		log.Printf("merge-queue %s (%s)", Version, CommitHash)
 		if err := runBisect(ctx); err != nil {
 			log.Fatalf("bisect: %v", err)
 		}
 	case "setup":
+		log.Printf("merge-queue %s (%s)", Version, CommitHash)
 		if err := runSetup(ctx); err != nil {
 			log.Fatalf("setup: %v", err)
 		}
