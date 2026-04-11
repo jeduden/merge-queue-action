@@ -217,6 +217,33 @@ This ensures that when multiple PRs are labelled in quick succession,
 the runs queue up rather than cancelling each other. Each run processes
 whatever is in the queue at that moment.
 
+#### Example: overlapping label events
+
+Consider this timeline:
+
+1. PR #1 is labelled `queue` → workflow run **A** starts.
+2. Run A collects PR #1, moves it to `queue:active`, creates a batch
+   branch, triggers CI, and **blocks while polling** for the CI result.
+3. While CI is still running, PR #2 is labelled `queue` → workflow
+   run **B** is triggered.
+4. Because of the concurrency group, GitHub Actions holds run B in
+   **pending** state — it cannot start until run A finishes.
+5. Run A's CI completes. PR #1 is merged to `main` (or marked failed).
+   Run A exits.
+6. Run B starts. It collects PRs with the `queue` label — PR #1 no
+   longer has it (it was moved to `queue:active` then removed), so only
+   PR #2 is collected. Run B processes PR #2 normally.
+
+If PR #2 had been labelled before run A collected PRs (step 2), both
+PRs would have been batched together in run A and tested as a single
+combined commit. The concurrency group serialises _workflow runs_, not
+individual PRs — the batch size is determined by how many PRs carry the
+`queue` label at the moment a run starts collecting.
+
+> **What if `cancel-in-progress` is `true`?** Run A would be cancelled
+> when run B is triggered, leaving PR #1 stuck in `queue:active` with
+> no run to finish it. Always use `cancel-in-progress: false`.
+
 ## Quick start
 
 ### 1. Create a merge-queue workflow
