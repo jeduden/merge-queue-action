@@ -53,27 +53,3 @@ jobs:
           files: |
             merge-queue-*/merge-queue-*
             checksums.txt
-
-  update-readme:
-    needs: release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          ref: main
-      - name: Update README version reference
-        env:
-          TAG: ${{ github.ref_name }}
-        run: |
-          sed -i "s|jeduden/merge-queue-action@v[0-9][0-9.]*|jeduden/merge-queue-action@${TAG}|g" README.md
-          if git diff --quiet README.md; then
-            echo "README already up to date"
-          else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add README.md
-            git commit -m "Update README action reference to ${TAG}"
-            git push
-          fi
