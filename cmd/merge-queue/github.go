@@ -212,3 +212,13 @@ func (g *GitHubClient) CreateLabel(ctx context.Context, name string, color strin
 	})
 	return wrapErr(err)
 }
+
+// GetActorPermission returns the repository permission level for the given user.
+// Possible values: "admin", "maintain", "write", "triage", "read", "none".
+func (g *GitHubClient) GetActorPermission(ctx context.Context, username string) (string, error) {
+	perm, _, err := g.client.Repositories.GetPermissionLevel(ctx, g.owner, g.repo, username)
+	if err != nil {
+		return "", fmt.Errorf("checking permission for %s: %w", username, err)
+	}
+	return perm.GetPermission(), nil
+}

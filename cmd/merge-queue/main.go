@@ -89,6 +89,17 @@ func getFlag(name string) string {
 	return ""
 }
 
+// hasWritePermission returns true if the permission level grants write access
+// (write, maintain, or admin).
+func hasWritePermission(perm string) bool {
+	switch perm {
+	case "write", "maintain", "admin":
+		return true
+	default:
+		return false
+	}
+}
+
 func runProcess(ctx context.Context) error {
 	cfg := loadConfig()
 	logf := log.Printf
@@ -104,6 +115,21 @@ func runProcess(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+
+	// Check actor permission before processing.
+	// GITHUB_ACTOR is set by GitHub Actions to the user who triggered the workflow.
+	if actor := os.Getenv("GITHUB_ACTOR"); actor != "" {
+		perm, err := api.GetActorPermission(ctx, actor)
+		if err != nil {
+			return fmt.Errorf("checking actor permission: %w", err)
+		}
+		if !hasWritePermission(perm) {
+			logf("Actor %s has %q permission, write or above required — skipping", actor, perm)
+			return nil
+		}
+		logf("Actor %s has %q permission, proceeding", actor, perm)
+	}
+
 	gitOps := NewGitOps(api.client, api.owner, api.repo, logf)
 	q := queue.New(api, cfg.queueLabel, cfg.dryRun, logf)
 	b := batch.New(gitOps, cfg.dryRun, logf)
