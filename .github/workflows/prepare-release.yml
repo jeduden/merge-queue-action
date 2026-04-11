@@ -18,6 +18,7 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: main
+          persist-credentials: false
 
       - name: Validate version format
         env:
@@ -37,9 +38,11 @@ jobs:
       - name: Commit, tag, and push
         env:
           VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }}.git"
 
           if git diff --quiet README.md; then
             echo "README already references ${VERSION}"
