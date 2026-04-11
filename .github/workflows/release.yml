@@ -37,8 +37,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: false
-      - run: |
-          VERSION="${{ inputs.tag || github.ref_name }}"
+      - env:
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
           COMMIT="$(git rev-parse --short HEAD)"
           GOOS=${{ matrix.goos }} \
           GOARCH=${{ matrix.goarch }} \
