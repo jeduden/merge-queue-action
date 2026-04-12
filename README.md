@@ -342,8 +342,9 @@ gh label create queue:failed --repo owner/repo
 
 ### 5. Use it
 
-Add the `queue` label to a PR. The merge-queue workflow triggers, batches
-it with any other queued PRs, runs CI, and merges on success.
+Add your queue label (default `queue`) to a PR. The merge-queue workflow
+triggers, batches it with any other queued PRs, runs CI, and merges on
+success.
 
 ## Inputs
 
