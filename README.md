@@ -5,8 +5,8 @@ enqueue it, and the action batches PRs together, runs CI on the batch, and
 fast-forwards `main`. When a batch fails, binary bisection isolates the
 culprit in `ceil(log2(N)) + 1` CI runs.
 
-No external server. No GitHub native merge queue. Distributed as a pre-compiled
-Go binary.
+No external server. No GitHub native merge queue. Runs as a single
+Node.js-based GitHub Action — no compiled binary required.
 
 ## How it works
 
@@ -351,48 +351,40 @@ it with any other queued PRs, runs CI, and merges on success.
 | `queue_label` | no | `queue` | Label that enqueues a PR |
 | `dry_run` | no | `false` | Log intent without mutating |
 
-## CLI
-
-The action wraps a Go binary with three subcommands:
-
-```
-merge-queue process   # Main flow: collect, batch, verify, merge
-merge-queue bisect    # Bisection flow (called via dispatch)
-merge-queue setup     # Create labels in a repo
-```
-
 ## Development
 
 ### Prerequisites
 
-- Go 1.24+
+- Node.js 24+
 
 ### Build
 
 ```bash
-go build -o merge-queue ./cmd/merge-queue
+npm run build
 ```
 
 ### Test
 
 ```bash
-go test -race ./...
+npm test
 ```
 
-### Lint
+### Type check
 
 ```bash
-# Install golangci-lint: https://golangci-lint.run/welcome/install/
-golangci-lint run
+npm run typecheck
 ```
 
 ### Project structure
 
 ```
-cmd/merge-queue/        CLI entry point, GitHub client, git operations
-internal/bisect/        Pure Split() function for binary bisection
-internal/queue/         Label state machine, GitHubAPI interface
-internal/batch/         Batch branch creation and multi-PR merge
+src/main.ts             Entry point
+src/action.ts           Action orchestration (process & bisect flows)
+src/github.ts           GitHub REST API client
+src/gitops.ts           Server-side git operations (branch, merge, fast-forward)
+src/queue.ts            Label state machine
+src/batch.ts            Batch branch creation and multi-PR merge
+src/bisect.ts           Pure split function for binary bisection
 ```
 
 All git operations (branch creation, merge, fast-forward, delete) use the
