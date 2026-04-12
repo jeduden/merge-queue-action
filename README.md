@@ -328,13 +328,15 @@ for detailed setup.
 
 ### 4. Create the queue labels (one-time)
 
-```bash
-# Using the binary directly (GITHUB_REPOSITORY must be set):
-GITHUB_REPOSITORY=owner/repo merge-queue setup --token "$GITHUB_TOKEN"
-```
+Create three labels in your repository: `queue`, `queue:active`, and
+`queue:failed`. You can do this from the GitHub UI under **Issues → Labels**
+or with the GitHub CLI:
 
-Or run the action with `setup` to create `queue`, `queue:active`, and
-`queue:failed` labels automatically.
+```bash
+gh label create queue --repo owner/repo
+gh label create queue:active --repo owner/repo
+gh label create queue:failed --repo owner/repo
+```
 
 ### 5. Use it
 
