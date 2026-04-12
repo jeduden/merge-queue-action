@@ -1,0 +1,477 @@
+import {
+  Queue,
+  queueLabel,
+  STATE_ACTIVE,
+  type PR,
+  type GitHubAPI,
+  type WorkflowAPI,
+} from "./queue.js";
+import { Batch, type BatchPR, type MergeResult, type GitOperator } from "./batch.js";
+import { split } from "./bisect.js";
+
+export interface Config {
+  ciWorkflow: string;
+  batchSize: number;
+  queueLabel: string;
+  dryRun: boolean;
+  batchPrs: string;
+}
+
+/** FullAPI combines all GitHub API interfaces needed by the orchestration. */
+export interface FullAPI extends GitHubAPI, WorkflowAPI {
+  getActorPermission(username: string): Promise<string>;
+  /** Fetch a single PR by number. Throws if not found. */
+  getPR(prNumber: number): Promise<PR>;
+}
+
+export function hasWritePermission(perm: string): boolean {
+  return perm === "write" || perm === "maintain" || perm === "admin";
+}
+
+/**
+ * Returns the repo-relative workflow path for dispatch.
+ * Reads MERGE_QUEUE_WORKFLOW_FILE if set, otherwise parses GITHUB_WORKFLOW_REF.
+ */
+export function selfWorkflowFile(): string {
+  const override = process.env.MERGE_QUEUE_WORKFLOW_FILE;
+  if (override) return override;
+
+  let ref = process.env.GITHUB_WORKFLOW_REF;
+  if (!ref) {
+    throw new Error(
+      "GITHUB_WORKFLOW_REF is not set; set MERGE_QUEUE_WORKFLOW_FILE when running outside GitHub Actions",
+    );
+  }
+
+  const atIdx = ref.indexOf("@");
+  if (atIdx > 0) ref = ref.slice(0, atIdx);
+
+  const parts = ref.split("/");
+  if (parts.length < 3 || !parts[2]) {
+    throw new Error(`invalid GITHUB_WORKFLOW_REF "${ref}"`);
+  }
+  return parts.slice(2).join("/");
+}
+
+async function handleCIFailure(
+  api: WorkflowAPI,
+  cfg: Config,
+  q: Queue,
+  gitOps: GitOperator,
+  prs: PR[],
+  result: MergeResult,
+  log: (msg: string) => void,
+): Promise<void> {
+  // Clean up the failed batch branch
+  try {
+    await gitOps.deleteBranch(result.branch);
+  } catch (err) {
+    log(`Warning: failed to delete batch branch ${result.branch}: ${err}`);
+  }
+
+  if (result.merged.length === 1) {
+    // Single PR failed — mark it
+    const pr = prs.find((p) => p.number === result.merged[0].number);
+    if (pr) {
+      await q.markFailed(pr, "CI failed");
+    }
+    return;
+  }
+
+  // Multiple PRs failed — trigger bisection
+  const prNumbers = result.merged.map((mp) => mp.number);
+  const prJSON = JSON.stringify(prNumbers);
+  log(`CI failed for batch, triggering bisection for PRs: ${prNumbers}`);
+
+  if (!cfg.dryRun) {
+    const wf = selfWorkflowFile();
+    await api.triggerWorkflow(wf, "main", {
+      batch_prs: prJSON,
+      bisect: "true",
+    });
+  }
+}
+
+export async function runProcess(
+  api: FullAPI,
+  gitOps: GitOperator,
+  cfg: Config,
+  log: (msg: string) => void,
+  actor?: string,
+): Promise<void> {
+  // Check actor permission
+  if (actor) {
+    const perm = await api.getActorPermission(actor);
+    if (!hasWritePermission(perm)) {
+      log(
+        `Actor ${actor} has "${perm}" permission, write or above required — skipping`,
+      );
+      return;
+    }
+    log(`Actor ${actor} has "${perm}" permission, proceeding`);
+  }
+
+  const q = new Queue(api, cfg.queueLabel, cfg.dryRun, log);
+  const b = new Batch(gitOps, cfg.dryRun, log);
+
+  // 1. Collect queued PRs
+  const prs = await q.collect(cfg.batchSize);
+  if (prs.length === 0) {
+    log("No PRs in queue");
+    return;
+  }
+  log(`Processing ${prs.length} PRs`);
+
+  // 2. Activate PRs
+  await q.activate(prs);
+
+  const excluded = new Set<number>();
+
+  const requeueAll = async (): Promise<void> => {
+    if (cfg.dryRun) return;
+    for (const pr of prs) {
+      if (excluded.has(pr.number)) continue;
+      try {
+        await q.requeue(pr);
+      } catch (err) {
+        log(
+          `Warning: failed to requeue PR #${pr.number} after error: ${err}`,
+        );
+      }
+    }
+  };
+
+  const cleanupBranch = async (branch: string): Promise<void> => {
+    if (!cfg.dryRun && branch) {
+      try {
+        await gitOps.deleteBranch(branch);
+      } catch (err) {
+        log(`Warning: failed to delete branch ${branch}: ${err}`);
+      }
+    }
+  };
+
+  // 3. Create batch branch and merge PRs
+  const batchPRs: BatchPR[] = prs.map((pr) => ({
+    number: pr.number,
+    headRef: pr.headRef,
+    title: pr.title,
+  }));
+
+  const batchID = `${prs[0].number}-${Math.floor(Date.now() / 1000)}`;
+  let result: MergeResult;
+  try {
+    result = await b.createAndMerge(batchID, batchPRs);
+  } catch (err) {
+    await requeueAll();
+    throw err;
+  }
+
+  // 4. Eject conflicted PRs
+  for (const cp of result.conflicted) {
+    const pr = prs.find((p) => p.number === cp.number);
+    if (pr) {
+      try {
+        await q.markFailed(pr, "merge conflict");
+        excluded.add(pr.number);
+      } catch (err) {
+        log(`Warning: failed to mark PR #${pr.number} as failed: ${err}`);
+      }
+    }
+  }
+
+  if (result.merged.length === 0) {
+    log("No PRs merged successfully");
+    if (!cfg.dryRun) {
+      try {
+        await gitOps.deleteBranch(result.branch);
+      } catch (err) {
+        log(`Warning: failed to delete empty batch branch: ${err}`);
+      }
+    }
+    return;
+  }
+
+  // 5. Trigger CI and wait
+  log(`Triggering CI workflow ${cfg.ciWorkflow} on ${result.branch}`);
+  if (!cfg.dryRun) {
+    const dispatchedAt = new Date();
+    try {
+      await api.triggerWorkflow(cfg.ciWorkflow, result.branch);
+    } catch (err) {
+      await cleanupBranch(result.branch);
+      await requeueAll();
+      throw new Error(`triggering CI: ${err}`);
+    }
+
+    log("Waiting for CI result...");
+    let conclusion: string;
+    try {
+      conclusion = await api.getWorkflowRunStatus(
+        cfg.ciWorkflow,
+        result.branch,
+        dispatchedAt,
+      );
+    } catch (err) {
+      await cleanupBranch(result.branch);
+      await requeueAll();
+      throw new Error(`getting CI status: ${err}`);
+    }
+
+    if (conclusion !== "success") {
+      try {
+        await handleCIFailure(api, cfg, q, gitOps, prs, result, log);
+      } catch (err) {
+        await requeueAll();
+        throw err;
+      }
+      return;
+    }
+  }
+
+  // 6. CI passed — merge to main
+  try {
+    await b.completeMerge(result.branch);
+  } catch (err) {
+    await cleanupBranch(result.branch);
+    await requeueAll();
+    throw err;
+  }
+
+  // Clean up labels and comment on merged PRs
+  for (const pr of prs) {
+    if (!result.merged.some((mp) => mp.number === pr.number)) continue;
+    log(`PR #${pr.number} merged successfully`);
+    if (!cfg.dryRun) {
+      try {
+        await api.removeLabel(
+          pr.number,
+          queueLabel(cfg.queueLabel, STATE_ACTIVE),
+        );
+      } catch {
+        /* best effort */
+      }
+      try {
+        await api.comment(pr.number, "Merge queue: merged to main");
+      } catch {
+        /* best effort */
+      }
+    }
+  }
+
+  log("Batch merge complete");
+}
+
+export async function runBisect(
+  api: FullAPI,
+  gitOps: GitOperator,
+  cfg: Config,
+  log: (msg: string) => void,
+): Promise<void> {
+  const prListStr = cfg.batchPrs;
+  if (!prListStr) {
+    throw new Error("batch_prs input is required for bisect mode");
+  }
+
+  let prNumbers: number[];
+  try {
+    prNumbers = JSON.parse(prListStr);
+  } catch {
+    throw new Error(`invalid batch_prs JSON: ${prListStr}`);
+  }
+  if (
+    !Array.isArray(prNumbers) ||
+    !prNumbers.every((n) => typeof n === "number" && Number.isInteger(n))
+  ) {
+    throw new Error(`batch_prs must be a JSON array of integers: ${prListStr}`);
+  }
+  if (prNumbers.length === 0) {
+    log("No PRs to bisect");
+    return;
+  }
+
+  const q = new Queue(api, cfg.queueLabel, cfg.dryRun, log);
+  const b = new Batch(gitOps, cfg.dryRun, log);
+
+  // Fetch only the specific PRs we are bisecting (avoids listing entire active queue)
+  const prMap = new Map<number, PR>();
+  for (const n of prNumbers) {
+    try {
+      prMap.set(n, await api.getPR(n));
+    } catch {
+      throw new Error(`bisect PR #${n} not found`);
+    }
+  }
+
+  const [left, right] = split(prNumbers);
+  log(`Bisecting: left=${JSON.stringify(left)}, right=${JSON.stringify(right)}`);
+
+  // Build batch from left half
+  const leftPRs: BatchPR[] = left.map((n) => {
+    const pr = prMap.get(n)!;
+    return { number: pr.number, headRef: pr.headRef, title: pr.title };
+  });
+
+  const batchID = `bisect-${left[0]}-${Math.floor(Date.now() / 1000)}`;
+  const result = await b.createAndMerge(batchID, leftPRs);
+
+  // Handle conflicts immediately — track so we never requeue them
+  const excluded = new Set<number>();
+  for (const cp of result.conflicted) {
+    const pr = prMap.get(cp.number);
+    if (pr) {
+      try {
+        await q.markFailed(pr, "merge conflict");
+        excluded.add(cp.number);
+      } catch (err) {
+        log(`Warning: failed to mark PR #${cp.number} as failed: ${err}`);
+      }
+    }
+  }
+
+  // Narrow left to only actually-merged PRs
+  const mergedLeft = result.merged.map((mp) => mp.number);
+
+  if (mergedLeft.length === 0) {
+    log("No PRs merged in bisect batch, nothing to test");
+    if (!cfg.dryRun) {
+      try {
+        await gitOps.deleteBranch(result.branch);
+      } catch {
+        /* best effort */
+      }
+    }
+    return;
+  }
+
+  // Run CI on left half
+  log(`Running CI on left half: ${JSON.stringify(mergedLeft)}`);
+  let conclusion = "success";
+  if (!cfg.dryRun) {
+    const dispatchedAt = new Date();
+    try {
+      await api.triggerWorkflow(cfg.ciWorkflow, result.branch);
+    } catch (err) {
+      try {
+        await gitOps.deleteBranch(result.branch);
+      } catch {
+        /* best effort */
+      }
+      throw new Error(`triggering CI for bisect: ${err}`);
+    }
+    conclusion = await api.getWorkflowRunStatus(
+      cfg.ciWorkflow,
+      result.branch,
+      dispatchedAt,
+    );
+  }
+
+  if (conclusion === "success") {
+    // Left half passes — merge it to main
+    log("Left half passed, merging to main");
+    await b.completeMerge(result.branch);
+
+    for (const n of mergedLeft) {
+      log(`PR #${n} merged successfully`);
+      if (!cfg.dryRun) {
+        try {
+          await api.removeLabel(
+            n,
+            queueLabel(cfg.queueLabel, STATE_ACTIVE),
+          );
+        } catch {
+          /* best effort */
+        }
+        try {
+          await api.comment(n, "Merge queue: merged to main");
+        } catch {
+          /* best effort */
+        }
+      }
+    }
+
+    // Dispatch bisection for right half if needed
+    if (right.length > 0) {
+      const rightJSON = JSON.stringify(right);
+      log(`Dispatching bisection for right half: ${JSON.stringify(right)}`);
+      if (!cfg.dryRun) {
+        const wf = selfWorkflowFile();
+        try {
+          await api.triggerWorkflow(wf, "main", {
+            batch_prs: rightJSON,
+            bisect: "true",
+          });
+        } catch (err) {
+          for (const n of right) {
+            if (excluded.has(n)) continue;
+            try {
+              await q.requeue(prMap.get(n)!);
+            } catch (reqErr) {
+              log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
+            }
+          }
+          throw new Error(`dispatching bisect for right half: ${err}`);
+        }
+      }
+    }
+  } else {
+    // Left half fails — clean up bisect branch
+    try {
+      await gitOps.deleteBranch(result.branch);
+    } catch (err) {
+      log(
+        `Warning: failed to delete bisect branch ${result.branch}: ${err}`,
+      );
+    }
+
+    if (mergedLeft.length === 1) {
+      // Single PR is the culprit
+      const pr = prMap.get(mergedLeft[0])!;
+      log(`PR #${mergedLeft[0]} is the culprit`);
+      await q.markFailed(pr, "CI failed (identified via bisection)");
+      // Requeue right half (skip any already marked failed)
+      for (const n of right) {
+        if (excluded.has(n)) continue;
+        try {
+          await q.requeue(prMap.get(n)!);
+        } catch (err) {
+          log(`Warning: failed to requeue PR #${n}: ${err}`);
+        }
+      }
+    } else {
+      // Split left further
+      const leftJSON = JSON.stringify(mergedLeft);
+      log(`Left half failed, splitting further: ${JSON.stringify(mergedLeft)}`);
+      if (!cfg.dryRun) {
+        const wf = selfWorkflowFile();
+        try {
+          await api.triggerWorkflow(wf, "main", {
+            batch_prs: leftJSON,
+            bisect: "true",
+          });
+        } catch (err) {
+          // Requeue non-excluded PRs on dispatch failure
+          for (const n of prNumbers) {
+            if (excluded.has(n)) continue;
+            try {
+              await q.requeue(prMap.get(n)!);
+            } catch (reqErr) {
+              log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
+            }
+          }
+          throw new Error(`dispatching follow-up bisect: ${err}`);
+        }
+      }
+    }
+  }
+}
+
+export async function runSetup(
+  api: GitHubAPI,
+  cfg: Config,
+  log: (msg: string) => void,
+): Promise<void> {
+  const q = new Queue(api, cfg.queueLabel, cfg.dryRun, log);
+  log("Setting up labels for merge queue");
+  await q.setupLabels();
+}
