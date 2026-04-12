@@ -328,11 +328,13 @@ for detailed setup.
 
 ### 4. Create the queue labels (one-time)
 
-Create three labels in your repository: `queue`, `queue:active`, and
-`queue:failed`. You can do this from the GitHub UI under **Issues → Labels**
-or with the GitHub CLI:
+The action uses three labels based on the `queue_label` input (default
+`queue`): `<base>`, `<base>:active`, and `<base>:failed`. Create them in
+your repository from the GitHub UI under **Issues → Labels** or with the
+GitHub CLI:
 
 ```bash
+# Using the default queue_label ("queue"):
 gh label create queue --repo owner/repo
 gh label create queue:active --repo owner/repo
 gh label create queue:failed --repo owner/repo
