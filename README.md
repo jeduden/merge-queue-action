@@ -1,5 +1,10 @@
 # merge-queue-action
 
+[![CI](https://github.com/jeduden/merge-queue-action/actions/workflows/ci.yml/badge.svg)](https://github.com/jeduden/merge-queue-action/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/jeduden/merge-queue-action/branch/main/graph/badge.svg)](https://codecov.io/gh/jeduden/merge-queue-action)
+[![lint: biome](https://img.shields.io/badge/lint-biome-60a5fa?logo=biome)](https://biomejs.dev)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Bors-style merge queue for GitHub, implemented as a GitHub Action. Label a PR to
 enqueue it, and the action batches PRs together, runs CI on the batch, and
 fast-forwards `main`. When a batch fails, binary bisection isolates the

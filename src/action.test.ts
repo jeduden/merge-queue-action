@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, afterEach } from "vitest";
 import {
   hasWritePermission,
   selfWorkflowFile,
@@ -8,7 +8,7 @@ import {
   type FullAPI,
   type Config,
 } from "./action.js";
-import type { PR, GitHubAPI } from "./queue.js";
+import type { PR } from "./queue.js";
 import type { GitOperator } from "./batch.js";
 
 // --- mocks ---
@@ -295,9 +295,7 @@ describe("runProcess", () => {
     const git = newMockGit();
     const cfg = baseCfg({ dryRun: false });
 
-    let callCount = 0;
     api.triggerWorkflow = async () => {
-      callCount++;
       throw new Error("dispatch failed");
     };
 
@@ -508,10 +506,8 @@ describe("runBisect", () => {
     const git = newMockGit();
     const cfg = baseCfg({ batchPrs: "[1,2,3]", dryRun: false });
 
-    let triggerCount = 0;
     const origTrigger = api.triggerWorkflow.bind(api);
     api.triggerWorkflow = async (file, ref, inputs) => {
-      triggerCount++;
       // Let CI trigger succeed, but fail the bisect dispatch
       if (inputs?.bisect === "true") throw new Error("dispatch failed");
       return origTrigger(file, ref, inputs);
@@ -537,10 +533,8 @@ describe("runBisect", () => {
     const git = newMockGit();
     const cfg = baseCfg({ batchPrs: "[1,2,3]", dryRun: false });
 
-    let triggerCount = 0;
     const origTrigger = api.triggerWorkflow.bind(api);
     api.triggerWorkflow = async (file, ref, inputs) => {
-      triggerCount++;
       // Let CI trigger succeed, but fail the follow-up bisect
       if (inputs?.bisect === "true") throw new Error("dispatch failed");
       return origTrigger(file, ref, inputs);
