@@ -110,6 +110,14 @@ export class Queue {
       } catch (err) {
         if (!isNotFoundError(err)) throw err;
       }
+      try {
+        await this.api.comment(
+          pr.number,
+          "Merge queue: picked up, processing this PR",
+        );
+      } catch (err) {
+        this.log(`Warning: failed to comment on PR #${pr.number}: ${err}`);
+      }
     }
   }
 
@@ -140,9 +148,9 @@ export class Queue {
     await this.api.comment(pr.number, `Merge queue: ${reason}`);
   }
 
-  /** Moves a PR back to pending state. */
-  async requeue(pr: PR): Promise<void> {
-    this.log(`Requeuing PR #${pr.number}`);
+  /** Moves a PR back to pending state. Posts a comment if a reason is given. */
+  async requeue(pr: PR, reason?: string): Promise<void> {
+    this.log(`Requeuing PR #${pr.number}${reason ? `: ${reason}` : ""}`);
     if (this.dryRun) return;
     try {
       await this.api.removeLabel(
@@ -164,6 +172,16 @@ export class Queue {
       pr.number,
       queueLabel(this.label, STATE_PENDING),
     );
+    if (reason) {
+      try {
+        await this.api.comment(
+          pr.number,
+          `Merge queue: requeued — ${reason}`,
+        );
+      } catch (err) {
+        this.log(`Warning: failed to comment on PR #${pr.number}: ${err}`);
+      }
+    }
   }
 
   /** Creates the queue labels in the repository. */

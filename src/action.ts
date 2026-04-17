@@ -127,12 +127,12 @@ export async function runProcess(
 
   const excluded = new Set<number>();
 
-  const requeueAll = async (): Promise<void> => {
+  const requeueAll = async (reason?: string): Promise<void> => {
     if (cfg.dryRun) return;
     for (const pr of prs) {
       if (excluded.has(pr.number)) continue;
       try {
-        await q.requeue(pr);
+        await q.requeue(pr, reason);
       } catch (err) {
         log(
           `Warning: failed to requeue PR #${pr.number} after error: ${err}`,
@@ -164,7 +164,7 @@ export async function runProcess(
   try {
     result = await b.createAndMerge(batchID, batchPRs);
   } catch (err) {
-    await requeueAll();
+    await requeueAll(`batch creation failed: ${err}`);
     throw err;
   }
 
@@ -201,8 +201,27 @@ export async function runProcess(
       await api.triggerWorkflow(cfg.ciWorkflow, result.branch);
     } catch (err) {
       await cleanupBranch(result.branch);
-      await requeueAll();
+      await requeueAll(`failed to trigger CI: ${err}`);
       throw new Error(`triggering CI: ${err}`);
+    }
+
+    // Post a status comment to each PR now that CI is running
+    for (const mp of result.merged) {
+      const others = result.merged
+        .filter((p) => p.number !== mp.number)
+        .map((p) => `#${p.number}`);
+      const batchNote =
+        others.length > 0
+          ? ` with ${others.join(", ")}`
+          : "";
+      try {
+        await api.comment(
+          mp.number,
+          `Merge queue: CI running on batch \`${result.branch}\`${batchNote}`,
+        );
+      } catch (err) {
+        log(`Warning: failed to comment on PR #${mp.number}: ${err}`);
+      }
     }
 
     log("Waiting for CI result...");
@@ -215,7 +234,7 @@ export async function runProcess(
       );
     } catch (err) {
       await cleanupBranch(result.branch);
-      await requeueAll();
+      await requeueAll(`failed to read CI status: ${err}`);
       throw new Error(`getting CI status: ${err}`);
     }
 
@@ -223,7 +242,7 @@ export async function runProcess(
       try {
         await handleCIFailure(api, cfg, q, gitOps, prs, result, log);
       } catch (err) {
-        await requeueAll();
+        await requeueAll(`error handling CI failure: ${err}`);
         throw err;
       }
       return;
@@ -235,7 +254,7 @@ export async function runProcess(
     await b.completeMerge(result.branch);
   } catch (err) {
     await cleanupBranch(result.branch);
-    await requeueAll();
+    await requeueAll(`failed to fast-forward main: ${err}`);
     throw err;
   }
 
@@ -306,6 +325,20 @@ export async function runBisect(
 
   const [left, right] = split(prNumbers);
   log(`Bisecting: left=${JSON.stringify(left)}, right=${JSON.stringify(right)}`);
+
+  // Post a bisection status comment on each PR under test in this run
+  if (!cfg.dryRun) {
+    for (const n of prNumbers) {
+      try {
+        await api.comment(
+          n,
+          `Merge queue: bisecting to isolate failing PR (testing ${left.length} of ${prNumbers.length})`,
+        );
+      } catch (err) {
+        log(`Warning: failed to comment on PR #${n}: ${err}`);
+      }
+    }
+  }
 
   // Build batch from left half
   const leftPRs: BatchPR[] = left.map((n) => {
@@ -411,7 +444,10 @@ export async function runBisect(
           for (const n of right) {
             if (excluded.has(n)) continue;
             try {
-              await q.requeue(prMap.get(n)!);
+              await q.requeue(
+                prMap.get(n)!,
+                `failed to dispatch bisect for right half: ${err}`,
+              );
             } catch (reqErr) {
               log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
             }
@@ -460,7 +496,10 @@ export async function runBisect(
           for (const n of prNumbers) {
             if (excluded.has(n)) continue;
             try {
-              await q.requeue(prMap.get(n)!);
+              await q.requeue(
+                prMap.get(n)!,
+                `failed to dispatch follow-up bisect: ${err}`,
+              );
             } catch (reqErr) {
               log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
             }

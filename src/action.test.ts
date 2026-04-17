@@ -273,7 +273,33 @@ describe("runProcess", () => {
     await runProcess(api, git, cfg, nop);
     expect(api.workflows).toHaveLength(1);
     expect(git.ffRef).toContain("merge-queue/batch-");
-    expect(api.comments.get(1)?.[0]).toBe("Merge queue: merged to main");
+    const c1 = api.comments.get(1) ?? [];
+    expect(c1).toContain("Merge queue: picked up, processing this PR");
+    expect(c1.some((s) => s.startsWith("Merge queue: CI running on batch"))).toBe(
+      true,
+    );
+    expect(c1).toContain("Merge queue: merged to main");
+  });
+
+  it("posts error comments when CI trigger fails and requeues", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1), makePR(2)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    api.triggerWorkflow = async () => {
+      throw new Error("boom");
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow(
+      "triggering CI",
+    );
+
+    for (const n of [1, 2]) {
+      const c = api.comments.get(n) ?? [];
+      expect(
+        c.some((s) => s.startsWith("Merge queue: requeued — failed to trigger CI")),
+      ).toBe(true);
+    }
   });
 
   it("requeues all PRs when createAndMerge fails", async () => {
@@ -344,7 +370,7 @@ describe("runProcess", () => {
 
     await runProcess(api, git, cfg, nop);
     expect(api.labels.get(1)).toContain("queue:failed");
-    expect(api.comments.get(1)?.[0]).toBe("Merge queue: CI failed");
+    expect(api.comments.get(1)).toContain("Merge queue: CI failed");
   });
 
   it("triggers bisection on multi-PR CI failure", async () => {
@@ -454,6 +480,13 @@ describe("runBisect", () => {
     expect(api.labels.get(1)).toContain("queue:failed");
     // Right half requeued
     expect(api.labels.get(2)).toContain("queue");
+    // Both PRs receive the bisection status comment
+    for (const n of [1, 2]) {
+      const c = api.comments.get(n) ?? [];
+      expect(
+        c.some((s) => s.startsWith("Merge queue: bisecting to isolate failing PR")),
+      ).toBe(true);
+    }
   });
 
   it("splits further when left half with multiple PRs fails", async () => {

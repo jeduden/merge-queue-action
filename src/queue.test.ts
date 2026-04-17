@@ -136,6 +136,9 @@ describe("Activate", () => {
       const labels = api.labels.get(pr.number)!;
       expect(labels).toContain("queue:active");
       expect(labels).not.toContain("queue");
+      expect(api.comments.get(pr.number)).toContain(
+        "Merge queue: picked up, processing this PR",
+      );
     }
   });
 
@@ -220,6 +223,23 @@ describe("Requeue", () => {
     });
 
     expect(api.labels.get(3)).toContain("queue");
+    // Without a reason, no comment is posted
+    expect(api.comments.get(3) ?? []).toHaveLength(0);
+  });
+
+  it("posts a comment when given a reason", async () => {
+    const api = newMockAPI();
+    api.labels.set(4, ["queue:active"]);
+
+    const q = new Queue(api, "queue", false, nop);
+    await q.requeue(
+      { number: 4, headRef: "", headSHA: "", title: "", createdAt: 0 },
+      "CI trigger failed",
+    );
+
+    expect(api.comments.get(4)).toContain(
+      "Merge queue: requeued — CI trigger failed",
+    );
   });
 
   it("ignores RemoveLabel 404", async () => {

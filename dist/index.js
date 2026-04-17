@@ -30010,14 +30010,14 @@ async function runProcess(api, gitOps, cfg, log, actor) {
     // 2. Activate PRs
     await q.activate(prs);
     const excluded = new Set();
-    const requeueAll = async () => {
+    const requeueAll = async (reason) => {
         if (cfg.dryRun)
             return;
         for (const pr of prs) {
             if (excluded.has(pr.number))
                 continue;
             try {
-                await q.requeue(pr);
+                await q.requeue(pr, reason);
             }
             catch (err) {
                 log(`Warning: failed to requeue PR #${pr.number} after error: ${err}`);
@@ -30047,7 +30047,7 @@ async function runProcess(api, gitOps, cfg, log, actor) {
         result = await b.createAndMerge(batchID, batchPRs);
     }
     catch (err) {
-        await requeueAll();
+        await requeueAll(`batch creation failed: ${err}`);
         throw err;
     }
     // 4. Eject conflicted PRs
@@ -30084,8 +30084,23 @@ async function runProcess(api, gitOps, cfg, log, actor) {
         }
         catch (err) {
             await cleanupBranch(result.branch);
-            await requeueAll();
+            await requeueAll(`failed to trigger CI: ${err}`);
             throw new Error(`triggering CI: ${err}`);
+        }
+        // Post a status comment to each PR now that CI is running
+        for (const mp of result.merged) {
+            const others = result.merged
+                .filter((p) => p.number !== mp.number)
+                .map((p) => `#${p.number}`);
+            const batchNote = others.length > 0
+                ? ` with ${others.join(", ")}`
+                : "";
+            try {
+                await api.comment(mp.number, `Merge queue: CI running on batch \`${result.branch}\`${batchNote}`);
+            }
+            catch (err) {
+                log(`Warning: failed to comment on PR #${mp.number}: ${err}`);
+            }
         }
         log("Waiting for CI result...");
         let conclusion;
@@ -30094,7 +30109,7 @@ async function runProcess(api, gitOps, cfg, log, actor) {
         }
         catch (err) {
             await cleanupBranch(result.branch);
-            await requeueAll();
+            await requeueAll(`failed to read CI status: ${err}`);
             throw new Error(`getting CI status: ${err}`);
         }
         if (conclusion !== "success") {
@@ -30102,7 +30117,7 @@ async function runProcess(api, gitOps, cfg, log, actor) {
                 await handleCIFailure(api, cfg, q, gitOps, prs, result, log);
             }
             catch (err) {
-                await requeueAll();
+                await requeueAll(`error handling CI failure: ${err}`);
                 throw err;
             }
             return;
@@ -30114,7 +30129,7 @@ async function runProcess(api, gitOps, cfg, log, actor) {
     }
     catch (err) {
         await cleanupBranch(result.branch);
-        await requeueAll();
+        await requeueAll(`failed to fast-forward main: ${err}`);
         throw err;
     }
     // Clean up labels and comment on merged PRs
@@ -30173,6 +30188,17 @@ async function runBisect(api, gitOps, cfg, log) {
     }
     const [left, right] = (0, bisect_js_1.split)(prNumbers);
     log(`Bisecting: left=${JSON.stringify(left)}, right=${JSON.stringify(right)}`);
+    // Post a bisection status comment on each PR under test in this run
+    if (!cfg.dryRun) {
+        for (const n of prNumbers) {
+            try {
+                await api.comment(n, `Merge queue: bisecting to isolate failing PR (testing ${left.length} of ${prNumbers.length})`);
+            }
+            catch (err) {
+                log(`Warning: failed to comment on PR #${n}: ${err}`);
+            }
+        }
+    }
     // Build batch from left half
     const leftPRs = left.map((n) => {
         const pr = prMap.get(n);
@@ -30270,7 +30296,7 @@ async function runBisect(api, gitOps, cfg, log) {
                         if (excluded.has(n))
                             continue;
                         try {
-                            await q.requeue(prMap.get(n));
+                            await q.requeue(prMap.get(n), `failed to dispatch bisect for right half: ${err}`);
                         }
                         catch (reqErr) {
                             log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
@@ -30324,7 +30350,7 @@ async function runBisect(api, gitOps, cfg, log) {
                         if (excluded.has(n))
                             continue;
                         try {
-                            await q.requeue(prMap.get(n));
+                            await q.requeue(prMap.get(n), `failed to dispatch follow-up bisect: ${err}`);
                         }
                         catch (reqErr) {
                             log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
@@ -30874,6 +30900,12 @@ class Queue {
                 if (!isNotFoundError(err))
                     throw err;
             }
+            try {
+                await this.api.comment(pr.number, "Merge queue: picked up, processing this PR");
+            }
+            catch (err) {
+                this.log(`Warning: failed to comment on PR #${pr.number}: ${err}`);
+            }
         }
     }
     /** Transitions a PR to the failed state and posts a comment. */
@@ -30898,9 +30930,9 @@ class Queue {
         await this.api.addLabel(pr.number, queueLabel(this.label, exports.STATE_FAILED));
         await this.api.comment(pr.number, `Merge queue: ${reason}`);
     }
-    /** Moves a PR back to pending state. */
-    async requeue(pr) {
-        this.log(`Requeuing PR #${pr.number}`);
+    /** Moves a PR back to pending state. Posts a comment if a reason is given. */
+    async requeue(pr, reason) {
+        this.log(`Requeuing PR #${pr.number}${reason ? `: ${reason}` : ""}`);
         if (this.dryRun)
             return;
         try {
@@ -30918,6 +30950,14 @@ class Queue {
                 throw err;
         }
         await this.api.addLabel(pr.number, queueLabel(this.label, exports.STATE_PENDING));
+        if (reason) {
+            try {
+                await this.api.comment(pr.number, `Merge queue: requeued — ${reason}`);
+            }
+            catch (err) {
+                this.log(`Warning: failed to comment on PR #${pr.number}: ${err}`);
+            }
+        }
     }
     /** Creates the queue labels in the repository. */
     async setupLabels() {

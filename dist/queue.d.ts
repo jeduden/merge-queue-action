@@ -40,8 +40,8 @@ export declare class Queue {
     activate(prs: PR[]): Promise<void>;
     /** Transitions a PR to the failed state and posts a comment. */
     markFailed(pr: PR, reason: string): Promise<void>;
-    /** Moves a PR back to pending state. */
-    requeue(pr: PR): Promise<void>;
+    /** Moves a PR back to pending state. Posts a comment if a reason is given. */
+    requeue(pr: PR, reason?: string): Promise<void>;
     /** Creates the queue labels in the repository. */
     setupLabels(): Promise<void>;
 }
