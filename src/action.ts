@@ -155,6 +155,7 @@ export async function runProcess(
   const batchPRs: BatchPR[] = prs.map((pr) => ({
     number: pr.number,
     headRef: pr.headRef,
+    headSHA: pr.headSHA,
     title: pr.title,
   }));
 
@@ -309,7 +310,12 @@ export async function runBisect(
   // Build batch from left half
   const leftPRs: BatchPR[] = left.map((n) => {
     const pr = prMap.get(n)!;
-    return { number: pr.number, headRef: pr.headRef, title: pr.title };
+    return {
+      number: pr.number,
+      headRef: pr.headRef,
+      headSHA: pr.headSHA,
+      title: pr.title,
+    };
   });
 
   const batchID = `bisect-${left[0]}-${Math.floor(Date.now() / 1000)}`;

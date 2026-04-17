@@ -45,17 +45,17 @@ export class GitOps implements GitOperator {
 
   async mergeBranch(
     branch: string,
-    sourceBranch: string,
+    sourceRef: string,
     commitMsg: string,
   ): Promise<boolean> {
-    this.log(`Merging ${sourceBranch} into ${branch}`);
+    this.log(`Merging ${sourceRef} into ${branch}`);
 
     try {
       await this.octokit.rest.repos.merge({
         owner: this.owner,
         repo: this.repo,
         base: branch,
-        head: sourceBranch,
+        head: sourceRef,
         commit_message: commitMsg,
       });
       return true;

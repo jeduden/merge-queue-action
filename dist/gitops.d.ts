@@ -12,7 +12,7 @@ export declare class GitOps implements GitOperator {
     private log;
     constructor(octokit: Octokit, owner: string, repo: string, log?: (msg: string) => void);
     createBranchFromRef(branch: string, baseRef: string): Promise<void>;
-    mergeBranch(branch: string, sourceBranch: string, commitMsg: string): Promise<boolean>;
+    mergeBranch(branch: string, sourceRef: string, commitMsg: string): Promise<boolean>;
     pushBranch(branch: string): Promise<void>;
     fastForwardMain(ref: string): Promise<void>;
     deleteBranch(branch: string): Promise<void>;

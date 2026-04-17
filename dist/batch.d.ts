@@ -1,7 +1,7 @@
 /** GitOperator defines the interface for git operations. */
 export interface GitOperator {
     createBranchFromRef(branch: string, baseRef: string): Promise<void>;
-    mergeBranch(branch: string, sourceBranch: string, commitMsg: string): Promise<boolean>;
+    mergeBranch(branch: string, sourceRef: string, commitMsg: string): Promise<boolean>;
     pushBranch(branch: string): Promise<void>;
     fastForwardMain(ref: string): Promise<void>;
     deleteBranch(branch: string): Promise<void>;
@@ -10,6 +10,7 @@ export interface GitOperator {
 export interface BatchPR {
     number: number;
     headRef: string;
+    headSHA: string;
     title: string;
 }
 /** MergeResult describes the outcome of merging PRs into a batch branch. */

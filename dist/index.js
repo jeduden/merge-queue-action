@@ -30038,6 +30038,7 @@ async function runProcess(api, gitOps, cfg, log, actor) {
     const batchPRs = prs.map((pr) => ({
         number: pr.number,
         headRef: pr.headRef,
+        headSHA: pr.headSHA,
         title: pr.title,
     }));
     const batchID = `${prs[0].number}-${Math.floor(Date.now() / 1000)}`;
@@ -30175,7 +30176,12 @@ async function runBisect(api, gitOps, cfg, log) {
     // Build batch from left half
     const leftPRs = left.map((n) => {
         const pr = prMap.get(n);
-        return { number: pr.number, headRef: pr.headRef, title: pr.title };
+        return {
+            number: pr.number,
+            headRef: pr.headRef,
+            headSHA: pr.headSHA,
+            title: pr.title,
+        };
     });
     const batchID = `bisect-${left[0]}-${Math.floor(Date.now() / 1000)}`;
     const result = await b.createAndMerge(batchID, leftPRs);
@@ -30376,7 +30382,7 @@ class Batch {
             const msg = `Merge PR #${pr.number}: ${pr.title}`;
             let ok;
             try {
-                ok = await this.git.mergeBranch(branch, pr.headRef, msg);
+                ok = await this.git.mergeBranch(branch, pr.headSHA, msg);
             }
             catch (err) {
                 try {
@@ -30674,14 +30680,14 @@ class GitOps {
             sha,
         });
     }
-    async mergeBranch(branch, sourceBranch, commitMsg) {
-        this.log(`Merging ${sourceBranch} into ${branch}`);
+    async mergeBranch(branch, sourceRef, commitMsg) {
+        this.log(`Merging ${sourceRef} into ${branch}`);
         try {
             await this.octokit.rest.repos.merge({
                 owner: this.owner,
                 repo: this.repo,
                 base: branch,
-                head: sourceBranch,
+                head: sourceRef,
                 commit_message: commitMsg,
             });
             return true;
