@@ -59,4 +59,5 @@ jobs:
         with:
           languages: go
       - uses: github/codeql-action/autobuild@c10b8064de6f491fea524254123dbe5e09572f13 # v4
-      - uses: github/codeql-action/analyze@c10b8064de6f491fea524254123dbe5e09572f13 # v4
+      - if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+        uses: github/codeql-action/analyze@c10b8064de6f491fea524254123dbe5e09572f13 # v4
