@@ -27,12 +27,12 @@ function newMockGit(): GitOperator & {
 
     async mergeBranch(
       _branch: string,
-      sourceBranch: string,
+      sourceRef: string,
       _commitMsg: string,
     ) {
       if (mock.failOn === "mergeBranch") throw new Error("mock error");
-      if (sourceBranch === mock.conflictOn) return false;
-      mock.merges.push(sourceBranch);
+      if (sourceRef === mock.conflictOn) return false;
+      mock.merges.push(sourceRef);
       return true;
     },
 
@@ -61,8 +61,18 @@ describe("CreateAndMerge", () => {
     const git = newMockGit();
     const b = new Batch(git, false, nop);
     const prs: BatchPR[] = [
-      { number: 1, headRef: "feature-a", title: "Add feature A" },
-      { number: 2, headRef: "feature-b", title: "Add feature B" },
+      {
+        number: 1,
+        headRef: "feature-a",
+        headSHA: "sha-a",
+        title: "Add feature A",
+      },
+      {
+        number: 2,
+        headRef: "feature-b",
+        headSHA: "sha-b",
+        title: "Add feature B",
+      },
     ];
 
     const result = await b.createAndMerge("test-1", prs);
@@ -77,12 +87,12 @@ describe("CreateAndMerge", () => {
 
   it("records conflicting PRs", async () => {
     const git = newMockGit();
-    git.conflictOn = "feature-b";
+    git.conflictOn = "sha-b";
     const b = new Batch(git, false, nop);
     const prs: BatchPR[] = [
-      { number: 1, headRef: "feature-a", title: "A" },
-      { number: 2, headRef: "feature-b", title: "B" },
-      { number: 3, headRef: "feature-c", title: "C" },
+      { number: 1, headRef: "feature-a", headSHA: "sha-a", title: "A" },
+      { number: 2, headRef: "feature-b", headSHA: "sha-b", title: "B" },
+      { number: 3, headRef: "feature-c", headSHA: "sha-c", title: "C" },
     ];
 
     const result = await b.createAndMerge("test-2", prs);
@@ -96,7 +106,7 @@ describe("CreateAndMerge", () => {
     const git = newMockGit();
     const b = new Batch(git, true, nop);
     const prs: BatchPR[] = [
-      { number: 1, headRef: "feature-a", title: "A" },
+      { number: 1, headRef: "feature-a", headSHA: "sha-a", title: "A" },
     ];
 
     const result = await b.createAndMerge("dry", prs);
@@ -112,7 +122,7 @@ describe("CreateAndMerge", () => {
     const b = new Batch(git, false, nop);
     await expect(
       b.createAndMerge("err", [
-        { number: 1, headRef: "f", title: "T" },
+        { number: 1, headRef: "f", headSHA: "sha-f", title: "T" },
       ]),
     ).rejects.toThrow("merging PR #1");
     expect(git.deleted).toContain("merge-queue/batch-err");
@@ -124,7 +134,7 @@ describe("CreateAndMerge", () => {
     const b = new Batch(git, false, nop);
     await expect(
       b.createAndMerge("err", [
-        { number: 1, headRef: "f", title: "T" },
+        { number: 1, headRef: "f", headSHA: "sha-f", title: "T" },
       ]),
     ).rejects.toThrow();
   });

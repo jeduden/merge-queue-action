@@ -120,10 +120,10 @@ function newMockGit(): GitOperator & {
         throw new Error("mock error");
       mock.branches.push(branch);
     },
-    async mergeBranch(_branch: string, sourceBranch: string) {
+    async mergeBranch(_branch: string, sourceRef: string) {
       if (mock.failOn === "mergeBranch") throw new Error("mock error");
-      if (sourceBranch === mock.conflictOn) return false;
-      mock.merges.push(sourceBranch);
+      if (sourceRef === mock.conflictOn) return false;
+      mock.merges.push(sourceRef);
       return true;
     },
     async pushBranch(branch: string) {
@@ -252,7 +252,7 @@ describe("runProcess", () => {
     const api = newMockAPI();
     api.prs.set("queue", [makePR(1, "branch-1")]);
     const git = newMockGit();
-    git.conflictOn = "branch-1";
+    git.conflictOn = "sha-1";
     const logs: string[] = [];
     const cfg = baseCfg({ dryRun: false });
 
@@ -574,7 +574,7 @@ describe("runBisect", () => {
     const api = newMockAPI();
     api.prs.set("queue:active", [makePR(1, "conflict-branch")]);
     const git = newMockGit();
-    git.conflictOn = "conflict-branch";
+    git.conflictOn = "sha-1";
     const logs: string[] = [];
     const cfg = baseCfg({ batchPrs: "[1]", dryRun: false });
 

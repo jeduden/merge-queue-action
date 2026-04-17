@@ -3,7 +3,7 @@ export interface GitOperator {
   createBranchFromRef(branch: string, baseRef: string): Promise<void>;
   mergeBranch(
     branch: string,
-    sourceBranch: string,
+    sourceRef: string,
     commitMsg: string,
   ): Promise<boolean>;
   pushBranch(branch: string): Promise<void>;
@@ -15,6 +15,7 @@ export interface GitOperator {
 export interface BatchPR {
   number: number;
   headRef: string;
+  headSHA: string;
   title: string;
 }
 
@@ -65,7 +66,7 @@ export class Batch {
       const msg = `Merge PR #${pr.number}: ${pr.title}`;
       let ok: boolean;
       try {
-        ok = await this.git.mergeBranch(branch, pr.headRef, msg);
+        ok = await this.git.mergeBranch(branch, pr.headSHA, msg);
       } catch (err) {
         try {
           await this.git.deleteBranch(branch);
