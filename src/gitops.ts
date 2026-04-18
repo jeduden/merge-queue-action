@@ -70,7 +70,7 @@ export class GitOps implements GitOperator {
     this.log(`Branch ${branch} already up to date on remote`);
   }
 
-  async fastForwardMain(ref: string): Promise<void> {
+  async fastForwardMain(ref: string): Promise<string> {
     this.log(`Fast-forwarding main to ${ref}`);
 
     const { data: srcRef } = await this.octokit.rest.git.getRef({
@@ -87,6 +87,8 @@ export class GitOps implements GitOperator {
       sha,
       force: false,
     });
+
+    return sha;
   }
 
   async deleteBranch(branch: string): Promise<void> {

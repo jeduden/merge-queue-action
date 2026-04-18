@@ -1,12 +1,15 @@
 import { type PR, type GitHubAPI, type WorkflowAPI } from "./queue.js";
 import { type GitOperator } from "./batch.js";
+import { type CommentCtx } from "./comments.js";
 export interface Config {
     ciWorkflow: string;
     batchSize: number;
     queueLabel: string;
     dryRun: boolean;
     batchPrs: string;
+    commentCtx: CommentCtx;
 }
+export type { CommentCtx };
 /** FullAPI combines all GitHub API interfaces needed by the orchestration. */
 export interface FullAPI extends GitHubAPI, WorkflowAPI {
     getActorPermission(username: string): Promise<string>;

@@ -1,5 +1,10 @@
 import * as github from "@actions/github";
-import type { PR, GitHubAPI, WorkflowAPI } from "./queue.js";
+import type {
+  PR,
+  GitHubAPI,
+  WorkflowAPI,
+  WorkflowRunResult,
+} from "./queue.js";
 
 type Octokit = ReturnType<typeof github.getOctokit>;
 
@@ -125,7 +130,7 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
     workflowFile: string,
     ref: string,
     dispatchedAt: Date,
-  ): Promise<string> {
+  ): Promise<WorkflowRunResult> {
     const createdAfter = new Date(dispatchedAt.getTime() - 5000);
 
     for (let i = 0; i < 360; i++) {
@@ -146,7 +151,10 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
 
       const run = runs.workflow_runs[0];
       if (run.status === "completed") {
-        return run.conclusion ?? "unknown";
+        return {
+          conclusion: run.conclusion ?? "unknown",
+          htmlUrl: run.html_url,
+        };
       }
     }
 

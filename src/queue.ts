@@ -19,6 +19,12 @@ export function queueLabel(base: string, state: LabelState): string {
   return `${base}:${state}`;
 }
 
+/** Result of polling a workflow run: includes the URL so callers can link to it. */
+export interface WorkflowRunResult {
+  conclusion: string;
+  htmlUrl: string;
+}
+
 /** GitHubAPI defines the interface for GitHub operations needed by the queue. */
 export interface GitHubAPI {
   listPRsWithLabel(label: string, limit: number): Promise<PR[]>;
@@ -39,7 +45,7 @@ export interface WorkflowAPI {
     workflowFile: string,
     ref: string,
     dispatchedAt: Date,
-  ): Promise<string>;
+  ): Promise<WorkflowRunResult>;
   closePR(prNumber: number): Promise<void>;
 }
 
@@ -67,18 +73,7 @@ function isAlreadyExistsError(err: unknown): boolean {
 
 type LogFunc = (msg: string) => void;
 
-/**
- * Defense-in-depth sanitizer for reason strings that end up in PR comments.
- * Collapses whitespace, strips backticks, and caps length.
- */
-function sanitizeReason(reason: string, maxLen = 300): string {
-  const oneLine = reason.replace(/`/g, "'").replace(/\s+/g, " ").trim();
-  return oneLine.length > maxLen
-    ? `${oneLine.slice(0, maxLen - 1)}…`
-    : oneLine;
-}
-
-/** Queue manages the merge queue state machine. */
+/** Queue manages the merge queue label state machine. Comment composition lives at the orchestration layer. */
 export class Queue {
   private api: GitHubAPI;
   private label: string;
@@ -121,18 +116,10 @@ export class Queue {
       } catch (err) {
         if (!isNotFoundError(err)) throw err;
       }
-      try {
-        await this.api.comment(
-          pr.number,
-          "Merge queue: picked up, processing this PR",
-        );
-      } catch (err) {
-        this.log(`Warning: failed to comment on PR #${pr.number}: ${err}`);
-      }
     }
   }
 
-  /** Transitions a PR to the failed state and posts a comment. */
+  /** Transitions a PR to the failed state. */
   async markFailed(pr: PR, reason: string): Promise<void> {
     this.log(`Marking PR #${pr.number} as failed: ${reason}`);
     if (this.dryRun) return;
@@ -156,12 +143,11 @@ export class Queue {
       pr.number,
       queueLabel(this.label, STATE_FAILED),
     );
-    await this.api.comment(pr.number, `Merge queue: ${reason}`);
   }
 
-  /** Moves a PR back to pending state. Posts a comment if a reason is given. */
-  async requeue(pr: PR, reason?: string): Promise<void> {
-    this.log(`Requeuing PR #${pr.number}${reason ? `: ${reason}` : ""}`);
+  /** Moves a PR back to pending state. */
+  async requeue(pr: PR): Promise<void> {
+    this.log(`Requeuing PR #${pr.number}`);
     if (this.dryRun) return;
     try {
       await this.api.removeLabel(
@@ -183,16 +169,6 @@ export class Queue {
       pr.number,
       queueLabel(this.label, STATE_PENDING),
     );
-    if (reason) {
-      try {
-        await this.api.comment(
-          pr.number,
-          `Merge queue: requeued — ${sanitizeReason(reason)}`,
-        );
-      } catch (err) {
-        this.log(`Warning: failed to comment on PR #${pr.number}: ${err}`);
-      }
-    }
   }
 
   /** Creates the queue labels in the repository. */

@@ -136,28 +136,9 @@ describe("Activate", () => {
       const labels = api.labels.get(pr.number)!;
       expect(labels).toContain("queue:active");
       expect(labels).not.toContain("queue");
-      expect(api.comments.get(pr.number)).toContain(
-        "Merge queue: picked up, processing this PR",
-      );
     }
-  });
-
-  it("logs a warning when the status comment fails", async () => {
-    const api = newMockAPI();
-    api.labels.set(1, ["queue"]);
-    api.failOn = "comment";
-    const logs: string[] = [];
-
-    const q = new Queue(api, "queue", false, (m) => logs.push(m));
-    await q.activate([
-      { number: 1, headRef: "", headSHA: "", title: "", createdAt: 0 },
-    ]);
-
-    // Label transition still succeeds even when comment post throws
-    expect(api.labels.get(1)).toContain("queue:active");
-    expect(logs.some((l) => l.includes("failed to comment on PR #1"))).toBe(
-      true,
-    );
+    // Queue handles labels only — no comments posted from here.
+    expect(api.comments.size).toBe(0);
   });
 
   it("does not modify labels in dry run", async () => {
@@ -198,7 +179,7 @@ describe("Activate", () => {
 });
 
 describe("MarkFailed", () => {
-  it("adds failed label and comments", async () => {
+  it("adds the failed label", async () => {
     const api = newMockAPI();
     api.labels.set(5, ["queue:active"]);
 
@@ -209,7 +190,8 @@ describe("MarkFailed", () => {
     );
 
     expect(api.labels.get(5)).toContain("queue:failed");
-    expect(api.comments.get(5)).toEqual(["Merge queue: CI failed"]);
+    // Queue handles labels only — no comments posted from here.
+    expect(api.comments.size).toBe(0);
   });
 
   it("ignores RemoveLabel 404", async () => {
@@ -227,7 +209,7 @@ describe("MarkFailed", () => {
 });
 
 describe("Requeue", () => {
-  it("moves PR back to pending", async () => {
+  it("moves PR back to pending without posting a comment", async () => {
     const api = newMockAPI();
     api.labels.set(3, ["queue:active"]);
 
@@ -241,79 +223,7 @@ describe("Requeue", () => {
     });
 
     expect(api.labels.get(3)).toContain("queue");
-    // Without a reason, no comment is posted
-    expect(api.comments.get(3) ?? []).toHaveLength(0);
-  });
-
-  it("posts a comment when given a reason", async () => {
-    const api = newMockAPI();
-    api.labels.set(4, ["queue:active"]);
-
-    const q = new Queue(api, "queue", false, nop);
-    await q.requeue(
-      { number: 4, headRef: "", headSHA: "", title: "", createdAt: 0 },
-      "CI trigger failed",
-    );
-
-    expect(api.comments.get(4)).toContain(
-      "Merge queue: requeued — CI trigger failed",
-    );
-  });
-
-  it("sanitizes multi-line reasons into a single line", async () => {
-    const api = newMockAPI();
-    api.labels.set(5, ["queue:active"]);
-
-    const q = new Queue(api, "queue", false, nop);
-    await q.requeue(
-      { number: 5, headRef: "", headSHA: "", title: "", createdAt: 0 },
-      "line one\n  line two\n\nthird\t`with` backticks",
-    );
-
-    const [posted] = api.comments.get(5) ?? [];
-    expect(posted).toBeDefined();
-    expect(posted).not.toContain("\n");
-    expect(posted).not.toContain("`");
-    expect(posted).toBe(
-      "Merge queue: requeued — line one line two third 'with' backticks",
-    );
-  });
-
-  it("truncates very long reasons with an ellipsis", async () => {
-    const api = newMockAPI();
-    api.labels.set(6, ["queue:active"]);
-
-    const long = "x".repeat(500);
-    const q = new Queue(api, "queue", false, nop);
-    await q.requeue(
-      { number: 6, headRef: "", headSHA: "", title: "", createdAt: 0 },
-      long,
-    );
-
-    const [posted] = api.comments.get(6) ?? [];
-    expect(posted).toBeDefined();
-    // Prefix "Merge queue: requeued — " (24 chars) + up to 300-char reason
-    // ending in the ellipsis character
-    expect(posted!.length).toBeLessThanOrEqual(24 + 300);
-    expect(posted!.endsWith("…")).toBe(true);
-  });
-
-  it("logs a warning when the requeue comment fails", async () => {
-    const api = newMockAPI();
-    api.labels.set(7, ["queue:active"]);
-    api.failOn = "comment";
-    const logs: string[] = [];
-
-    const q = new Queue(api, "queue", false, (m) => logs.push(m));
-    await q.requeue(
-      { number: 7, headRef: "", headSHA: "", title: "", createdAt: 0 },
-      "boom",
-    );
-
-    expect(api.labels.get(7)).toContain("queue");
-    expect(logs.some((l) => l.includes("failed to comment on PR #7"))).toBe(
-      true,
-    );
+    expect(api.comments.size).toBe(0);
   });
 
   it("ignores RemoveLabel 404", async () => {

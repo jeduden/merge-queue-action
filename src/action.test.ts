@@ -8,8 +8,18 @@ import {
   type FullAPI,
   type Config,
 } from "./action.js";
-import type { PR } from "./queue.js";
+import type { PR, WorkflowRunResult } from "./queue.js";
 import type { GitOperator } from "./batch.js";
+
+const CTX = {
+  serverUrl: "https://github.com",
+  ownerRepo: "owner/repo",
+  actionRunUrl: "https://github.com/owner/repo/actions/runs/999",
+  queueLabel: "queue",
+};
+const CI_RUN_URL =
+  "https://github.com/owner/repo/actions/runs/1234567";
+const MERGE_SHA = "abcdef1234567890";
 
 // --- mocks ---
 
@@ -78,8 +88,8 @@ function newMockAPI(): FullAPI & {
     ): Promise<void> {
       mock.workflows.push({ file, ref, inputs });
     },
-    async getWorkflowRunStatus(): Promise<string> {
-      return mock.ciConclusion;
+    async getWorkflowRunStatus(): Promise<WorkflowRunResult> {
+      return { conclusion: mock.ciConclusion, htmlUrl: CI_RUN_URL };
     },
     async closePR(): Promise<void> {},
     async getPR(prNumber: number): Promise<PR> {
@@ -133,6 +143,7 @@ function newMockGit(): GitOperator & {
     async fastForwardMain(ref: string) {
       if (mock.failOn === "fastForwardMain") throw new Error("mock error");
       mock.ffRef = ref;
+      return MERGE_SHA;
     },
     async deleteBranch(branch: string) {
       if (mock.failOn === "deleteBranch") throw new Error("mock error");
@@ -151,6 +162,7 @@ function baseCfg(overrides?: Partial<Config>): Config {
     queueLabel: "queue",
     dryRun: true,
     batchPrs: "",
+    commentCtx: CTX,
     ...overrides,
   };
 }
@@ -274,11 +286,13 @@ describe("runProcess", () => {
     expect(api.workflows).toHaveLength(1);
     expect(git.ffRef).toContain("merge-queue/batch-");
     const c1 = api.comments.get(1) ?? [];
-    expect(c1).toContain("Merge queue: picked up, processing this PR");
-    expect(c1.some((s) => s.startsWith("Merge queue: CI running on batch"))).toBe(
+    expect(c1.some((s) => s.includes("Merge Queue** — picked up"))).toBe(true);
+    expect(c1.some((s) => s.includes("Merge Queue** — CI running"))).toBe(
       true,
     );
-    expect(c1).toContain("Merge queue: merged to main");
+    expect(c1.some((s) => s.includes(CI_RUN_URL))).toBe(true);
+    expect(c1.some((s) => s.includes("Merge Queue** — merged"))).toBe(true);
+    expect(c1.some((s) => s.includes(MERGE_SHA))).toBe(true);
   });
 
   it("posts error comments when CI trigger fails and requeues", async () => {
@@ -297,7 +311,7 @@ describe("runProcess", () => {
     for (const n of [1, 2]) {
       const c = api.comments.get(n) ?? [];
       expect(
-        c.some((s) => s.startsWith("Merge queue: requeued — failed to trigger CI")),
+        c.some((s) => s.includes("Merge Queue** — requeued") && s.includes("failed to trigger CI")),
       ).toBe(true);
     }
   });
@@ -318,12 +332,18 @@ describe("runProcess", () => {
 
     const comments = api.comments.get(1) ?? [];
     const errComment = comments.find((s) =>
-      s.startsWith("Merge queue: requeued —"),
+      s.includes("Merge Queue** — requeued"),
     );
     expect(errComment).toBeDefined();
     expect(errComment!).not.toContain("[object Object]");
     expect(errComment!).toContain("unknown error");
-    expect(errComment!.includes("\n")).toBe(false);
+    // The embedded sanitized error message itself must be single-line.
+    // The comment template is multi-line, so check the blockquote line only.
+    const quoteLine = errComment!
+      .split("\n")
+      .find((l) => l.startsWith("> "));
+    expect(quoteLine).toBeDefined();
+    expect(quoteLine!.includes("\n")).toBe(false);
   });
 
   it("handles thrown strings directly", async () => {
@@ -340,7 +360,7 @@ describe("runProcess", () => {
 
     const comments = api.comments.get(1) ?? [];
     const errComment = comments.find((s) =>
-      s.startsWith("Merge queue: requeued —"),
+      s.includes("Merge Queue** — requeued"),
     );
     expect(errComment).toBeDefined();
     expect(errComment!).toContain("bare string err");
@@ -360,7 +380,7 @@ describe("runProcess", () => {
 
     const comments = api.comments.get(1) ?? [];
     const errComment = comments.find((s) =>
-      s.startsWith("Merge queue: requeued —"),
+      s.includes("Merge Queue** — requeued"),
     );
     expect(errComment).toBeDefined();
     expect(errComment!).toContain("42");
@@ -381,7 +401,7 @@ describe("runProcess", () => {
 
     const comments = api.comments.get(1) ?? [];
     const errComment = comments.find((s) =>
-      s.startsWith("Merge queue: requeued —"),
+      s.includes("Merge Queue** — requeued"),
     );
     expect(errComment).toBeDefined();
     expect(errComment!).toContain("pretty error");
@@ -401,7 +421,7 @@ describe("runProcess", () => {
 
     const comments = api.comments.get(1) ?? [];
     const errComment = comments.find((s) =>
-      s.startsWith("Merge queue: requeued —"),
+      s.includes("Merge Queue** — requeued"),
     );
     expect(errComment).toBeDefined();
     expect(errComment!).toContain("…");
@@ -419,7 +439,7 @@ describe("runProcess", () => {
 
     const origComment = api.comment;
     api.comment = async (n, body) => {
-      if (body.startsWith("Merge queue: CI running on batch")) {
+      if (body.includes("Merge Queue** — CI running")) {
         throw new Error("rate limited");
       }
       return origComment(n, body);
@@ -458,8 +478,10 @@ describe("runProcess", () => {
     for (const n of [1, 2]) {
       const c = api.comments.get(n) ?? [];
       expect(
-        c.some((s) =>
-          s.startsWith("Merge queue: requeued — error handling CI failure"),
+        c.some(
+          (s) =>
+            s.includes("Merge Queue** — requeued") &&
+            s.includes("error handling CI failure"),
         ),
       ).toBe(true);
     }
@@ -533,7 +555,9 @@ describe("runProcess", () => {
 
     await runProcess(api, git, cfg, nop);
     expect(api.labels.get(1)).toContain("queue:failed");
-    expect(api.comments.get(1)).toContain("Merge queue: CI failed");
+    const c = api.comments.get(1) ?? [];
+    expect(c.some((s) => s.includes("Merge Queue** — CI failed"))).toBe(true);
+    expect(c.some((s) => s.includes(CI_RUN_URL))).toBe(true);
   });
 
   it("triggers bisection on multi-PR CI failure", async () => {
@@ -641,7 +665,7 @@ describe("runBisect", () => {
 
     const origComment = api.comment;
     api.comment = async (n, body) => {
-      if (body.startsWith("Merge queue: bisecting")) {
+      if (body.includes("Merge Queue** — bisecting")) {
         throw new Error("rate limited");
       }
       return origComment(n, body);
@@ -676,11 +700,14 @@ describe("runBisect", () => {
     expect(api.labels.get(1)).toContain("queue:failed");
     // Right half requeued
     expect(api.labels.get(2)).toContain("queue");
-    // Both PRs receive the bisection status comment
+    // Both PRs receive the bisection status comment with a CI run link
     for (const n of [1, 2]) {
       const c = api.comments.get(n) ?? [];
       expect(
-        c.some((s) => s.startsWith("Merge queue: bisecting —")),
+        c.some(
+          (s) =>
+            s.includes("Merge Queue** — bisecting") && s.includes(CI_RUN_URL),
+        ),
       ).toBe(true);
     }
   });

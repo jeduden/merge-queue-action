@@ -7,7 +7,8 @@ export interface GitOperator {
     commitMsg: string,
   ): Promise<boolean>;
   pushBranch(branch: string): Promise<void>;
-  fastForwardMain(ref: string): Promise<void>;
+  /** Fast-forwards main to the given ref and returns the resulting main SHA. */
+  fastForwardMain(ref: string): Promise<string>;
   deleteBranch(branch: string): Promise<void>;
 }
 
@@ -93,12 +94,13 @@ export class Batch {
     return result;
   }
 
-  /** Fast-forwards main to the batch branch and cleans up. */
-  async completeMerge(branch: string): Promise<void> {
+  /** Fast-forwards main to the batch branch and cleans up. Returns the new main SHA. */
+  async completeMerge(branch: string): Promise<string> {
     this.log(`Fast-forwarding main to ${branch}`);
-    if (this.dryRun) return;
-    await this.git.fastForwardMain(branch);
+    if (this.dryRun) return "";
+    const sha = await this.git.fastForwardMain(branch);
     this.log(`Deleting batch branch ${branch}`);
     await this.git.deleteBranch(branch);
+    return sha;
   }
 }

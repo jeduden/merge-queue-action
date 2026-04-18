@@ -1,5 +1,5 @@
 import * as github from "@actions/github";
-import type { PR, GitHubAPI, WorkflowAPI } from "./queue.js";
+import type { PR, GitHubAPI, WorkflowAPI, WorkflowRunResult } from "./queue.js";
 type Octokit = ReturnType<typeof github.getOctokit>;
 /** GitHubClient implements GitHubAPI and WorkflowAPI using the GitHub REST API. */
 export declare class GitHubClient implements GitHubAPI, WorkflowAPI {
@@ -13,7 +13,7 @@ export declare class GitHubClient implements GitHubAPI, WorkflowAPI {
     comment(prNumber: number, body: string): Promise<void>;
     createLabel(name: string, color: string, description: string): Promise<void>;
     triggerWorkflow(workflowFile: string, ref: string, inputs?: Record<string, string>): Promise<void>;
-    getWorkflowRunStatus(workflowFile: string, ref: string, dispatchedAt: Date): Promise<string>;
+    getWorkflowRunStatus(workflowFile: string, ref: string, dispatchedAt: Date): Promise<WorkflowRunResult>;
     closePR(prNumber: number): Promise<void>;
     getPR(prNumber: number): Promise<PR>;
     getActorPermission(username: string): Promise<string>;
