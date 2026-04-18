@@ -142,6 +142,24 @@ describe("Activate", () => {
     }
   });
 
+  it("logs a warning when the status comment fails", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue"]);
+    api.failOn = "comment";
+    const logs: string[] = [];
+
+    const q = new Queue(api, "queue", false, (m) => logs.push(m));
+    await q.activate([
+      { number: 1, headRef: "", headSHA: "", title: "", createdAt: 0 },
+    ]);
+
+    // Label transition still succeeds even when comment post throws
+    expect(api.labels.get(1)).toContain("queue:active");
+    expect(logs.some((l) => l.includes("failed to comment on PR #1"))).toBe(
+      true,
+    );
+  });
+
   it("does not modify labels in dry run", async () => {
     const api = newMockAPI();
     api.labels.set(1, ["queue"]);
@@ -239,6 +257,62 @@ describe("Requeue", () => {
 
     expect(api.comments.get(4)).toContain(
       "Merge queue: requeued — CI trigger failed",
+    );
+  });
+
+  it("sanitizes multi-line reasons into a single line", async () => {
+    const api = newMockAPI();
+    api.labels.set(5, ["queue:active"]);
+
+    const q = new Queue(api, "queue", false, nop);
+    await q.requeue(
+      { number: 5, headRef: "", headSHA: "", title: "", createdAt: 0 },
+      "line one\n  line two\n\nthird\t`with` backticks",
+    );
+
+    const [posted] = api.comments.get(5) ?? [];
+    expect(posted).toBeDefined();
+    expect(posted).not.toContain("\n");
+    expect(posted).not.toContain("`");
+    expect(posted).toBe(
+      "Merge queue: requeued — line one line two third 'with' backticks",
+    );
+  });
+
+  it("truncates very long reasons with an ellipsis", async () => {
+    const api = newMockAPI();
+    api.labels.set(6, ["queue:active"]);
+
+    const long = "x".repeat(500);
+    const q = new Queue(api, "queue", false, nop);
+    await q.requeue(
+      { number: 6, headRef: "", headSHA: "", title: "", createdAt: 0 },
+      long,
+    );
+
+    const [posted] = api.comments.get(6) ?? [];
+    expect(posted).toBeDefined();
+    // Prefix "Merge queue: requeued — " (24 chars) + up to 300-char reason
+    // ending in the ellipsis character
+    expect(posted!.length).toBeLessThanOrEqual(24 + 300);
+    expect(posted!.endsWith("…")).toBe(true);
+  });
+
+  it("logs a warning when the requeue comment fails", async () => {
+    const api = newMockAPI();
+    api.labels.set(7, ["queue:active"]);
+    api.failOn = "comment";
+    const logs: string[] = [];
+
+    const q = new Queue(api, "queue", false, (m) => logs.push(m));
+    await q.requeue(
+      { number: 7, headRef: "", headSHA: "", title: "", createdAt: 0 },
+      "boom",
+    );
+
+    expect(api.labels.get(7)).toContain("queue");
+    expect(logs.some((l) => l.includes("failed to comment on PR #7"))).toBe(
+      true,
     );
   });
 

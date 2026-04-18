@@ -302,6 +302,29 @@ describe("runProcess", () => {
     }
   });
 
+  it("sanitizes non-Error thrown values in requeue comments", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    // Throw a plain object to ensure we don't render "[object Object]"
+    api.triggerWorkflow = async () => {
+      // biome-ignore lint/suspicious/noExplicitAny: exercising unknown-error path
+      throw { weird: true } as any;
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow();
+
+    const comments = api.comments.get(1) ?? [];
+    const errComment = comments.find((s) =>
+      s.startsWith("Merge queue: requeued —"),
+    );
+    expect(errComment).toBeDefined();
+    // The sanitizer collapses whitespace; whatever String()-representation
+    // came out, it must be a single line
+    expect(errComment!.includes("\n")).toBe(false);
+  });
+
   it("requeues all PRs when createAndMerge fails", async () => {
     const api = newMockAPI();
     api.prs.set("queue", [makePR(1), makePR(2)]);
