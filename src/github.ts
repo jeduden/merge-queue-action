@@ -134,11 +134,10 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
   ): Promise<WorkflowRunHandle> {
     const createdAfter = new Date(dispatchedAt.getTime() - 5000);
 
-    // Poll up to ~10 min for the run to appear. Once found, we do not wait
-    // for it to complete here — callers use waitForWorkflowRun for that.
+    // Poll up to ~10 min for the run to appear. Check immediately first,
+    // then sleep between attempts so we can post the "CI running" comment
+    // the moment GitHub registers the dispatched run.
     for (let i = 0; i < 60; i++) {
-      await sleep(10_000);
-
       const { data: runs } =
         await this.octokit.rest.actions.listWorkflowRuns({
           owner: this.owner,
@@ -150,9 +149,12 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
           per_page: 1,
         });
 
-      if (runs.workflow_runs.length === 0) continue;
-      const run = runs.workflow_runs[0];
-      return { runId: run.id, htmlUrl: run.html_url };
+      if (runs.workflow_runs.length > 0) {
+        const run = runs.workflow_runs[0];
+        return { runId: run.id, htmlUrl: run.html_url };
+      }
+
+      await sleep(10_000);
     }
 
     throw new Error("timed out waiting for workflow run to appear");
