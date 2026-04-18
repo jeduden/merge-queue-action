@@ -67,6 +67,17 @@ function isAlreadyExistsError(err: unknown): boolean {
 
 type LogFunc = (msg: string) => void;
 
+/**
+ * Defense-in-depth sanitizer for reason strings that end up in PR comments.
+ * Collapses whitespace, strips backticks, and caps length.
+ */
+function sanitizeReason(reason: string, maxLen = 300): string {
+  const oneLine = reason.replace(/`/g, "'").replace(/\s+/g, " ").trim();
+  return oneLine.length > maxLen
+    ? `${oneLine.slice(0, maxLen - 1)}…`
+    : oneLine;
+}
+
 /** Queue manages the merge queue state machine. */
 export class Queue {
   private api: GitHubAPI;
@@ -176,7 +187,7 @@ export class Queue {
       try {
         await this.api.comment(
           pr.number,
-          `Merge queue: requeued — ${reason}`,
+          `Merge queue: requeued — ${sanitizeReason(reason)}`,
         );
       } catch (err) {
         this.log(`Warning: failed to comment on PR #${pr.number}: ${err}`);

@@ -29936,6 +29936,18 @@ exports.runSetup = runSetup;
 const queue_js_1 = __nccwpck_require__(6556);
 const batch_js_1 = __nccwpck_require__(2983);
 const bisect_js_1 = __nccwpck_require__(6537);
+/**
+ * Extracts a concise, single-line, length-capped string from an unknown error
+ * value. Used to build user-facing PR comments without leaking object dumps or
+ * multi-line stack traces.
+ */
+function formatErrorForComment(err, maxLen = 200) {
+    const raw = err instanceof Error ? err.message : String(err);
+    const oneLine = raw.replace(/\s+/g, " ").trim();
+    return oneLine.length > maxLen
+        ? `${oneLine.slice(0, maxLen - 1)}…`
+        : oneLine;
+}
 function hasWritePermission(perm) {
     return perm === "write" || perm === "maintain" || perm === "admin";
 }
@@ -30047,7 +30059,7 @@ async function runProcess(api, gitOps, cfg, log, actor) {
         result = await b.createAndMerge(batchID, batchPRs);
     }
     catch (err) {
-        await requeueAll(`batch creation failed: ${err}`);
+        await requeueAll(`batch creation failed: ${formatErrorForComment(err)}`);
         throw err;
     }
     // 4. Eject conflicted PRs
@@ -30084,7 +30096,7 @@ async function runProcess(api, gitOps, cfg, log, actor) {
         }
         catch (err) {
             await cleanupBranch(result.branch);
-            await requeueAll(`failed to trigger CI: ${err}`);
+            await requeueAll(`failed to trigger CI: ${formatErrorForComment(err)}`);
             throw new Error(`triggering CI: ${err}`);
         }
         // Post a status comment to each PR now that CI is running
@@ -30109,7 +30121,7 @@ async function runProcess(api, gitOps, cfg, log, actor) {
         }
         catch (err) {
             await cleanupBranch(result.branch);
-            await requeueAll(`failed to read CI status: ${err}`);
+            await requeueAll(`failed to read CI status: ${formatErrorForComment(err)}`);
             throw new Error(`getting CI status: ${err}`);
         }
         if (conclusion !== "success") {
@@ -30117,7 +30129,7 @@ async function runProcess(api, gitOps, cfg, log, actor) {
                 await handleCIFailure(api, cfg, q, gitOps, prs, result, log);
             }
             catch (err) {
-                await requeueAll(`error handling CI failure: ${err}`);
+                await requeueAll(`error handling CI failure: ${formatErrorForComment(err)}`);
                 throw err;
             }
             return;
@@ -30129,7 +30141,7 @@ async function runProcess(api, gitOps, cfg, log, actor) {
     }
     catch (err) {
         await cleanupBranch(result.branch);
-        await requeueAll(`failed to fast-forward main: ${err}`);
+        await requeueAll(`failed to fast-forward main: ${formatErrorForComment(err)}`);
         throw err;
     }
     // Clean up labels and comment on merged PRs
@@ -30192,7 +30204,7 @@ async function runBisect(api, gitOps, cfg, log) {
     if (!cfg.dryRun) {
         for (const n of prNumbers) {
             try {
-                await api.comment(n, `Merge queue: bisecting to isolate failing PR (testing ${left.length} of ${prNumbers.length})`);
+                await api.comment(n, `Merge queue: bisecting to isolate failing PR (testing up to ${left.length} of ${prNumbers.length})`);
             }
             catch (err) {
                 log(`Warning: failed to comment on PR #${n}: ${err}`);
@@ -30296,7 +30308,7 @@ async function runBisect(api, gitOps, cfg, log) {
                         if (excluded.has(n))
                             continue;
                         try {
-                            await q.requeue(prMap.get(n), `failed to dispatch bisect for right half: ${err}`);
+                            await q.requeue(prMap.get(n), `failed to dispatch bisect for right half: ${formatErrorForComment(err)}`);
                         }
                         catch (reqErr) {
                             log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
@@ -30350,7 +30362,7 @@ async function runBisect(api, gitOps, cfg, log) {
                         if (excluded.has(n))
                             continue;
                         try {
-                            await q.requeue(prMap.get(n), `failed to dispatch follow-up bisect: ${err}`);
+                            await q.requeue(prMap.get(n), `failed to dispatch follow-up bisect: ${formatErrorForComment(err)}`);
                         }
                         catch (reqErr) {
                             log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
@@ -30868,6 +30880,16 @@ function isAlreadyExistsError(err) {
         return false;
     return errors.some((error) => error.code === "already_exists");
 }
+/**
+ * Defense-in-depth sanitizer for reason strings that end up in PR comments.
+ * Collapses whitespace, strips backticks, and caps length.
+ */
+function sanitizeReason(reason, maxLen = 300) {
+    const oneLine = reason.replace(/`/g, "'").replace(/\s+/g, " ").trim();
+    return oneLine.length > maxLen
+        ? `${oneLine.slice(0, maxLen - 1)}…`
+        : oneLine;
+}
 /** Queue manages the merge queue state machine. */
 class Queue {
     api;
@@ -30952,7 +30974,7 @@ class Queue {
         await this.api.addLabel(pr.number, queueLabel(this.label, exports.STATE_PENDING));
         if (reason) {
             try {
-                await this.api.comment(pr.number, `Merge queue: requeued — ${reason}`);
+                await this.api.comment(pr.number, `Merge queue: requeued — ${sanitizeReason(reason)}`);
             }
             catch (err) {
                 this.log(`Warning: failed to comment on PR #${pr.number}: ${err}`);

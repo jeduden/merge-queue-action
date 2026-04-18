@@ -17,6 +17,19 @@ export interface Config {
   batchPrs: string;
 }
 
+/**
+ * Extracts a concise, single-line, length-capped string from an unknown error
+ * value. Used to build user-facing PR comments without leaking object dumps or
+ * multi-line stack traces.
+ */
+function formatErrorForComment(err: unknown, maxLen = 200): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const oneLine = raw.replace(/\s+/g, " ").trim();
+  return oneLine.length > maxLen
+    ? `${oneLine.slice(0, maxLen - 1)}…`
+    : oneLine;
+}
+
 /** FullAPI combines all GitHub API interfaces needed by the orchestration. */
 export interface FullAPI extends GitHubAPI, WorkflowAPI {
   getActorPermission(username: string): Promise<string>;
@@ -164,7 +177,7 @@ export async function runProcess(
   try {
     result = await b.createAndMerge(batchID, batchPRs);
   } catch (err) {
-    await requeueAll(`batch creation failed: ${err}`);
+    await requeueAll(`batch creation failed: ${formatErrorForComment(err)}`);
     throw err;
   }
 
@@ -201,7 +214,9 @@ export async function runProcess(
       await api.triggerWorkflow(cfg.ciWorkflow, result.branch);
     } catch (err) {
       await cleanupBranch(result.branch);
-      await requeueAll(`failed to trigger CI: ${err}`);
+      await requeueAll(
+        `failed to trigger CI: ${formatErrorForComment(err)}`,
+      );
       throw new Error(`triggering CI: ${err}`);
     }
 
@@ -234,7 +249,9 @@ export async function runProcess(
       );
     } catch (err) {
       await cleanupBranch(result.branch);
-      await requeueAll(`failed to read CI status: ${err}`);
+      await requeueAll(
+        `failed to read CI status: ${formatErrorForComment(err)}`,
+      );
       throw new Error(`getting CI status: ${err}`);
     }
 
@@ -242,7 +259,9 @@ export async function runProcess(
       try {
         await handleCIFailure(api, cfg, q, gitOps, prs, result, log);
       } catch (err) {
-        await requeueAll(`error handling CI failure: ${err}`);
+        await requeueAll(
+          `error handling CI failure: ${formatErrorForComment(err)}`,
+        );
         throw err;
       }
       return;
@@ -254,7 +273,9 @@ export async function runProcess(
     await b.completeMerge(result.branch);
   } catch (err) {
     await cleanupBranch(result.branch);
-    await requeueAll(`failed to fast-forward main: ${err}`);
+    await requeueAll(
+      `failed to fast-forward main: ${formatErrorForComment(err)}`,
+    );
     throw err;
   }
 
@@ -332,7 +353,7 @@ export async function runBisect(
       try {
         await api.comment(
           n,
-          `Merge queue: bisecting to isolate failing PR (testing ${left.length} of ${prNumbers.length})`,
+          `Merge queue: bisecting to isolate failing PR (testing up to ${left.length} of ${prNumbers.length})`,
         );
       } catch (err) {
         log(`Warning: failed to comment on PR #${n}: ${err}`);
@@ -446,7 +467,7 @@ export async function runBisect(
             try {
               await q.requeue(
                 prMap.get(n)!,
-                `failed to dispatch bisect for right half: ${err}`,
+                `failed to dispatch bisect for right half: ${formatErrorForComment(err)}`,
               );
             } catch (reqErr) {
               log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
@@ -498,7 +519,7 @@ export async function runBisect(
             try {
               await q.requeue(
                 prMap.get(n)!,
-                `failed to dispatch follow-up bisect: ${err}`,
+                `failed to dispatch follow-up bisect: ${formatErrorForComment(err)}`,
               );
             } catch (reqErr) {
               log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
