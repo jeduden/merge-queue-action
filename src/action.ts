@@ -19,11 +19,31 @@ export interface Config {
 
 /**
  * Extracts a concise, single-line, length-capped string from an unknown error
- * value. Used to build user-facing PR comments without leaking object dumps or
- * multi-line stack traces.
+ * value. Used to build user-facing PR comments without leaking object dumps
+ * (e.g. "[object Object]") or multi-line stack traces.
  */
 function formatErrorForComment(err: unknown, maxLen = 200): string {
-  const raw = err instanceof Error ? err.message : String(err);
+  let raw: string;
+  if (err instanceof Error) {
+    raw = err.message;
+  } else if (typeof err === "string") {
+    raw = err;
+  } else if (
+    typeof err === "object" &&
+    err !== null &&
+    "message" in err &&
+    typeof (err as { message: unknown }).message === "string"
+  ) {
+    raw = (err as { message: string }).message;
+  } else if (
+    typeof err === "number" ||
+    typeof err === "boolean" ||
+    typeof err === "bigint"
+  ) {
+    raw = String(err);
+  } else {
+    raw = "unknown error";
+  }
   const oneLine = raw.replace(/\s+/g, " ").trim();
   return oneLine.length > maxLen
     ? `${oneLine.slice(0, maxLen - 1)}…`
@@ -353,7 +373,7 @@ export async function runBisect(
       try {
         await api.comment(
           n,
-          `Merge queue: bisecting to isolate failing PR (testing up to ${left.length} of ${prNumbers.length})`,
+          `Merge queue: bisecting — current run tests up to ${left.length} of ${prNumbers.length} candidate PRs`,
         );
       } catch (err) {
         log(`Warning: failed to comment on PR #${n}: ${err}`);

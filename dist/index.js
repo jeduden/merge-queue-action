@@ -29938,11 +29938,31 @@ const batch_js_1 = __nccwpck_require__(2983);
 const bisect_js_1 = __nccwpck_require__(6537);
 /**
  * Extracts a concise, single-line, length-capped string from an unknown error
- * value. Used to build user-facing PR comments without leaking object dumps or
- * multi-line stack traces.
+ * value. Used to build user-facing PR comments without leaking object dumps
+ * (e.g. "[object Object]") or multi-line stack traces.
  */
 function formatErrorForComment(err, maxLen = 200) {
-    const raw = err instanceof Error ? err.message : String(err);
+    let raw;
+    if (err instanceof Error) {
+        raw = err.message;
+    }
+    else if (typeof err === "string") {
+        raw = err;
+    }
+    else if (typeof err === "object" &&
+        err !== null &&
+        "message" in err &&
+        typeof err.message === "string") {
+        raw = err.message;
+    }
+    else if (typeof err === "number" ||
+        typeof err === "boolean" ||
+        typeof err === "bigint") {
+        raw = String(err);
+    }
+    else {
+        raw = "unknown error";
+    }
     const oneLine = raw.replace(/\s+/g, " ").trim();
     return oneLine.length > maxLen
         ? `${oneLine.slice(0, maxLen - 1)}…`
@@ -30204,7 +30224,7 @@ async function runBisect(api, gitOps, cfg, log) {
     if (!cfg.dryRun) {
         for (const n of prNumbers) {
             try {
-                await api.comment(n, `Merge queue: bisecting to isolate failing PR (testing up to ${left.length} of ${prNumbers.length})`);
+                await api.comment(n, `Merge queue: bisecting — current run tests up to ${left.length} of ${prNumbers.length} candidate PRs`);
             }
             catch (err) {
                 log(`Warning: failed to comment on PR #${n}: ${err}`);

@@ -302,12 +302,13 @@ describe("runProcess", () => {
     }
   });
 
-  it("sanitizes non-Error thrown values in requeue comments", async () => {
+  it("renders opaque non-Error thrown values as 'unknown error'", async () => {
     const api = newMockAPI();
     api.prs.set("queue", [makePR(1)]);
     const git = newMockGit();
     const cfg = baseCfg({ dryRun: false });
-    // Throw a plain object to ensure we don't render "[object Object]"
+    // A plain object with no `message` property: must NOT leak as
+    // "[object Object]" to user-facing PR comments.
     api.triggerWorkflow = async () => {
       // biome-ignore lint/suspicious/noExplicitAny: exercising unknown-error path
       throw { weird: true } as any;
@@ -320,9 +321,148 @@ describe("runProcess", () => {
       s.startsWith("Merge queue: requeued —"),
     );
     expect(errComment).toBeDefined();
-    // The sanitizer collapses whitespace; whatever String()-representation
-    // came out, it must be a single line
+    expect(errComment!).not.toContain("[object Object]");
+    expect(errComment!).toContain("unknown error");
     expect(errComment!.includes("\n")).toBe(false);
+  });
+
+  it("handles thrown strings directly", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    api.triggerWorkflow = async () => {
+      // biome-ignore lint/suspicious/noExplicitAny: exercising thrown-string path
+      throw "bare string err" as any;
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow();
+
+    const comments = api.comments.get(1) ?? [];
+    const errComment = comments.find((s) =>
+      s.startsWith("Merge queue: requeued —"),
+    );
+    expect(errComment).toBeDefined();
+    expect(errComment!).toContain("bare string err");
+  });
+
+  it("handles thrown primitive numbers", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    api.triggerWorkflow = async () => {
+      // biome-ignore lint/suspicious/noExplicitAny: exercising thrown-number path
+      throw 42 as any;
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow();
+
+    const comments = api.comments.get(1) ?? [];
+    const errComment = comments.find((s) =>
+      s.startsWith("Merge queue: requeued —"),
+    );
+    expect(errComment).toBeDefined();
+    expect(errComment!).toContain("42");
+    expect(errComment!).not.toContain("[object");
+  });
+
+  it("uses the `message` field of plain-object errors", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    api.triggerWorkflow = async () => {
+      // biome-ignore lint/suspicious/noExplicitAny: exercising unknown-error path
+      throw { message: "pretty error" } as any;
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow();
+
+    const comments = api.comments.get(1) ?? [];
+    const errComment = comments.find((s) =>
+      s.startsWith("Merge queue: requeued —"),
+    );
+    expect(errComment).toBeDefined();
+    expect(errComment!).toContain("pretty error");
+  });
+
+  it("truncates overly long error messages in requeue comments", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    const longMsg = "x".repeat(500);
+    api.triggerWorkflow = async () => {
+      throw new Error(longMsg);
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow();
+
+    const comments = api.comments.get(1) ?? [];
+    const errComment = comments.find((s) =>
+      s.startsWith("Merge queue: requeued —"),
+    );
+    expect(errComment).toBeDefined();
+    expect(errComment!).toContain("…");
+    // 500 x's should have been truncated well below their original length
+    expect(errComment!.length).toBeLessThan(longMsg.length);
+  });
+
+  it("tolerates failures when posting the CI-running status comment", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    const logs: string[] = [];
+
+    const origComment = api.comment;
+    api.comment = async (n, body) => {
+      if (body.startsWith("Merge queue: CI running on batch")) {
+        throw new Error("rate limited");
+      }
+      return origComment(n, body);
+    };
+
+    // Should still complete the merge flow despite the comment failure
+    await runProcess(api, git, cfg, (m) => logs.push(m));
+    expect(git.ffRef).toContain("merge-queue/batch-");
+    expect(logs.some((l) => l.includes("failed to comment on PR #1"))).toBe(
+      true,
+    );
+  });
+
+  it("requeues with a reason when bisect dispatch fails on CI failure", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1), makePR(2)]);
+    api.ciConclusion = "failure";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+
+    const origTrigger = api.triggerWorkflow.bind(api);
+    api.triggerWorkflow = async (file, ref, inputs) => {
+      // Let the initial CI dispatch succeed; fail the bisect dispatch so
+      // handleCIFailure throws and the outer error-handling path runs.
+      if (inputs?.bisect === "true") throw new Error("dispatch boom");
+      return origTrigger(file, ref, inputs);
+    };
+
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await expect(runProcess(api, git, cfg, nop)).rejects.toThrow();
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
+
+    for (const n of [1, 2]) {
+      const c = api.comments.get(n) ?? [];
+      expect(
+        c.some((s) =>
+          s.startsWith("Merge queue: requeued — error handling CI failure"),
+        ),
+      ).toBe(true);
+    }
   });
 
   it("requeues all PRs when createAndMerge fails", async () => {
@@ -491,6 +631,39 @@ describe("runBisect", () => {
     expect(logs.some((l) => l.includes("Left half passed"))).toBe(true);
   });
 
+  it("tolerates failures when posting the bisection status comment", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+    const logs: string[] = [];
+
+    const origComment = api.comment;
+    api.comment = async (n, body) => {
+      if (body.startsWith("Merge queue: bisecting")) {
+        throw new Error("rate limited");
+      }
+      return origComment(n, body);
+    };
+
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await runBisect(api, git, cfg, (m) => logs.push(m));
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
+
+    // Both PRs got a comment-post attempt; we logged warnings but the bisect
+    // still completed its left-half merge.
+    expect(logs.some((l) => l.includes("failed to comment on PR #1"))).toBe(
+      true,
+    );
+    expect(logs.some((l) => l.includes("failed to comment on PR #2"))).toBe(
+      true,
+    );
+  });
+
   it("identifies single culprit when left half fails", async () => {
     const api = newMockAPI();
     api.prs.set("queue:active", [makePR(1), makePR(2)]);
@@ -507,7 +680,7 @@ describe("runBisect", () => {
     for (const n of [1, 2]) {
       const c = api.comments.get(n) ?? [];
       expect(
-        c.some((s) => s.startsWith("Merge queue: bisecting to isolate failing PR")),
+        c.some((s) => s.startsWith("Merge queue: bisecting —")),
       ).toBe(true);
     }
   });
