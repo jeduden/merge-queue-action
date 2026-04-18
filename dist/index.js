@@ -30118,7 +30118,7 @@ async function runProcess(api, gitOps, cfg, log, actor) {
         catch (err) {
             await cleanupBranch(result.branch);
             await requeueAll(`failed to trigger CI: ${(0, comments_js_1.formatErrorForComment)(err)}`);
-            throw new Error(`triggering CI: ${err}`);
+            throw new Error(`triggering CI: ${(0, comments_js_1.formatErrorForComment)(err)}`);
         }
         let runHandle;
         try {
@@ -30127,7 +30127,7 @@ async function runProcess(api, gitOps, cfg, log, actor) {
         catch (err) {
             await cleanupBranch(result.branch);
             await requeueAll(`failed to locate CI run: ${(0, comments_js_1.formatErrorForComment)(err)}`);
-            throw new Error(`locating CI run: ${err}`);
+            throw new Error(`locating CI run: ${(0, comments_js_1.formatErrorForComment)(err)}`);
         }
         ciRunUrl = runHandle.htmlUrl;
         // Announce CI-running state now — before blocking on completion.
@@ -30145,7 +30145,7 @@ async function runProcess(api, gitOps, cfg, log, actor) {
         catch (err) {
             await cleanupBranch(result.branch);
             await requeueAll(`failed to read CI status: ${(0, comments_js_1.formatErrorForComment)(err)}`);
-            throw new Error(`getting CI status: ${err}`);
+            throw new Error(`getting CI status: ${(0, comments_js_1.formatErrorForComment)(err)}`);
         }
         if (runResult.conclusion !== "success") {
             try {
@@ -30279,7 +30279,7 @@ async function runBisect(api, gitOps, cfg, log) {
             catch {
                 /* best effort */
             }
-            throw new Error(`triggering CI for bisect: ${err}`);
+            throw new Error(`triggering CI for bisect: ${(0, comments_js_1.formatErrorForComment)(err)}`);
         }
         const runHandle = await api.findWorkflowRun(cfg.ciWorkflow, result.branch, dispatchedAt);
         ciRunUrl = runHandle.htmlUrl;
@@ -30335,7 +30335,7 @@ async function runBisect(api, gitOps, cfg, log) {
                         }
                         await postComment(api, n, (0, comments_js_1.commentRequeued)(ctx, `failed to dispatch bisect for right half: ${(0, comments_js_1.formatErrorForComment)(err)}`), log);
                     }
-                    throw new Error(`dispatching bisect for right half: ${err}`);
+                    throw new Error(`dispatching bisect for right half: ${(0, comments_js_1.formatErrorForComment)(err)}`);
                 }
             }
         }
@@ -30394,7 +30394,7 @@ async function runBisect(api, gitOps, cfg, log) {
                         }
                         await postComment(api, n, (0, comments_js_1.commentRequeued)(ctx, `failed to dispatch follow-up bisect: ${(0, comments_js_1.formatErrorForComment)(err)}`), log);
                     }
-                    throw new Error(`dispatching follow-up bisect: ${err}`);
+                    throw new Error(`dispatching follow-up bisect: ${(0, comments_js_1.formatErrorForComment)(err)}`);
                 }
             }
         }
@@ -30543,9 +30543,13 @@ function formatErrorForComment(err, maxLen = 200) {
         raw = "unknown error";
     }
     const oneLine = raw.replace(/`/g, "'").replace(/\s+/g, " ").trim();
-    return oneLine.length > maxLen
-        ? `${oneLine.slice(0, maxLen - 1)}…`
-        : oneLine;
+    // If the chosen source (e.g. Error.message or a {message} object) was
+    // empty or whitespace-only, fall back so requeue comments don't render
+    // as a blank blockquote.
+    const safeOneLine = oneLine || "unknown error";
+    return safeOneLine.length > maxLen
+        ? `${safeOneLine.slice(0, maxLen - 1)}…`
+        : safeOneLine;
 }
 function branchLink(ctx, branch) {
     // Encode each path segment; preserve `/` so nested branch names like

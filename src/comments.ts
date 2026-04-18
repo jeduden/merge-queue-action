@@ -29,9 +29,13 @@ export function formatErrorForComment(err: unknown, maxLen = 200): string {
     raw = "unknown error";
   }
   const oneLine = raw.replace(/`/g, "'").replace(/\s+/g, " ").trim();
-  return oneLine.length > maxLen
-    ? `${oneLine.slice(0, maxLen - 1)}…`
-    : oneLine;
+  // If the chosen source (e.g. Error.message or a {message} object) was
+  // empty or whitespace-only, fall back so requeue comments don't render
+  // as a blank blockquote.
+  const safeOneLine = oneLine || "unknown error";
+  return safeOneLine.length > maxLen
+    ? `${safeOneLine.slice(0, maxLen - 1)}…`
+    : safeOneLine;
 }
 
 function branchLink(ctx: CommentCtx, branch: string): string {

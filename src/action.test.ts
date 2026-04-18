@@ -326,6 +326,25 @@ describe("runProcess", () => {
     }
   });
 
+  it("falls back to 'unknown error' for Errors with an empty message", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    api.triggerWorkflow = async () => {
+      throw new Error("");
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow();
+
+    const comments = api.comments.get(1) ?? [];
+    const errComment = comments.find((s) => s.includes("— requeued"));
+    expect(errComment).toBeDefined();
+    expect(errComment!).toContain("unknown error");
+    // Blockquote must not be blank (the `> ` would be followed by empty)
+    expect(errComment!).not.toMatch(/^> *$/m);
+  });
+
   it("renders opaque non-Error thrown values as 'unknown error'", async () => {
     const api = newMockAPI();
     api.prs.set("queue", [makePR(1)]);

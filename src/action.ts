@@ -279,7 +279,7 @@ export async function runProcess(
       await requeueAll(
         `failed to trigger CI: ${formatErrorForComment(err)}`,
       );
-      throw new Error(`triggering CI: ${err}`);
+      throw new Error(`triggering CI: ${formatErrorForComment(err)}`);
     }
 
     let runHandle: WorkflowRunHandle;
@@ -294,7 +294,7 @@ export async function runProcess(
       await requeueAll(
         `failed to locate CI run: ${formatErrorForComment(err)}`,
       );
-      throw new Error(`locating CI run: ${err}`);
+      throw new Error(`locating CI run: ${formatErrorForComment(err)}`);
     }
     ciRunUrl = runHandle.htmlUrl;
 
@@ -320,7 +320,7 @@ export async function runProcess(
       await requeueAll(
         `failed to read CI status: ${formatErrorForComment(err)}`,
       );
-      throw new Error(`getting CI status: ${err}`);
+      throw new Error(`getting CI status: ${formatErrorForComment(err)}`);
     }
 
     if (runResult.conclusion !== "success") {
@@ -493,7 +493,9 @@ export async function runBisect(
       } catch {
         /* best effort */
       }
-      throw new Error(`triggering CI for bisect: ${err}`);
+      throw new Error(
+        `triggering CI for bisect: ${formatErrorForComment(err)}`,
+      );
     }
 
     const runHandle = await api.findWorkflowRun(
@@ -581,7 +583,9 @@ export async function runBisect(
               log,
             );
           }
-          throw new Error(`dispatching bisect for right half: ${err}`);
+          throw new Error(
+            `dispatching bisect for right half: ${formatErrorForComment(err)}`,
+          );
         }
       }
     }
@@ -648,7 +652,9 @@ export async function runBisect(
               log,
             );
           }
-          throw new Error(`dispatching follow-up bisect: ${err}`);
+          throw new Error(
+            `dispatching follow-up bisect: ${formatErrorForComment(err)}`,
+          );
         }
       }
     }
