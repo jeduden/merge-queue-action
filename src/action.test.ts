@@ -8,7 +8,11 @@ import {
   type FullAPI,
   type Config,
 } from "./action.js";
-import type { PR, WorkflowRunResult } from "./queue.js";
+import type {
+  PR,
+  WorkflowRunHandle,
+  WorkflowRunResult,
+} from "./queue.js";
 import type { GitOperator } from "./batch.js";
 
 const CTX = {
@@ -91,7 +95,10 @@ function newMockAPI(): FullAPI & {
     ): Promise<void> {
       mock.workflows.push({ file, ref, inputs });
     },
-    async getWorkflowRunStatus(): Promise<WorkflowRunResult> {
+    async findWorkflowRun(): Promise<WorkflowRunHandle> {
+      return { runId: 1234567, htmlUrl: CI_RUN_URL };
+    },
+    async waitForWorkflowRun(): Promise<WorkflowRunResult> {
       return { conclusion: mock.ciConclusion, htmlUrl: CI_RUN_URL };
     },
     async closePR(): Promise<void> {},
@@ -526,12 +533,28 @@ describe("runProcess", () => {
     api.prs.set("queue", [makePR(1)]);
     const git = newMockGit();
     const cfg = baseCfg({ dryRun: false });
-    api.getWorkflowRunStatus = async () => {
+    api.waitForWorkflowRun = async () => {
       throw new Error("timeout");
     };
 
     await expect(runProcess(api, git, cfg, nop)).rejects.toThrow(
       "getting CI status",
+    );
+    expect(git.deleted.length).toBeGreaterThan(0);
+    expect(api.labels.get(1)).toContain("queue");
+  });
+
+  it("cleans up and requeues when the CI run cannot be located", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    api.findWorkflowRun = async () => {
+      throw new Error("not found");
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow(
+      "locating CI run",
     );
     expect(git.deleted.length).toBeGreaterThan(0);
     expect(api.labels.get(1)).toContain("queue");
@@ -854,5 +877,36 @@ describe("runSetup", () => {
     await runSetup(api, cfg, (m) => logs.push(m));
     expect(api.createdLabels).toHaveLength(3);
     expect(logs.some((l) => l.includes("Setting up labels"))).toBe(true);
+  });
+
+  it("does not require commentCtx", async () => {
+    const api = newMockAPI();
+    const cfg: Config = {
+      ciWorkflow: ".github/workflows/ci.yml",
+      batchSize: 5,
+      queueLabel: "queue",
+      dryRun: false,
+      batchPrs: "",
+    };
+    await runSetup(api, cfg, nop);
+    expect(api.createdLabels).toHaveLength(3);
+  });
+});
+
+describe("commentCtx requirement", () => {
+  it("runProcess throws a clear error when commentCtx is missing", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    const cfg: Config = {
+      ciWorkflow: ".github/workflows/ci.yml",
+      batchSize: 5,
+      queueLabel: "queue",
+      dryRun: false,
+      batchPrs: "",
+    };
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow(
+      "commentCtx is required",
+    );
   });
 });

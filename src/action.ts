@@ -5,6 +5,7 @@ import {
   type PR,
   type GitHubAPI,
   type WorkflowAPI,
+  type WorkflowRunHandle,
   type WorkflowRunResult,
 } from "./queue.js";
 import { Batch, type BatchPR, type MergeResult, type GitOperator } from "./batch.js";
@@ -27,7 +28,17 @@ export interface Config {
   queueLabel: string;
   dryRun: boolean;
   batchPrs: string;
-  commentCtx: CommentCtx;
+  /** Required by runProcess/runBisect; unused by runSetup. */
+  commentCtx?: CommentCtx;
+}
+
+function requireCtx(cfg: Config): CommentCtx {
+  if (!cfg.commentCtx) {
+    throw new Error(
+      "Config.commentCtx is required for runProcess/runBisect",
+    );
+  }
+  return cfg.commentCtx;
 }
 
 export type { CommentCtx };
@@ -84,6 +95,7 @@ async function postComment(
 async function handleCIFailure(
   api: FullAPI,
   cfg: Config,
+  ctx: CommentCtx,
   q: Queue,
   gitOps: GitOperator,
   prs: PR[],
@@ -107,7 +119,7 @@ async function handleCIFailure(
         await postComment(
           api,
           pr.number,
-          commentCIFailed(cfg.commentCtx, ciRunUrl, false),
+          commentCIFailed(ctx, ciRunUrl, false),
           log,
         );
       }
@@ -136,6 +148,8 @@ export async function runProcess(
   log: (msg: string) => void,
   actor?: string,
 ): Promise<void> {
+  const ctx = requireCtx(cfg);
+
   // Check actor permission
   if (actor) {
     const perm = await api.getActorPermission(actor);
@@ -163,7 +177,7 @@ export async function runProcess(
   await q.activate(prs);
   if (!cfg.dryRun) {
     for (const pr of prs) {
-      await postComment(api, pr.number, commentPickedUp(cfg.commentCtx), log);
+      await postComment(api, pr.number, commentPickedUp(ctx), log);
     }
   }
 
@@ -185,7 +199,7 @@ export async function runProcess(
         await postComment(
           api,
           pr.number,
-          commentRequeued(cfg.commentCtx, reason),
+          commentRequeued(ctx, reason),
           log,
         );
       }
@@ -230,7 +244,7 @@ export async function runProcess(
           await postComment(
             api,
             pr.number,
-            commentMergeConflict(cfg.commentCtx),
+            commentMergeConflict(ctx),
             log,
           );
         }
@@ -252,7 +266,8 @@ export async function runProcess(
     return;
   }
 
-  // 5. Trigger CI and wait
+  // 5. Trigger CI, announce the run URL to PRs as soon as it appears,
+  //    then wait for completion.
   log(`Triggering CI workflow ${cfg.ciWorkflow} on ${result.branch}`);
   let ciRunUrl = "";
   if (!cfg.dryRun) {
@@ -267,10 +282,9 @@ export async function runProcess(
       throw new Error(`triggering CI: ${err}`);
     }
 
-    log("Waiting for CI result...");
-    let runResult: WorkflowRunResult;
+    let runHandle: WorkflowRunHandle;
     try {
-      runResult = await api.getWorkflowRunStatus(
+      runHandle = await api.findWorkflowRun(
         cfg.ciWorkflow,
         result.branch,
         dispatchedAt,
@@ -278,13 +292,13 @@ export async function runProcess(
     } catch (err) {
       await cleanupBranch(result.branch);
       await requeueAll(
-        `failed to read CI status: ${formatErrorForComment(err)}`,
+        `failed to locate CI run: ${formatErrorForComment(err)}`,
       );
-      throw new Error(`getting CI status: ${err}`);
+      throw new Error(`locating CI run: ${err}`);
     }
-    ciRunUrl = runResult.htmlUrl;
+    ciRunUrl = runHandle.htmlUrl;
 
-    // Now that we have the CI run URL, announce it to each PR in the batch.
+    // Announce CI-running state now — before blocking on completion.
     for (const mp of result.merged) {
       const siblings = result.merged
         .filter((p) => p.number !== mp.number)
@@ -292,9 +306,21 @@ export async function runProcess(
       await postComment(
         api,
         mp.number,
-        commentCIRunning(cfg.commentCtx, result.branch, siblings, ciRunUrl),
+        commentCIRunning(ctx, result.branch, siblings, ciRunUrl),
         log,
       );
+    }
+
+    log("Waiting for CI result...");
+    let runResult: WorkflowRunResult;
+    try {
+      runResult = await api.waitForWorkflowRun(runHandle.runId);
+    } catch (err) {
+      await cleanupBranch(result.branch);
+      await requeueAll(
+        `failed to read CI status: ${formatErrorForComment(err)}`,
+      );
+      throw new Error(`getting CI status: ${err}`);
     }
 
     if (runResult.conclusion !== "success") {
@@ -302,6 +328,7 @@ export async function runProcess(
         await handleCIFailure(
           api,
           cfg,
+          ctx,
           q,
           gitOps,
           prs,
@@ -347,7 +374,7 @@ export async function runProcess(
       await postComment(
         api,
         pr.number,
-        commentMerged(cfg.commentCtx, mergeSha, ciRunUrl),
+        commentMerged(ctx, mergeSha, ciRunUrl),
         log,
       );
     }
@@ -362,6 +389,7 @@ export async function runBisect(
   cfg: Config,
   log: (msg: string) => void,
 ): Promise<void> {
+  const ctx = requireCtx(cfg);
   const prListStr = cfg.batchPrs;
   if (!prListStr) {
     throw new Error("batch_prs input is required for bisect mode");
@@ -426,7 +454,7 @@ export async function runBisect(
           await postComment(
             api,
             pr.number,
-            commentMergeConflict(cfg.commentCtx),
+            commentMergeConflict(ctx),
             log,
           );
         }
@@ -467,30 +495,35 @@ export async function runBisect(
       }
       throw new Error(`triggering CI for bisect: ${err}`);
     }
-    const runResult = await api.getWorkflowRunStatus(
+
+    const runHandle = await api.findWorkflowRun(
       cfg.ciWorkflow,
       result.branch,
       dispatchedAt,
     );
-    conclusion = runResult.conclusion;
-    ciRunUrl = runResult.htmlUrl;
+    ciRunUrl = runHandle.htmlUrl;
 
-    // Post bisection status comment to each candidate PR now that the
-    // CI run URL is known.
+    // Post bisection status comment to each still-candidate PR as soon as
+    // the run is known. Skip any PR already failed via merge conflict in
+    // this bisect run, and report the actually-tested count.
     for (const n of prNumbers) {
+      if (excluded.has(n)) continue;
       await postComment(
         api,
         n,
         commentBisecting(
-          cfg.commentCtx,
+          ctx,
           result.branch,
-          left.length,
-          prNumbers.length,
+          mergedLeft.length,
+          prNumbers.length - excluded.size,
           ciRunUrl,
         ),
         log,
       );
     }
+
+    const runResult = await api.waitForWorkflowRun(runHandle.runId);
+    conclusion = runResult.conclusion;
   }
 
   if (conclusion === "success") {
@@ -512,7 +545,7 @@ export async function runBisect(
         await postComment(
           api,
           n,
-          commentMerged(cfg.commentCtx, mergeSha, ciRunUrl),
+          commentMerged(ctx, mergeSha, ciRunUrl),
           log,
         );
       }
@@ -542,7 +575,7 @@ export async function runBisect(
               api,
               n,
               commentRequeued(
-                cfg.commentCtx,
+                ctx,
                 `failed to dispatch bisect for right half: ${formatErrorForComment(err)}`,
               ),
               log,
@@ -571,7 +604,7 @@ export async function runBisect(
         await postComment(
           api,
           pr.number,
-          commentCIFailed(cfg.commentCtx, ciRunUrl, true),
+          commentCIFailed(ctx, ciRunUrl, true),
           log,
         );
       }
@@ -609,7 +642,7 @@ export async function runBisect(
               api,
               n,
               commentRequeued(
-                cfg.commentCtx,
+                ctx,
                 `failed to dispatch follow-up bisect: ${formatErrorForComment(err)}`,
               ),
               log,

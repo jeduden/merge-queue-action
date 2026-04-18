@@ -35,7 +35,10 @@ export function formatErrorForComment(err: unknown, maxLen = 200): string {
 }
 
 function branchLink(ctx: CommentCtx, branch: string): string {
-  return `[\`${branch}\`](${ctx.serverUrl}/${ctx.ownerRepo}/tree/${branch})`;
+  // Encode each path segment; preserve `/` so nested branch names like
+  // `merge-queue/batch-42` render as clean path segments.
+  const encoded = branch.split("/").map(encodeURIComponent).join("/");
+  return `[\`${branch}\`](${ctx.serverUrl}/${ctx.ownerRepo}/tree/${encoded})`;
 }
 
 function commitLink(ctx: CommentCtx, sha: string): string {

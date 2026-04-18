@@ -7,7 +7,8 @@ export interface Config {
     queueLabel: string;
     dryRun: boolean;
     batchPrs: string;
-    commentCtx: CommentCtx;
+    /** Required by runProcess/runBisect; unused by runSetup. */
+    commentCtx?: CommentCtx;
 }
 export type { CommentCtx };
 /** FullAPI combines all GitHub API interfaces needed by the orchestration. */

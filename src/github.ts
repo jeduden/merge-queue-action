@@ -3,6 +3,7 @@ import type {
   PR,
   GitHubAPI,
   WorkflowAPI,
+  WorkflowRunHandle,
   WorkflowRunResult,
 } from "./queue.js";
 
@@ -126,14 +127,16 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
     });
   }
 
-  async getWorkflowRunStatus(
+  async findWorkflowRun(
     workflowFile: string,
     ref: string,
     dispatchedAt: Date,
-  ): Promise<WorkflowRunResult> {
+  ): Promise<WorkflowRunHandle> {
     const createdAfter = new Date(dispatchedAt.getTime() - 5000);
 
-    for (let i = 0; i < 360; i++) {
+    // Poll up to ~10 min for the run to appear. Once found, we do not wait
+    // for it to complete here — callers use waitForWorkflowRun for that.
+    for (let i = 0; i < 60; i++) {
       await sleep(10_000);
 
       const { data: runs } =
@@ -148,17 +151,33 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
         });
 
       if (runs.workflow_runs.length === 0) continue;
-
       const run = runs.workflow_runs[0];
+      return { runId: run.id, htmlUrl: run.html_url };
+    }
+
+    throw new Error("timed out waiting for workflow run to appear");
+  }
+
+  async waitForWorkflowRun(runId: number): Promise<WorkflowRunResult> {
+    // Poll up to ~1h for completion.
+    for (let i = 0; i < 360; i++) {
+      const { data: run } = await this.octokit.rest.actions.getWorkflowRun({
+        owner: this.owner,
+        repo: this.repo,
+        run_id: runId,
+      });
+
       if (run.status === "completed") {
         return {
           conclusion: run.conclusion ?? "unknown",
           htmlUrl: run.html_url,
         };
       }
+
+      await sleep(10_000);
     }
 
-    throw new Error("timed out waiting for workflow run");
+    throw new Error("timed out waiting for workflow run to complete");
   }
 
   async closePR(prNumber: number): Promise<void> {
