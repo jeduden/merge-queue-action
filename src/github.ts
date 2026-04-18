@@ -133,11 +133,12 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
     dispatchedAt: Date,
   ): Promise<WorkflowRunHandle> {
     const createdAfter = new Date(dispatchedAt.getTime() - 5000);
+    const maxAttempts = 60;
 
     // Poll up to ~10 min for the run to appear. Check immediately first,
     // then sleep between attempts so we can post the "CI running" comment
     // the moment GitHub registers the dispatched run.
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < maxAttempts; i++) {
       const { data: runs } =
         await this.octokit.rest.actions.listWorkflowRuns({
           owner: this.owner,
@@ -154,15 +155,17 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
         return { runId: run.id, htmlUrl: run.html_url };
       }
 
-      await sleep(10_000);
+      if (i < maxAttempts - 1) await sleep(10_000);
     }
 
     throw new Error("timed out waiting for workflow run to appear");
   }
 
   async waitForWorkflowRun(runId: number): Promise<WorkflowRunResult> {
+    const maxAttempts = 360;
+
     // Poll up to ~1h for completion.
-    for (let i = 0; i < 360; i++) {
+    for (let i = 0; i < maxAttempts; i++) {
       const { data: run } = await this.octokit.rest.actions.getWorkflowRun({
         owner: this.owner,
         repo: this.repo,
@@ -176,7 +179,7 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
         };
       }
 
-      await sleep(10_000);
+      if (i < maxAttempts - 1) await sleep(10_000);
     }
 
     throw new Error("timed out waiting for workflow run to complete");

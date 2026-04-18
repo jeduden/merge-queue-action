@@ -871,6 +871,48 @@ describe("runBisect", () => {
     expect(git.deleted.length).toBeGreaterThan(0);
   });
 
+  it("cleans up and requeues when bisect CI run cannot be located", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+    api.findWorkflowRun = async () => {
+      throw new Error("timeout");
+    };
+
+    await expect(runBisect(api, git, cfg, nop)).rejects.toThrow(
+      "locating bisect CI run",
+    );
+    // Bisect branch was cleaned up
+    expect(git.deleted.length).toBeGreaterThan(0);
+    // Both candidate PRs requeued with a requeued status comment
+    for (const n of [1, 2]) {
+      expect(api.labels.get(n)).toContain("queue");
+      const c = api.comments.get(n) ?? [];
+      expect(c.some((s) => s.includes("— requeued"))).toBe(true);
+    }
+  });
+
+  it("cleans up and requeues when bisect CI status cannot be read", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+    api.waitForWorkflowRun = async () => {
+      throw new Error("timeout");
+    };
+
+    await expect(runBisect(api, git, cfg, nop)).rejects.toThrow(
+      "getting bisect CI status",
+    );
+    expect(git.deleted.length).toBeGreaterThan(0);
+    for (const n of [1, 2]) {
+      expect(api.labels.get(n)).toContain("queue");
+      const c = api.comments.get(n) ?? [];
+      expect(c.some((s) => s.includes("— requeued"))).toBe(true);
+    }
+  });
+
   it("handles no merged PRs in bisect batch", async () => {
     const api = newMockAPI();
     api.prs.set("queue:active", [makePR(1, "conflict-branch")]);

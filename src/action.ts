@@ -383,6 +383,43 @@ export async function runProcess(
   log("Batch merge complete");
 }
 
+/**
+ * Cleans up a bisect batch branch and requeues the still-candidate PRs with
+ * an explanatory comment. Used when the bisect CI run cannot be located or
+ * observed (timeout/API error) — without this, the batch branch would leak
+ * and the PRs would be stuck in `queue:active`.
+ */
+async function handleBisectObservationFailure(
+  api: FullAPI,
+  ctx: CommentCtx,
+  q: Queue,
+  gitOps: GitOperator,
+  prMap: Map<number, PR>,
+  prNumbers: number[],
+  excluded: Set<number>,
+  branch: string,
+  reason: string,
+  log: (msg: string) => void,
+): Promise<void> {
+  try {
+    await gitOps.deleteBranch(branch);
+  } catch (err) {
+    log(`Warning: failed to delete bisect branch ${branch}: ${err}`);
+  }
+  for (const n of prNumbers) {
+    if (excluded.has(n)) continue;
+    const pr = prMap.get(n);
+    if (!pr) continue;
+    try {
+      await q.requeue(pr);
+    } catch (reqErr) {
+      log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
+      continue;
+    }
+    await postComment(api, n, commentRequeued(ctx, reason), log);
+  }
+}
+
 export async function runBisect(
   api: FullAPI,
   gitOps: GitOperator,
@@ -498,11 +535,31 @@ export async function runBisect(
       );
     }
 
-    const runHandle = await api.findWorkflowRun(
-      cfg.ciWorkflow,
-      result.branch,
-      dispatchedAt,
-    );
+    const runHandle = await (async () => {
+      try {
+        return await api.findWorkflowRun(
+          cfg.ciWorkflow,
+          result.branch,
+          dispatchedAt,
+        );
+      } catch (err) {
+        await handleBisectObservationFailure(
+          api,
+          ctx,
+          q,
+          gitOps,
+          prMap,
+          prNumbers,
+          excluded,
+          result.branch,
+          `failed to locate bisect CI run: ${formatErrorForComment(err)}`,
+          log,
+        );
+        throw new Error(
+          `locating bisect CI run: ${formatErrorForComment(err)}`,
+        );
+      }
+    })();
     ciRunUrl = runHandle.htmlUrl;
 
     // Post bisection status comment to each still-candidate PR as soon as
@@ -524,7 +581,26 @@ export async function runBisect(
       );
     }
 
-    const runResult = await api.waitForWorkflowRun(runHandle.runId);
+    let runResult: WorkflowRunResult;
+    try {
+      runResult = await api.waitForWorkflowRun(runHandle.runId);
+    } catch (err) {
+      await handleBisectObservationFailure(
+        api,
+        ctx,
+        q,
+        gitOps,
+        prMap,
+        prNumbers,
+        excluded,
+        result.branch,
+        `failed to read bisect CI status: ${formatErrorForComment(err)}`,
+        log,
+      );
+      throw new Error(
+        `getting bisect CI status: ${formatErrorForComment(err)}`,
+      );
+    }
     conclusion = runResult.conclusion;
   }
 

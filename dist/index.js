@@ -30185,6 +30185,35 @@ async function runProcess(api, gitOps, cfg, log, actor) {
     }
     log("Batch merge complete");
 }
+/**
+ * Cleans up a bisect batch branch and requeues the still-candidate PRs with
+ * an explanatory comment. Used when the bisect CI run cannot be located or
+ * observed (timeout/API error) — without this, the batch branch would leak
+ * and the PRs would be stuck in `queue:active`.
+ */
+async function handleBisectObservationFailure(api, ctx, q, gitOps, prMap, prNumbers, excluded, branch, reason, log) {
+    try {
+        await gitOps.deleteBranch(branch);
+    }
+    catch (err) {
+        log(`Warning: failed to delete bisect branch ${branch}: ${err}`);
+    }
+    for (const n of prNumbers) {
+        if (excluded.has(n))
+            continue;
+        const pr = prMap.get(n);
+        if (!pr)
+            continue;
+        try {
+            await q.requeue(pr);
+        }
+        catch (reqErr) {
+            log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
+            continue;
+        }
+        await postComment(api, n, (0, comments_js_1.commentRequeued)(ctx, reason), log);
+    }
+}
 async function runBisect(api, gitOps, cfg, log) {
     const ctx = requireCtx(cfg);
     const prListStr = cfg.batchPrs;
@@ -30281,7 +30310,15 @@ async function runBisect(api, gitOps, cfg, log) {
             }
             throw new Error(`triggering CI for bisect: ${(0, comments_js_1.formatErrorForComment)(err)}`);
         }
-        const runHandle = await api.findWorkflowRun(cfg.ciWorkflow, result.branch, dispatchedAt);
+        const runHandle = await (async () => {
+            try {
+                return await api.findWorkflowRun(cfg.ciWorkflow, result.branch, dispatchedAt);
+            }
+            catch (err) {
+                await handleBisectObservationFailure(api, ctx, q, gitOps, prMap, prNumbers, excluded, result.branch, `failed to locate bisect CI run: ${(0, comments_js_1.formatErrorForComment)(err)}`, log);
+                throw new Error(`locating bisect CI run: ${(0, comments_js_1.formatErrorForComment)(err)}`);
+            }
+        })();
         ciRunUrl = runHandle.htmlUrl;
         // Post bisection status comment to each still-candidate PR as soon as
         // the run is known. Skip any PR already failed via merge conflict in
@@ -30291,7 +30328,14 @@ async function runBisect(api, gitOps, cfg, log) {
                 continue;
             await postComment(api, n, (0, comments_js_1.commentBisecting)(ctx, result.branch, mergedLeft.length, prNumbers.length - excluded.size, ciRunUrl), log);
         }
-        const runResult = await api.waitForWorkflowRun(runHandle.runId);
+        let runResult;
+        try {
+            runResult = await api.waitForWorkflowRun(runHandle.runId);
+        }
+        catch (err) {
+            await handleBisectObservationFailure(api, ctx, q, gitOps, prMap, prNumbers, excluded, result.branch, `failed to read bisect CI status: ${(0, comments_js_1.formatErrorForComment)(err)}`, log);
+            throw new Error(`getting bisect CI status: ${(0, comments_js_1.formatErrorForComment)(err)}`);
+        }
         conclusion = runResult.conclusion;
     }
     if (conclusion === "success") {
@@ -30780,10 +30824,11 @@ class GitHubClient {
     }
     async findWorkflowRun(workflowFile, ref, dispatchedAt) {
         const createdAfter = new Date(dispatchedAt.getTime() - 5000);
+        const maxAttempts = 60;
         // Poll up to ~10 min for the run to appear. Check immediately first,
         // then sleep between attempts so we can post the "CI running" comment
         // the moment GitHub registers the dispatched run.
-        for (let i = 0; i < 60; i++) {
+        for (let i = 0; i < maxAttempts; i++) {
             const { data: runs } = await this.octokit.rest.actions.listWorkflowRuns({
                 owner: this.owner,
                 repo: this.repo,
@@ -30797,13 +30842,15 @@ class GitHubClient {
                 const run = runs.workflow_runs[0];
                 return { runId: run.id, htmlUrl: run.html_url };
             }
-            await sleep(10_000);
+            if (i < maxAttempts - 1)
+                await sleep(10_000);
         }
         throw new Error("timed out waiting for workflow run to appear");
     }
     async waitForWorkflowRun(runId) {
+        const maxAttempts = 360;
         // Poll up to ~1h for completion.
-        for (let i = 0; i < 360; i++) {
+        for (let i = 0; i < maxAttempts; i++) {
             const { data: run } = await this.octokit.rest.actions.getWorkflowRun({
                 owner: this.owner,
                 repo: this.repo,
@@ -30815,7 +30862,8 @@ class GitHubClient {
                     htmlUrl: run.html_url,
                 };
             }
-            await sleep(10_000);
+            if (i < maxAttempts - 1)
+                await sleep(10_000);
         }
         throw new Error("timed out waiting for workflow run to complete");
     }
