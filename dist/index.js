@@ -29936,6 +29936,13 @@ exports.runSetup = runSetup;
 const queue_js_1 = __nccwpck_require__(6556);
 const batch_js_1 = __nccwpck_require__(2983);
 const bisect_js_1 = __nccwpck_require__(6537);
+const comments_js_1 = __nccwpck_require__(9333);
+function requireCtx(cfg) {
+    if (!cfg.commentCtx) {
+        throw new Error("Config.commentCtx is required for runProcess/runBisect");
+    }
+    return cfg.commentCtx;
+}
 function hasWritePermission(perm) {
     return perm === "write" || perm === "maintain" || perm === "admin";
 }
@@ -29960,7 +29967,15 @@ function selfWorkflowFile() {
     }
     return parts.slice(2).join("/");
 }
-async function handleCIFailure(api, cfg, q, gitOps, prs, result, log) {
+async function postComment(api, prNumber, body, log) {
+    try {
+        await api.comment(prNumber, body);
+    }
+    catch (err) {
+        log(`Warning: failed to comment on PR #${prNumber}: ${err}`);
+    }
+}
+async function handleCIFailure(api, cfg, ctx, q, gitOps, prs, result, ciRunUrl, log) {
     // Clean up the failed batch branch
     try {
         await gitOps.deleteBranch(result.branch);
@@ -29973,6 +29988,9 @@ async function handleCIFailure(api, cfg, q, gitOps, prs, result, log) {
         const pr = prs.find((p) => p.number === result.merged[0].number);
         if (pr) {
             await q.markFailed(pr, "CI failed");
+            if (!cfg.dryRun) {
+                await postComment(api, pr.number, (0, comments_js_1.commentCIFailed)(ctx, ciRunUrl, false), log);
+            }
         }
         return;
     }
@@ -29989,6 +30007,7 @@ async function handleCIFailure(api, cfg, q, gitOps, prs, result, log) {
     }
 }
 async function runProcess(api, gitOps, cfg, log, actor) {
+    const ctx = requireCtx(cfg);
     // Check actor permission
     if (actor) {
         const perm = await api.getActorPermission(actor);
@@ -30007,10 +30026,15 @@ async function runProcess(api, gitOps, cfg, log, actor) {
         return;
     }
     log(`Processing ${prs.length} PRs`);
-    // 2. Activate PRs
+    // 2. Activate PRs and post the "picked up" comment
     await q.activate(prs);
+    if (!cfg.dryRun) {
+        for (const pr of prs) {
+            await postComment(api, pr.number, (0, comments_js_1.commentPickedUp)(ctx), log);
+        }
+    }
     const excluded = new Set();
-    const requeueAll = async () => {
+    const requeueAll = async (reason) => {
         if (cfg.dryRun)
             return;
         for (const pr of prs) {
@@ -30021,6 +30045,10 @@ async function runProcess(api, gitOps, cfg, log, actor) {
             }
             catch (err) {
                 log(`Warning: failed to requeue PR #${pr.number} after error: ${err}`);
+                continue;
+            }
+            if (reason) {
+                await postComment(api, pr.number, (0, comments_js_1.commentRequeued)(ctx, reason), log);
             }
         }
     };
@@ -30047,7 +30075,7 @@ async function runProcess(api, gitOps, cfg, log, actor) {
         result = await b.createAndMerge(batchID, batchPRs);
     }
     catch (err) {
-        await requeueAll();
+        await requeueAll(`batch creation failed: ${(0, comments_js_1.formatErrorForComment)(err)}`);
         throw err;
     }
     // 4. Eject conflicted PRs
@@ -30057,6 +30085,9 @@ async function runProcess(api, gitOps, cfg, log, actor) {
             try {
                 await q.markFailed(pr, "merge conflict");
                 excluded.add(pr.number);
+                if (!cfg.dryRun) {
+                    await postComment(api, pr.number, (0, comments_js_1.commentMergeConflict)(ctx), log);
+                }
             }
             catch (err) {
                 log(`Warning: failed to mark PR #${pr.number} as failed: ${err}`);
@@ -30075,8 +30106,10 @@ async function runProcess(api, gitOps, cfg, log, actor) {
         }
         return;
     }
-    // 5. Trigger CI and wait
+    // 5. Trigger CI, announce the run URL to PRs as soon as it appears,
+    //    then wait for completion.
     log(`Triggering CI workflow ${cfg.ciWorkflow} on ${result.branch}`);
+    let ciRunUrl = "";
     if (!cfg.dryRun) {
         const dispatchedAt = new Date();
         try {
@@ -30084,37 +30117,55 @@ async function runProcess(api, gitOps, cfg, log, actor) {
         }
         catch (err) {
             await cleanupBranch(result.branch);
-            await requeueAll();
-            throw new Error(`triggering CI: ${err}`);
+            await requeueAll(`failed to trigger CI: ${(0, comments_js_1.formatErrorForComment)(err)}`);
+            throw new Error(`triggering CI: ${(0, comments_js_1.formatErrorForComment)(err)}`);
         }
-        log("Waiting for CI result...");
-        let conclusion;
+        let runHandle;
         try {
-            conclusion = await api.getWorkflowRunStatus(cfg.ciWorkflow, result.branch, dispatchedAt);
+            runHandle = await api.findWorkflowRun(cfg.ciWorkflow, result.branch, dispatchedAt);
         }
         catch (err) {
             await cleanupBranch(result.branch);
-            await requeueAll();
-            throw new Error(`getting CI status: ${err}`);
+            await requeueAll(`failed to locate CI run: ${(0, comments_js_1.formatErrorForComment)(err)}`);
+            throw new Error(`locating CI run: ${(0, comments_js_1.formatErrorForComment)(err)}`);
         }
-        if (conclusion !== "success") {
+        ciRunUrl = runHandle.htmlUrl;
+        // Announce CI-running state now — before blocking on completion.
+        for (const mp of result.merged) {
+            const siblings = result.merged
+                .filter((p) => p.number !== mp.number)
+                .map((p) => p.number);
+            await postComment(api, mp.number, (0, comments_js_1.commentCIRunning)(ctx, result.branch, siblings, ciRunUrl), log);
+        }
+        log("Waiting for CI result...");
+        let runResult;
+        try {
+            runResult = await api.waitForWorkflowRun(runHandle.runId);
+        }
+        catch (err) {
+            await cleanupBranch(result.branch);
+            await requeueAll(`failed to read CI status: ${(0, comments_js_1.formatErrorForComment)(err)}`);
+            throw new Error(`getting CI status: ${(0, comments_js_1.formatErrorForComment)(err)}`);
+        }
+        if (runResult.conclusion !== "success") {
             try {
-                await handleCIFailure(api, cfg, q, gitOps, prs, result, log);
+                await handleCIFailure(api, cfg, ctx, q, gitOps, prs, result, ciRunUrl, log);
             }
             catch (err) {
-                await requeueAll();
+                await requeueAll(`error handling CI failure: ${(0, comments_js_1.formatErrorForComment)(err)}`);
                 throw err;
             }
             return;
         }
     }
     // 6. CI passed — merge to main
+    let mergeSha = "";
     try {
-        await b.completeMerge(result.branch);
+        mergeSha = await b.completeMerge(result.branch);
     }
     catch (err) {
         await cleanupBranch(result.branch);
-        await requeueAll();
+        await requeueAll(`failed to fast-forward main: ${(0, comments_js_1.formatErrorForComment)(err)}`);
         throw err;
     }
     // Clean up labels and comment on merged PRs
@@ -30129,17 +30180,42 @@ async function runProcess(api, gitOps, cfg, log, actor) {
             catch {
                 /* best effort */
             }
-            try {
-                await api.comment(pr.number, "Merge queue: merged to main");
-            }
-            catch {
-                /* best effort */
-            }
+            await postComment(api, pr.number, (0, comments_js_1.commentMerged)(ctx, mergeSha, ciRunUrl), log);
         }
     }
     log("Batch merge complete");
 }
+/**
+ * Cleans up a bisect batch branch and requeues the still-candidate PRs with
+ * an explanatory comment. Used when the bisect CI run cannot be located or
+ * observed (timeout/API error) — without this, the batch branch would leak
+ * and the PRs would be stuck in `queue:active`.
+ */
+async function handleBisectObservationFailure(api, ctx, q, gitOps, prMap, prNumbers, excluded, branch, reason, log) {
+    try {
+        await gitOps.deleteBranch(branch);
+    }
+    catch (err) {
+        log(`Warning: failed to delete bisect branch ${branch}: ${err}`);
+    }
+    for (const n of prNumbers) {
+        if (excluded.has(n))
+            continue;
+        const pr = prMap.get(n);
+        if (!pr)
+            continue;
+        try {
+            await q.requeue(pr);
+        }
+        catch (reqErr) {
+            log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
+            continue;
+        }
+        await postComment(api, n, (0, comments_js_1.commentRequeued)(ctx, reason), log);
+    }
+}
 async function runBisect(api, gitOps, cfg, log) {
+    const ctx = requireCtx(cfg);
     const prListStr = cfg.batchPrs;
     if (!prListStr) {
         throw new Error("batch_prs input is required for bisect mode");
@@ -30193,6 +30269,9 @@ async function runBisect(api, gitOps, cfg, log) {
             try {
                 await q.markFailed(pr, "merge conflict");
                 excluded.add(cp.number);
+                if (!cfg.dryRun) {
+                    await postComment(api, pr.number, (0, comments_js_1.commentMergeConflict)(ctx), log);
+                }
             }
             catch (err) {
                 log(`Warning: failed to mark PR #${cp.number} as failed: ${err}`);
@@ -30216,6 +30295,7 @@ async function runBisect(api, gitOps, cfg, log) {
     // Run CI on left half
     log(`Running CI on left half: ${JSON.stringify(mergedLeft)}`);
     let conclusion = "success";
+    let ciRunUrl = "";
     if (!cfg.dryRun) {
         const dispatchedAt = new Date();
         try {
@@ -30228,14 +30308,40 @@ async function runBisect(api, gitOps, cfg, log) {
             catch {
                 /* best effort */
             }
-            throw new Error(`triggering CI for bisect: ${err}`);
+            throw new Error(`triggering CI for bisect: ${(0, comments_js_1.formatErrorForComment)(err)}`);
         }
-        conclusion = await api.getWorkflowRunStatus(cfg.ciWorkflow, result.branch, dispatchedAt);
+        const runHandle = await (async () => {
+            try {
+                return await api.findWorkflowRun(cfg.ciWorkflow, result.branch, dispatchedAt);
+            }
+            catch (err) {
+                await handleBisectObservationFailure(api, ctx, q, gitOps, prMap, prNumbers, excluded, result.branch, `failed to locate bisect CI run: ${(0, comments_js_1.formatErrorForComment)(err)}`, log);
+                throw new Error(`locating bisect CI run: ${(0, comments_js_1.formatErrorForComment)(err)}`);
+            }
+        })();
+        ciRunUrl = runHandle.htmlUrl;
+        // Post bisection status comment to each still-candidate PR as soon as
+        // the run is known. Skip any PR already failed via merge conflict in
+        // this bisect run, and report the actually-tested count.
+        for (const n of prNumbers) {
+            if (excluded.has(n))
+                continue;
+            await postComment(api, n, (0, comments_js_1.commentBisecting)(ctx, result.branch, mergedLeft.length, prNumbers.length - excluded.size, ciRunUrl), log);
+        }
+        let runResult;
+        try {
+            runResult = await api.waitForWorkflowRun(runHandle.runId);
+        }
+        catch (err) {
+            await handleBisectObservationFailure(api, ctx, q, gitOps, prMap, prNumbers, excluded, result.branch, `failed to read bisect CI status: ${(0, comments_js_1.formatErrorForComment)(err)}`, log);
+            throw new Error(`getting bisect CI status: ${(0, comments_js_1.formatErrorForComment)(err)}`);
+        }
+        conclusion = runResult.conclusion;
     }
     if (conclusion === "success") {
         // Left half passes — merge it to main
         log("Left half passed, merging to main");
-        await b.completeMerge(result.branch);
+        const mergeSha = await b.completeMerge(result.branch);
         for (const n of mergedLeft) {
             log(`PR #${n} merged successfully`);
             if (!cfg.dryRun) {
@@ -30245,12 +30351,7 @@ async function runBisect(api, gitOps, cfg, log) {
                 catch {
                     /* best effort */
                 }
-                try {
-                    await api.comment(n, "Merge queue: merged to main");
-                }
-                catch {
-                    /* best effort */
-                }
+                await postComment(api, n, (0, comments_js_1.commentMerged)(ctx, mergeSha, ciRunUrl), log);
             }
         }
         // Dispatch bisection for right half if needed
@@ -30274,9 +30375,11 @@ async function runBisect(api, gitOps, cfg, log) {
                         }
                         catch (reqErr) {
                             log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
+                            continue;
                         }
+                        await postComment(api, n, (0, comments_js_1.commentRequeued)(ctx, `failed to dispatch bisect for right half: ${(0, comments_js_1.formatErrorForComment)(err)}`), log);
                     }
-                    throw new Error(`dispatching bisect for right half: ${err}`);
+                    throw new Error(`dispatching bisect for right half: ${(0, comments_js_1.formatErrorForComment)(err)}`);
                 }
             }
         }
@@ -30294,6 +30397,9 @@ async function runBisect(api, gitOps, cfg, log) {
             const pr = prMap.get(mergedLeft[0]);
             log(`PR #${mergedLeft[0]} is the culprit`);
             await q.markFailed(pr, "CI failed (identified via bisection)");
+            if (!cfg.dryRun) {
+                await postComment(api, pr.number, (0, comments_js_1.commentCIFailed)(ctx, ciRunUrl, true), log);
+            }
             // Requeue right half (skip any already marked failed)
             for (const n of right) {
                 if (excluded.has(n))
@@ -30328,9 +30434,11 @@ async function runBisect(api, gitOps, cfg, log) {
                         }
                         catch (reqErr) {
                             log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
+                            continue;
                         }
+                        await postComment(api, n, (0, comments_js_1.commentRequeued)(ctx, `failed to dispatch follow-up bisect: ${(0, comments_js_1.formatErrorForComment)(err)}`), log);
                     }
-                    throw new Error(`dispatching follow-up bisect: ${err}`);
+                    throw new Error(`dispatching follow-up bisect: ${(0, comments_js_1.formatErrorForComment)(err)}`);
                 }
             }
         }
@@ -30405,14 +30513,15 @@ class Batch {
         }
         return result;
     }
-    /** Fast-forwards main to the batch branch and cleans up. */
+    /** Fast-forwards main to the batch branch and cleans up. Returns the new main SHA. */
     async completeMerge(branch) {
         this.log(`Fast-forwarding main to ${branch}`);
         if (this.dryRun)
-            return;
-        await this.git.fastForwardMain(branch);
+            return "";
+        const sha = await this.git.fastForwardMain(branch);
         this.log(`Deleting batch branch ${branch}`);
         await this.git.deleteBranch(branch);
+        return sha;
     }
 }
 exports.Batch = Batch;
@@ -30436,6 +30545,143 @@ function split(prs) {
         return [[...prs], []];
     const mid = Math.ceil(prs.length / 2);
     return [prs.slice(0, mid), prs.slice(mid)];
+}
+
+
+/***/ }),
+
+/***/ 9333:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.formatErrorForComment = formatErrorForComment;
+exports.commentPickedUp = commentPickedUp;
+exports.commentCIRunning = commentCIRunning;
+exports.commentMerged = commentMerged;
+exports.commentCIFailed = commentCIFailed;
+exports.commentMergeConflict = commentMergeConflict;
+exports.commentBisecting = commentBisecting;
+exports.commentRequeued = commentRequeued;
+function formatErrorForComment(err, maxLen = 200) {
+    let raw;
+    if (err instanceof Error) {
+        raw = err.message;
+    }
+    else if (typeof err === "string") {
+        raw = err;
+    }
+    else if (typeof err === "object" &&
+        err !== null &&
+        "message" in err &&
+        typeof err.message === "string") {
+        raw = err.message;
+    }
+    else if (typeof err === "number" ||
+        typeof err === "boolean" ||
+        typeof err === "bigint") {
+        raw = String(err);
+    }
+    else {
+        raw = "unknown error";
+    }
+    const oneLine = raw.replace(/`/g, "'").replace(/\s+/g, " ").trim();
+    // If the chosen source (e.g. Error.message or a {message} object) was
+    // empty or whitespace-only, fall back so requeue comments don't render
+    // as a blank blockquote.
+    const safeOneLine = oneLine || "unknown error";
+    return safeOneLine.length > maxLen
+        ? `${safeOneLine.slice(0, maxLen - 1)}…`
+        : safeOneLine;
+}
+function branchLink(ctx, branch) {
+    // Encode each path segment; preserve `/` so nested branch names like
+    // `merge-queue/batch-42` render as clean path segments.
+    const encoded = branch.split("/").map(encodeURIComponent).join("/");
+    return `[\`${branch}\`](${ctx.serverUrl}/${ctx.ownerRepo}/tree/${encoded})`;
+}
+function commitLink(ctx, sha) {
+    const short = sha.slice(0, 7);
+    return `[\`${short}\`](${ctx.serverUrl}/${ctx.ownerRepo}/commit/${sha})`;
+}
+function prList(ns) {
+    return ns.map((n) => `#${n}`).join(", ");
+}
+const BRAND = "**Merge Queue**";
+function commentPickedUp(ctx) {
+    return [
+        `🟢 ${BRAND} — picked up`,
+        "",
+        `This PR is in the queue and will be batched with other \`${ctx.queueLabel}\`-labelled PRs.`,
+        "",
+        `**Next:** No action needed — you'll get another comment when CI starts on the batch. [View merge queue run](${ctx.actionRunUrl}).`,
+    ].join("\n");
+}
+function commentCIRunning(ctx, batchBranch, siblingPRs, ciRunUrl) {
+    const siblings = siblingPRs.length > 0 ? ` alongside ${prList(siblingPRs)}` : "";
+    return [
+        `🔵 ${BRAND} — CI running`,
+        "",
+        `Merged into batch branch ${branchLink(ctx, batchBranch)}${siblings}. [View CI run](${ciRunUrl}).`,
+        "",
+        "**Next:** No action needed — you'll be notified when CI completes.",
+    ].join("\n");
+}
+function commentMerged(ctx, mergeSha, ciRunUrl) {
+    return [
+        `✅ ${BRAND} — merged`,
+        "",
+        `This PR landed on \`main\` via commit ${commitLink(ctx, mergeSha)}. [CI run that validated the merge](${ciRunUrl}).`,
+        "",
+        "**Next:** Done — nothing more to do here.",
+    ].join("\n");
+}
+function commentCIFailed(ctx, ciRunUrl, viaBisection) {
+    const headline = viaBisection
+        ? `CI failed (identified via bisection)`
+        : `CI failed`;
+    const detail = viaBisection
+        ? `Bisection identified this PR as the failing change. [View CI run that isolated the failure](${ciRunUrl}).`
+        : `The [batch CI run](${ciRunUrl}) failed with this PR in it.`;
+    return [
+        `❌ ${BRAND} — ${headline}`,
+        "",
+        detail,
+        "",
+        `**Next:** Fix the failure, push updates, then re-add the \`${ctx.queueLabel}\` label to retry.`,
+    ].join("\n");
+}
+function commentMergeConflict(ctx) {
+    return [
+        `⚠️ ${BRAND} — merge conflict`,
+        "",
+        `This PR could not be merged into the batch branch without conflicts with ${branchLink(ctx, "main")} or another queued PR.`,
+        "",
+        `**Next:** Rebase onto or merge \`main\` into your branch, resolve conflicts, push, then re-add the \`${ctx.queueLabel}\` label.`,
+    ].join("\n");
+}
+function commentBisecting(ctx, batchBranch, leftCount, totalCount, ciRunUrl) {
+    return [
+        `🔍 ${BRAND} — bisecting`,
+        "",
+        `A larger batch failed CI. Bisection is isolating the culprit: this run tests up to **${leftCount} of ${totalCount}** candidate PRs on ${branchLink(ctx, batchBranch)}. [View current bisect CI run](${ciRunUrl}).`,
+        "",
+        "**Next:** No action needed — you'll be notified when the culprit is isolated or this PR merges.",
+    ].join("\n");
+}
+function commentRequeued(ctx, reason) {
+    return [
+        `⏳ ${BRAND} — requeued`,
+        "",
+        "The merge queue hit an error while processing this PR:",
+        "",
+        `> ${reason}`,
+        "",
+        `[View merge queue run](${ctx.actionRunUrl}).`,
+        "",
+        "**Next:** No action needed — the queue will retry on the next tick.",
+    ].join("\n");
 }
 
 
@@ -30576,10 +30822,13 @@ class GitHubClient {
             inputs,
         });
     }
-    async getWorkflowRunStatus(workflowFile, ref, dispatchedAt) {
+    async findWorkflowRun(workflowFile, ref, dispatchedAt) {
         const createdAfter = new Date(dispatchedAt.getTime() - 5000);
-        for (let i = 0; i < 360; i++) {
-            await sleep(10_000);
+        const maxAttempts = 60;
+        // Poll up to ~10 min for the run to appear. Check immediately first,
+        // then sleep between attempts so we can post the "CI running" comment
+        // the moment GitHub registers the dispatched run.
+        for (let i = 0; i < maxAttempts; i++) {
             const { data: runs } = await this.octokit.rest.actions.listWorkflowRuns({
                 owner: this.owner,
                 repo: this.repo,
@@ -30589,14 +30838,34 @@ class GitHubClient {
                 created: `>=${createdAfter.toISOString()}`,
                 per_page: 1,
             });
-            if (runs.workflow_runs.length === 0)
-                continue;
-            const run = runs.workflow_runs[0];
-            if (run.status === "completed") {
-                return run.conclusion ?? "unknown";
+            if (runs.workflow_runs.length > 0) {
+                const run = runs.workflow_runs[0];
+                return { runId: run.id, htmlUrl: run.html_url };
             }
+            if (i < maxAttempts - 1)
+                await sleep(10_000);
         }
-        throw new Error("timed out waiting for workflow run");
+        throw new Error("timed out waiting for workflow run to appear");
+    }
+    async waitForWorkflowRun(runId) {
+        const maxAttempts = 360;
+        // Poll up to ~1h for completion.
+        for (let i = 0; i < maxAttempts; i++) {
+            const { data: run } = await this.octokit.rest.actions.getWorkflowRun({
+                owner: this.owner,
+                repo: this.repo,
+                run_id: runId,
+            });
+            if (run.status === "completed") {
+                return {
+                    conclusion: run.conclusion ?? "unknown",
+                    htmlUrl: run.html_url,
+                };
+            }
+            if (i < maxAttempts - 1)
+                await sleep(10_000);
+        }
+        throw new Error("timed out waiting for workflow run to complete");
     }
     async closePR(prNumber) {
         await this.octokit.rest.pulls.update({
@@ -30717,6 +30986,7 @@ class GitOps {
             sha,
             force: false,
         });
+        return sha;
     }
     async deleteBranch(branch) {
         this.log(`Deleting branch ${branch}`);
@@ -30776,7 +31046,7 @@ const github = __importStar(__nccwpck_require__(3228));
 const github_js_1 = __nccwpck_require__(9248);
 const gitops_js_1 = __nccwpck_require__(2635);
 const action_js_1 = __nccwpck_require__(2929);
-function loadConfig() {
+function loadInputs() {
     return {
         token: core.getInput("token", { required: true }),
         ciWorkflow: core.getInput("ci_workflow", { required: true }),
@@ -30787,14 +31057,31 @@ function loadConfig() {
         bisect: core.getInput("bisect") === "true",
     };
 }
+function buildCommentCtx(owner, repo, queueLabel) {
+    const serverUrl = process.env.GITHUB_SERVER_URL || "https://github.com";
+    const ownerRepo = process.env.GITHUB_REPOSITORY || `${owner}/${repo}`;
+    const runId = process.env.GITHUB_RUN_ID || "";
+    const actionRunUrl = runId
+        ? `${serverUrl}/${ownerRepo}/actions/runs/${runId}`
+        : `${serverUrl}/${ownerRepo}/actions`;
+    return { serverUrl, ownerRepo, actionRunUrl, queueLabel };
+}
 async function run() {
-    const cfg = loadConfig();
+    const inputs = loadInputs();
     const { owner, repo } = github.context.repo;
-    const client = new github_js_1.GitHubClient(cfg.token, owner, repo);
+    const client = new github_js_1.GitHubClient(inputs.token, owner, repo);
     const gitOps = new gitops_js_1.GitOps(client.octokit, owner, repo, core.info);
     const log = core.info;
     const actor = process.env.GITHUB_ACTOR;
-    if (cfg.bisect) {
+    const cfg = {
+        ciWorkflow: inputs.ciWorkflow,
+        batchSize: inputs.batchSize,
+        queueLabel: inputs.queueLabel,
+        dryRun: inputs.dryRun,
+        batchPrs: inputs.batchPrs,
+        commentCtx: buildCommentCtx(owner, repo, inputs.queueLabel),
+    };
+    if (inputs.bisect) {
         await (0, action_js_1.runBisect)(client, gitOps, cfg, log);
     }
     else {
@@ -30842,7 +31129,7 @@ function isAlreadyExistsError(err) {
         return false;
     return errors.some((error) => error.code === "already_exists");
 }
-/** Queue manages the merge queue state machine. */
+/** Queue manages the merge queue label state machine. Comment composition lives at the orchestration layer. */
 class Queue {
     api;
     label;
@@ -30876,7 +31163,7 @@ class Queue {
             }
         }
     }
-    /** Transitions a PR to the failed state and posts a comment. */
+    /** Transitions a PR to the failed state. */
     async markFailed(pr, reason) {
         this.log(`Marking PR #${pr.number} as failed: ${reason}`);
         if (this.dryRun)
@@ -30896,7 +31183,6 @@ class Queue {
                 throw err;
         }
         await this.api.addLabel(pr.number, queueLabel(this.label, exports.STATE_FAILED));
-        await this.api.comment(pr.number, `Merge queue: ${reason}`);
     }
     /** Moves a PR back to pending state. */
     async requeue(pr) {

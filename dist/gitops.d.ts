@@ -14,7 +14,7 @@ export declare class GitOps implements GitOperator {
     createBranchFromRef(branch: string, baseRef: string): Promise<void>;
     mergeBranch(branch: string, sourceRef: string, commitMsg: string): Promise<boolean>;
     pushBranch(branch: string): Promise<void>;
-    fastForwardMain(ref: string): Promise<void>;
+    fastForwardMain(ref: string): Promise<string>;
     deleteBranch(branch: string): Promise<void>;
 }
 export {};

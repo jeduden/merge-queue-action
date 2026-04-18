@@ -1,5 +1,11 @@
 import * as github from "@actions/github";
-import type { PR, GitHubAPI, WorkflowAPI } from "./queue.js";
+import type {
+  PR,
+  GitHubAPI,
+  WorkflowAPI,
+  WorkflowRunHandle,
+  WorkflowRunResult,
+} from "./queue.js";
 
 type Octokit = ReturnType<typeof github.getOctokit>;
 
@@ -121,16 +127,18 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
     });
   }
 
-  async getWorkflowRunStatus(
+  async findWorkflowRun(
     workflowFile: string,
     ref: string,
     dispatchedAt: Date,
-  ): Promise<string> {
+  ): Promise<WorkflowRunHandle> {
     const createdAfter = new Date(dispatchedAt.getTime() - 5000);
+    const maxAttempts = 60;
 
-    for (let i = 0; i < 360; i++) {
-      await sleep(10_000);
-
+    // Poll up to ~10 min for the run to appear. Check immediately first,
+    // then sleep between attempts so we can post the "CI running" comment
+    // the moment GitHub registers the dispatched run.
+    for (let i = 0; i < maxAttempts; i++) {
       const { data: runs } =
         await this.octokit.rest.actions.listWorkflowRuns({
           owner: this.owner,
@@ -142,15 +150,39 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
           per_page: 1,
         });
 
-      if (runs.workflow_runs.length === 0) continue;
-
-      const run = runs.workflow_runs[0];
-      if (run.status === "completed") {
-        return run.conclusion ?? "unknown";
+      if (runs.workflow_runs.length > 0) {
+        const run = runs.workflow_runs[0];
+        return { runId: run.id, htmlUrl: run.html_url };
       }
+
+      if (i < maxAttempts - 1) await sleep(10_000);
     }
 
-    throw new Error("timed out waiting for workflow run");
+    throw new Error("timed out waiting for workflow run to appear");
+  }
+
+  async waitForWorkflowRun(runId: number): Promise<WorkflowRunResult> {
+    const maxAttempts = 360;
+
+    // Poll up to ~1h for completion.
+    for (let i = 0; i < maxAttempts; i++) {
+      const { data: run } = await this.octokit.rest.actions.getWorkflowRun({
+        owner: this.owner,
+        repo: this.repo,
+        run_id: runId,
+      });
+
+      if (run.status === "completed") {
+        return {
+          conclusion: run.conclusion ?? "unknown",
+          htmlUrl: run.html_url,
+        };
+      }
+
+      if (i < maxAttempts - 1) await sleep(10_000);
+    }
+
+    throw new Error("timed out waiting for workflow run to complete");
   }
 
   async closePR(prNumber: number): Promise<void> {

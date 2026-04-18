@@ -19,6 +19,18 @@ export function queueLabel(base: string, state: LabelState): string {
   return `${base}:${state}`;
 }
 
+/** Identifies a workflow run that has been dispatched. */
+export interface WorkflowRunHandle {
+  runId: number;
+  htmlUrl: string;
+}
+
+/** Final result of a workflow run once it has completed. */
+export interface WorkflowRunResult {
+  conclusion: string;
+  htmlUrl: string;
+}
+
 /** GitHubAPI defines the interface for GitHub operations needed by the queue. */
 export interface GitHubAPI {
   listPRsWithLabel(label: string, limit: number): Promise<PR[]>;
@@ -35,11 +47,14 @@ export interface WorkflowAPI {
     ref: string,
     inputs?: Record<string, string>,
   ): Promise<void>;
-  getWorkflowRunStatus(
+  /** Waits for the dispatched workflow run to appear and returns its URL. */
+  findWorkflowRun(
     workflowFile: string,
     ref: string,
     dispatchedAt: Date,
-  ): Promise<string>;
+  ): Promise<WorkflowRunHandle>;
+  /** Polls an already-located run until it completes. */
+  waitForWorkflowRun(runId: number): Promise<WorkflowRunResult>;
   closePR(prNumber: number): Promise<void>;
 }
 
@@ -67,7 +82,7 @@ function isAlreadyExistsError(err: unknown): boolean {
 
 type LogFunc = (msg: string) => void;
 
-/** Queue manages the merge queue state machine. */
+/** Queue manages the merge queue label state machine. Comment composition lives at the orchestration layer. */
 export class Queue {
   private api: GitHubAPI;
   private label: string;
@@ -113,7 +128,7 @@ export class Queue {
     }
   }
 
-  /** Transitions a PR to the failed state and posts a comment. */
+  /** Transitions a PR to the failed state. */
   async markFailed(pr: PR, reason: string): Promise<void> {
     this.log(`Marking PR #${pr.number} as failed: ${reason}`);
     if (this.dryRun) return;
@@ -137,7 +152,6 @@ export class Queue {
       pr.number,
       queueLabel(this.label, STATE_FAILED),
     );
-    await this.api.comment(pr.number, `Merge queue: ${reason}`);
   }
 
   /** Moves a PR back to pending state. */

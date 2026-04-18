@@ -44,6 +44,7 @@ function newMockGit(): GitOperator & {
     async fastForwardMain(ref: string) {
       if (mock.failOn === "fastForwardMain") throw new Error("mock error");
       mock.ffRef = ref;
+      return "abc123";
     },
 
     async deleteBranch(branch: string) {

@@ -12,6 +12,16 @@ export declare const STATE_ACTIVE: LabelState;
 export declare const STATE_FAILED: LabelState;
 /** Returns the full label string for a given state. */
 export declare function queueLabel(base: string, state: LabelState): string;
+/** Identifies a workflow run that has been dispatched. */
+export interface WorkflowRunHandle {
+    runId: number;
+    htmlUrl: string;
+}
+/** Final result of a workflow run once it has completed. */
+export interface WorkflowRunResult {
+    conclusion: string;
+    htmlUrl: string;
+}
 /** GitHubAPI defines the interface for GitHub operations needed by the queue. */
 export interface GitHubAPI {
     listPRsWithLabel(label: string, limit: number): Promise<PR[]>;
@@ -23,11 +33,14 @@ export interface GitHubAPI {
 /** WorkflowAPI defines the interface for workflow dispatch and polling. */
 export interface WorkflowAPI {
     triggerWorkflow(workflowFile: string, ref: string, inputs?: Record<string, string>): Promise<void>;
-    getWorkflowRunStatus(workflowFile: string, ref: string, dispatchedAt: Date): Promise<string>;
+    /** Waits for the dispatched workflow run to appear and returns its URL. */
+    findWorkflowRun(workflowFile: string, ref: string, dispatchedAt: Date): Promise<WorkflowRunHandle>;
+    /** Polls an already-located run until it completes. */
+    waitForWorkflowRun(runId: number): Promise<WorkflowRunResult>;
     closePR(prNumber: number): Promise<void>;
 }
 type LogFunc = (msg: string) => void;
-/** Queue manages the merge queue state machine. */
+/** Queue manages the merge queue label state machine. Comment composition lives at the orchestration layer. */
 export declare class Queue {
     private api;
     private label;
@@ -38,7 +51,7 @@ export declare class Queue {
     collect(limit: number): Promise<PR[]>;
     /** Transitions PRs from pending to active state. */
     activate(prs: PR[]): Promise<void>;
-    /** Transitions a PR to the failed state and posts a comment. */
+    /** Transitions a PR to the failed state. */
     markFailed(pr: PR, reason: string): Promise<void>;
     /** Moves a PR back to pending state. */
     requeue(pr: PR): Promise<void>;

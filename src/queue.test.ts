@@ -137,6 +137,8 @@ describe("Activate", () => {
       expect(labels).toContain("queue:active");
       expect(labels).not.toContain("queue");
     }
+    // Queue handles labels only — no comments posted from here.
+    expect(api.comments.size).toBe(0);
   });
 
   it("does not modify labels in dry run", async () => {
@@ -177,7 +179,7 @@ describe("Activate", () => {
 });
 
 describe("MarkFailed", () => {
-  it("adds failed label and comments", async () => {
+  it("adds the failed label", async () => {
     const api = newMockAPI();
     api.labels.set(5, ["queue:active"]);
 
@@ -188,7 +190,8 @@ describe("MarkFailed", () => {
     );
 
     expect(api.labels.get(5)).toContain("queue:failed");
-    expect(api.comments.get(5)).toEqual(["Merge queue: CI failed"]);
+    // Queue handles labels only — no comments posted from here.
+    expect(api.comments.size).toBe(0);
   });
 
   it("ignores RemoveLabel 404", async () => {
@@ -206,7 +209,7 @@ describe("MarkFailed", () => {
 });
 
 describe("Requeue", () => {
-  it("moves PR back to pending", async () => {
+  it("moves PR back to pending without posting a comment", async () => {
     const api = newMockAPI();
     api.labels.set(3, ["queue:active"]);
 
@@ -220,6 +223,7 @@ describe("Requeue", () => {
     });
 
     expect(api.labels.get(3)).toContain("queue");
+    expect(api.comments.size).toBe(0);
   });
 
   it("ignores RemoveLabel 404", async () => {
