@@ -1,12 +1,14 @@
 import * as github from "@actions/github";
 import type { PR, GitHubAPI, WorkflowAPI, WorkflowRunHandle, WorkflowRunResult } from "./queue.js";
 type Octokit = ReturnType<typeof github.getOctokit>;
+type LogFunc = (msg: string) => void;
 /** GitHubClient implements GitHubAPI and WorkflowAPI using the GitHub REST API. */
 export declare class GitHubClient implements GitHubAPI, WorkflowAPI {
     readonly octokit: Octokit;
     readonly owner: string;
     readonly repo: string;
-    constructor(token: string, owner: string, repo: string);
+    private readonly log;
+    constructor(token: string, owner: string, repo: string, log?: LogFunc);
     listPRsWithLabel(label: string, limit: number): Promise<PR[]>;
     addLabel(prNumber: number, label: string): Promise<void>;
     removeLabel(prNumber: number, label: string): Promise<void>;
