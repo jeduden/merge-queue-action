@@ -9,6 +9,8 @@ import type {
 
 type Octokit = ReturnType<typeof github.getOctokit>;
 
+type LogFunc = (msg: string) => void;
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -18,16 +20,22 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
   public readonly octokit: Octokit;
   public readonly owner: string;
   public readonly repo: string;
+  private readonly log: LogFunc;
 
-  constructor(token: string, owner: string, repo: string) {
+  constructor(token: string, owner: string, repo: string, log?: LogFunc) {
     this.octokit = github.getOctokit(token);
     this.owner = owner;
     this.repo = repo;
+    this.log = log ?? (() => {});
   }
 
   async listPRsWithLabel(label: string, limit: number): Promise<PR[]> {
     const result: PR[] = [];
     let page = 1;
+
+    this.log(
+      `listPRsWithLabel: querying ${this.owner}/${this.repo} for label="${label}" (limit=${limit})`,
+    );
 
     for (;;) {
       const { data: issues } =
@@ -42,8 +50,21 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
           page,
         });
 
+      this.log(
+        `listPRsWithLabel: page=${page} returned ${issues.length} issue(s)`,
+      );
+
       for (const issue of issues) {
-        if (!issue.pull_request) continue;
+        const isPR = !!issue.pull_request;
+        const issueLabels = (issue.labels ?? [])
+          .map((l) =>
+            typeof l === "string" ? l : (l as { name?: string }).name ?? "",
+          )
+          .filter((n) => n !== "");
+        this.log(
+          `listPRsWithLabel:   #${issue.number} isPR=${isPR} state=${issue.state} labels=[${issueLabels.join(", ")}]`,
+        );
+        if (!isPR) continue;
 
         const { data: pr } = await this.octokit.rest.pulls.get({
           owner: this.owner,
@@ -62,13 +83,19 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
           ),
         });
 
-        if (limit > 0 && result.length >= limit) return result;
+        if (limit > 0 && result.length >= limit) {
+          this.log(
+            `listPRsWithLabel: reached limit=${limit}, returning ${result.length} PR(s)`,
+          );
+          return result;
+        }
       }
 
       if (issues.length < 100) break;
       page++;
     }
 
+    this.log(`listPRsWithLabel: done, found ${result.length} PR(s) total`);
     return result;
   }
 

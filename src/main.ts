@@ -45,9 +45,15 @@ function buildCommentCtx(
 async function run(): Promise<void> {
   const inputs = loadInputs();
   const { owner, repo } = github.context.repo;
-  const client = new GitHubClient(inputs.token, owner, repo);
-  const gitOps = new GitOps(client.octokit, owner, repo, core.info);
   const log = core.info;
+  const client = new GitHubClient(inputs.token, owner, repo, log);
+  const gitOps = new GitOps(client.octokit, owner, repo, log);
+  log(
+    `Repository context: ${owner}/${repo} (GITHUB_REPOSITORY=${process.env.GITHUB_REPOSITORY ?? "unset"})`,
+  );
+  log(
+    `Queue label: "${inputs.queueLabel}" batchSize=${inputs.batchSize} dryRun=${inputs.dryRun} bisect=${inputs.bisect}`,
+  );
   const actor = process.env.GITHUB_ACTOR;
 
   const cfg: Config = {
