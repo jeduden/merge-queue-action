@@ -1,12 +1,17 @@
 # merge-queue-action
 
+[![CI](https://github.com/jeduden/merge-queue-action/actions/workflows/ci.yml/badge.svg)](https://github.com/jeduden/merge-queue-action/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/jeduden/merge-queue-action/branch/main/graph/badge.svg)](https://codecov.io/gh/jeduden/merge-queue-action)
+[![lint: biome](https://img.shields.io/badge/lint-biome-60a5fa?logo=biome)](https://biomejs.dev)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Bors-style merge queue for GitHub, implemented as a GitHub Action. Label a PR to
 enqueue it, and the action batches PRs together, runs CI on the batch, and
 fast-forwards `main`. When a batch fails, binary bisection isolates the
 culprit in `ceil(log2(N)) + 1` CI runs.
 
-No external server. No GitHub native merge queue. Distributed as a pre-compiled
-Go binary.
+No external server. No GitHub native merge queue. Runs as a single
+Node.js-based GitHub Action — no compiled binary required.
 
 ## How it works
 
@@ -328,18 +333,23 @@ for detailed setup.
 
 ### 4. Create the queue labels (one-time)
 
-```bash
-# Using the binary directly (GITHUB_REPOSITORY must be set):
-GITHUB_REPOSITORY=owner/repo merge-queue setup --token "$GITHUB_TOKEN"
-```
+The action uses three labels based on the `queue_label` input (default
+`queue`): `<base>`, `<base>:active`, and `<base>:failed`. Create them in
+your repository from the GitHub UI under **Issues → Labels** or with the
+GitHub CLI:
 
-Or run the action with `setup` to create `queue`, `queue:active`, and
-`queue:failed` labels automatically.
+```bash
+# Using the default queue_label ("queue"):
+gh label create queue --repo owner/repo
+gh label create queue:active --repo owner/repo
+gh label create queue:failed --repo owner/repo
+```
 
 ### 5. Use it
 
-Add the `queue` label to a PR. The merge-queue workflow triggers, batches
-it with any other queued PRs, runs CI, and merges on success.
+Add your queue label (default `queue`) to a PR. The merge-queue workflow
+triggers, batches it with any other queued PRs, runs CI, and merges on
+success.
 
 ## Inputs
 
@@ -351,48 +361,40 @@ it with any other queued PRs, runs CI, and merges on success.
 | `queue_label` | no | `queue` | Label that enqueues a PR |
 | `dry_run` | no | `false` | Log intent without mutating |
 
-## CLI
-
-The action wraps a Go binary with three subcommands:
-
-```
-merge-queue process   # Main flow: collect, batch, verify, merge
-merge-queue bisect    # Bisection flow (called via dispatch)
-merge-queue setup     # Create labels in a repo
-```
-
 ## Development
 
 ### Prerequisites
 
-- Go 1.24+
+- Node.js 24+
 
 ### Build
 
 ```bash
-go build -o merge-queue ./cmd/merge-queue
+npm run build
 ```
 
 ### Test
 
 ```bash
-go test -race ./...
+npm test
 ```
 
-### Lint
+### Type check
 
 ```bash
-# Install golangci-lint: https://golangci-lint.run/welcome/install/
-golangci-lint run
+npm run typecheck
 ```
 
 ### Project structure
 
 ```
-cmd/merge-queue/        CLI entry point, GitHub client, git operations
-internal/bisect/        Pure Split() function for binary bisection
-internal/queue/         Label state machine, GitHubAPI interface
-internal/batch/         Batch branch creation and multi-PR merge
+src/main.ts             Entry point
+src/action.ts           Action orchestration (process & bisect flows)
+src/github.ts           GitHub REST API client
+src/gitops.ts           Server-side git operations (branch, merge, fast-forward)
+src/queue.ts            Label state machine
+src/batch.ts            Batch branch creation and multi-PR merge
+src/bisect.ts           Pure split function for binary bisection
 ```
 
 All git operations (branch creation, merge, fast-forward, delete) use the
