@@ -737,6 +737,159 @@ describe("runProcess", () => {
     expect(api.workflows).toHaveLength(2);
     expect(api.workflows[1].inputs?.bisect).toBe("true");
   });
+
+  it("tolerates deleteBranch failure when all runProcess PRs conflict", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    git.conflictOn = "sha-1"; // PR#1 conflicts → result.merged is empty
+    const cfg = baseCfg({ dryRun: false });
+    const logs: string[] = [];
+
+    git.deleteBranch = async () => {
+      throw new Error("delete failed");
+    };
+
+    await runProcess(api, git, cfg, (m) => logs.push(m));
+
+    expect(
+      logs.some((l) => l.includes("Warning: failed to delete empty batch branch")),
+    ).toBe(true);
+    expect(logs.some((l) => l.includes("No PRs merged successfully"))).toBe(
+      true,
+    );
+  });
+
+  it("tolerates removeLabel failure when posting merged comments in runProcess", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+
+    const origRemove = api.removeLabel.bind(api);
+    api.removeLabel = async (n, label) => {
+      if (label === "queue:active") throw new Error("removeLabel failed");
+      return origRemove(n, label);
+    };
+
+    await runProcess(api, git, cfg, nop);
+
+    // PR should still receive a merged comment despite the removeLabel failure
+    const c = api.comments.get(1) ?? [];
+    expect(c.some((s) => s.includes("merged"))).toBe(true);
+  });
+
+  it("warns when requeue fails inside requeueAll", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    git.failOn = "createBranchFromRef"; // createAndMerge throws → requeueAll called
+    const cfg = baseCfg({ dryRun: false });
+    const logs: string[] = [];
+
+    // addLabel throws for "queue" → q.requeue throws inside requeueAll
+    api.addLabel = async (_n, label) => {
+      if (label === "queue") throw new Error("addLabel failed");
+    };
+
+    await expect(
+      runProcess(api, git, cfg, (m) => logs.push(m)),
+    ).rejects.toThrow();
+
+    expect(
+      logs.some((l) =>
+        l.includes("Warning: failed to requeue PR #1 after error"),
+      ),
+    ).toBe(true);
+  });
+
+  it("warns when cleanupBranch deleteBranch fails", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    const logs: string[] = [];
+
+    // Return a drifted PR so cleanupBranch is called
+    api.getPR = async (prNumber: number) => ({
+      ...makePR(prNumber),
+      headSHA: `sha-${prNumber}-new`,
+      state: "open" as const,
+    });
+    git.deleteBranch = async () => {
+      throw new Error("delete failed");
+    };
+
+    await runProcess(api, git, cfg, (m) => logs.push(m));
+
+    expect(
+      logs.some((l) => l.includes("Warning: failed to delete branch")),
+    ).toBe(true);
+  });
+
+  it("warns when marking conflicted PR as failed throws in runProcess", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    git.conflictOn = "sha-1"; // PR#1 conflicts
+    const cfg = baseCfg({ dryRun: false });
+    const logs: string[] = [];
+
+    // addLabel throws for "queue:failed" → q.markFailed throws
+    api.addLabel = async (_n, label) => {
+      if (label === "queue:failed") throw new Error("addLabel failed");
+    };
+
+    await runProcess(api, git, cfg, (m) => logs.push(m));
+
+    expect(
+      logs.some((l) => l.includes("Warning: failed to mark PR #1 as failed")),
+    ).toBe(true);
+    expect(logs.some((l) => l.includes("No PRs merged successfully"))).toBe(
+      true,
+    );
+  });
+
+  it("warns when handleCIFailure deleteBranch throws", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    api.ciConclusion = "failure";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    const logs: string[] = [];
+
+    git.deleteBranch = async () => {
+      throw new Error("delete failed");
+    };
+
+    await runProcess(api, git, cfg, (m) => logs.push(m));
+
+    expect(
+      logs.some((l) => l.includes("Warning: failed to delete batch branch")),
+    ).toBe(true);
+  });
+
+  it("warns when closePR throws in ensurePRClosedAfterMerge", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    const logs: string[] = [];
+
+    // closePR throws — the warning must be logged and the function must not throw
+    api.closePR = async () => {
+      throw new Error("closePR failed");
+    };
+
+    await runProcess(api, git, cfg, (m) => logs.push(m));
+
+    expect(
+      logs.some((l) => l.includes("Warning: failed to close PR #1")),
+    ).toBe(true);
+  });
 });
 
 describe("runBisect", () => {
@@ -1040,6 +1193,269 @@ describe("runBisect", () => {
       logs.some((l) => l.includes("No PRs merged in bisect batch")),
     ).toBe(true);
     expect(api.labels.get(1)).toContain("queue:failed");
+  });
+
+  it("warns but continues when requeue fails inside handleBisectObservationFailure", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+    const logs: string[] = [];
+
+    // findWorkflowRun throws → triggers handleBisectObservationFailure
+    api.findWorkflowRun = async () => {
+      throw new Error("timeout");
+    };
+    // addLabel throws for the pending "queue" label → q.requeue throws
+    api.addLabel = async (_n, label) => {
+      if (label === "queue") throw new Error("rate limited");
+    };
+
+    await expect(
+      runBisect(api, git, cfg, (m) => logs.push(m)),
+    ).rejects.toThrow("locating bisect CI run");
+
+    // Both PRs should log a requeue warning
+    expect(
+      logs.some((l) => l.includes("Warning: failed to requeue PR #1")),
+    ).toBe(true);
+    expect(
+      logs.some((l) => l.includes("Warning: failed to requeue PR #2")),
+    ).toBe(true);
+    // continue was hit — no requeued comment posted
+    expect(api.comments.size).toBe(0);
+  });
+
+  it("warns when deleteBranch fails inside handleBisectObservationFailure", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+    const logs: string[] = [];
+
+    // findWorkflowRun throws → triggers handleBisectObservationFailure
+    api.findWorkflowRun = async () => {
+      throw new Error("timeout");
+    };
+    // deleteBranch throws — should log a warning then continue with requeue
+    git.deleteBranch = async () => {
+      throw new Error("delete failed");
+    };
+
+    await expect(
+      runBisect(api, git, cfg, (m) => logs.push(m)),
+    ).rejects.toThrow("locating bisect CI run");
+
+    expect(
+      logs.some((l) =>
+        l.includes("Warning: failed to delete bisect branch"),
+      ),
+    ).toBe(true);
+    // PRs should still be requeued despite the branch-delete failure
+    for (const n of [1, 2]) {
+      expect(api.labels.get(n)).toContain("queue");
+    }
+  });
+
+  it("warns but continues when marking conflicted PR as failed throws", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1)]);
+    const git = newMockGit();
+    git.conflictOn = "sha-1"; // PR#1 conflicts → no merged PRs
+    const cfg = baseCfg({ batchPrs: "[1]", dryRun: false });
+    const logs: string[] = [];
+
+    // addLabel throws for "queue:failed" → q.markFailed throws
+    api.addLabel = async (_n, label) => {
+      if (label === "queue:failed") throw new Error("addLabel failed");
+    };
+
+    await runBisect(api, git, cfg, (m) => logs.push(m));
+
+    expect(
+      logs.some((l) => l.includes("Warning: failed to mark PR #1 as failed")),
+    ).toBe(true);
+    expect(logs.some((l) => l.includes("No PRs merged in bisect batch"))).toBe(
+      true,
+    );
+  });
+
+  it("tolerates deleteBranch failure when all bisect PRs conflict (no merged)", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1)]);
+    const git = newMockGit();
+    git.conflictOn = "sha-1"; // PR#1 conflicts → mergedLeft = []
+    const cfg = baseCfg({ batchPrs: "[1]", dryRun: false });
+    const logs: string[] = [];
+
+    // Override deleteBranch to throw — should be silently swallowed
+    git.deleteBranch = async () => {
+      throw new Error("delete failed");
+    };
+
+    await runBisect(api, git, cfg, (m) => logs.push(m));
+
+    expect(logs.some((l) => l.includes("No PRs merged in bisect batch"))).toBe(
+      true,
+    );
+  });
+
+  it("tolerates inner deleteBranch failure when CI trigger fails in bisect", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+
+    // CI trigger throws
+    api.triggerWorkflow = async () => {
+      throw new Error("trigger failed");
+    };
+    // deleteBranch also throws — the inner best-effort catch must swallow it
+    git.deleteBranch = async () => {
+      throw new Error("delete failed");
+    };
+
+    await expect(runBisect(api, git, cfg, nop)).rejects.toThrow(
+      "triggering CI for bisect",
+    );
+  });
+
+  it("tolerates removeLabel failure when posting merged comments in bisect", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2,3]", dryRun: false });
+
+    const origRemove = api.removeLabel.bind(api);
+    api.removeLabel = async (n, label) => {
+      if (label === "queue:active") throw new Error("removeLabel failed");
+      return origRemove(n, label);
+    };
+
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await runBisect(api, git, cfg, nop);
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
+
+    // Merged PR (#1, #2) should still receive a merged comment despite the
+    // removeLabel failure being swallowed
+    for (const n of [1, 2]) {
+      const c = api.comments.get(n) ?? [];
+      expect(c.some((s) => s.includes("merged"))).toBe(true);
+    }
+  });
+
+  it("warns when requeue fails during right-half dispatch failure in bisect", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2,3]", dryRun: false });
+    const logs: string[] = [];
+
+    const origTrigger = api.triggerWorkflow.bind(api);
+    api.triggerWorkflow = async (file, ref, inputs) => {
+      if (inputs?.bisect === "true") throw new Error("dispatch failed");
+      return origTrigger(file, ref, inputs);
+    };
+    // addLabel throws for "queue" → q.requeue throws for right-half PR#3
+    api.addLabel = async (_n, label) => {
+      if (label === "queue") throw new Error("addLabel failed");
+    };
+
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await expect(
+        runBisect(api, git, cfg, (m) => logs.push(m)),
+      ).rejects.toThrow("dispatching bisect for right half");
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
+
+    expect(
+      logs.some((l) => l.includes("Warning: failed to requeue PR #3")),
+    ).toBe(true);
+  });
+
+  it("warns but continues when deleting bisect branch fails after CI failure", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    api.ciConclusion = "failure";
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+    const logs: string[] = [];
+
+    // Override deleteBranch to throw — warning should be logged
+    git.deleteBranch = async () => {
+      throw new Error("delete failed");
+    };
+
+    await runBisect(api, git, cfg, (m) => logs.push(m));
+
+    expect(
+      logs.some((l) =>
+        l.includes("Warning: failed to delete bisect branch"),
+      ),
+    ).toBe(true);
+  });
+
+  it("warns when requeue fails for right-half after identifying single culprit", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    api.ciConclusion = "failure";
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+    const logs: string[] = [];
+
+    // addLabel throws for "queue" → q.requeue throws for right-half PR#2
+    // (markFailed for the culprit PR#1 adds "queue:failed", which is unaffected)
+    api.addLabel = async (_n, label) => {
+      if (label === "queue") throw new Error("addLabel failed");
+    };
+
+    await runBisect(api, git, cfg, (m) => logs.push(m));
+
+    expect(
+      logs.some((l) => l.includes("Warning: failed to requeue PR #2")),
+    ).toBe(true);
+  });
+
+  it("warns when requeue fails during follow-up bisect dispatch failure", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3)]);
+    api.ciConclusion = "failure";
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2,3]", dryRun: false });
+    const logs: string[] = [];
+
+    const origTrigger = api.triggerWorkflow.bind(api);
+    api.triggerWorkflow = async (file, ref, inputs) => {
+      if (inputs?.bisect === "true") throw new Error("dispatch failed");
+      return origTrigger(file, ref, inputs);
+    };
+    // addLabel throws for "queue" → q.requeue throws for all requeue attempts
+    api.addLabel = async (_n, label) => {
+      if (label === "queue") throw new Error("addLabel failed");
+    };
+
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await expect(
+        runBisect(api, git, cfg, (m) => logs.push(m)),
+      ).rejects.toThrow("dispatching follow-up bisect");
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
+
+    // All three PRs should log a requeue warning
+    for (const n of [1, 2, 3]) {
+      expect(
+        logs.some((l) => l.includes(`Warning: failed to requeue PR #${n}`)),
+      ).toBe(true);
+    }
   });
 });
 
