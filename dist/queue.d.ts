@@ -4,6 +4,7 @@ export interface PR {
     headRef: string;
     headSHA: string;
     title: string;
+    state?: "open" | "closed";
     createdAt: number;
 }
 export type LabelState = "" | "active" | "failed";

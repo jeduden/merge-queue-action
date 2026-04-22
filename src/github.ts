@@ -78,6 +78,7 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
           headRef,
           headSHA: pr.head.sha,
           title: pr.title,
+          state: pr.state,
           createdAt: Math.floor(
             new Date(pr.created_at).getTime() / 1000,
           ),
@@ -233,6 +234,7 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
       headRef,
       headSHA: pr.head.sha,
       title: pr.title,
+      state: pr.state,
       createdAt: Math.floor(new Date(pr.created_at).getTime() / 1000),
     };
   }
