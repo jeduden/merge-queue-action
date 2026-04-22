@@ -35,15 +35,20 @@ Node.js-based GitHub Action — no compiled binary required.
 
 ### How merging works in detail
 
-By default the action does not use `git` locally — every git operation
-is performed server-side through the GitHub REST API. Setting
-`local_merge: true` switches the per-PR merge step to a local
-`git merge` so custom merge drivers can run; branch creation,
-fast-forward and deletion still go through the REST API in both modes.
-See [Custom merge drivers](#custom-merge-drivers) for the local-merge
-setup.
+By default the per-PR merge step runs locally via `git merge` in the
+runner's working tree so committed `.gitattributes` and
+`merge.<name>.driver` config take effect. Branch creation,
+fast-forward and deletion still go through the GitHub REST API. See
+[Custom merge drivers](#custom-merge-drivers) for the driver setup.
 
-The default (server-side) flow:
+Setting `local_merge: "false"` falls back to the all-server-side flow
+described below; the only behavioural change is that the merge step
+calls `POST /repos/{owner}/{repo}/merges` instead of running `git` in
+the runner. Branch creation, CI dispatch, fast-forward and deletion
+are identical in both modes.
+
+The server-side flow (also what happens for the non-merge steps when
+`local_merge: "true"`):
 
 1. **Batch branch creation** — A new branch `merge-queue/batch-<ID>` is
    created from the current tip of `main` using the
@@ -317,6 +322,19 @@ jobs:
   queue:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.MERGE_QUEUE_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.email "merge-queue@users.noreply.github.com"
+          git config user.name  "merge-queue-bot"
+
+      # Optional: register any custom merge drivers here, e.g.
+      #   git config merge.lockfile.driver ".merge-drivers/lockfile.sh %O %A %B %L %P"
+
       - uses: jeduden/merge-queue-action@v0.3.0
         with:
           token: ${{ secrets.MERGE_QUEUE_TOKEN }}
@@ -325,6 +343,15 @@ jobs:
           bisect: ${{ github.event.inputs.bisect }}
           batch_prs: ${{ github.event.inputs.batch_prs }}
 ```
+
+The `actions/checkout` step is required so the action can run `git
+merge` locally (custom merge drivers take effect this way). Use your
+`MERGE_QUEUE_TOKEN` on `actions/checkout` — not the default
+`GITHUB_TOKEN` — so the subsequent batch-branch push is authorized by
+the same actor that bypasses your ruleset. If you have no custom
+drivers and prefer the server-side merge path, set `local_merge:
+"false"` on the action step; the checkout is no longer required in
+that case.
 
 ### 2. Set up your CI workflow and token
 
@@ -367,7 +394,7 @@ success.
 | `batch_size` | no | `5` | Max PRs per batch |
 | `queue_label` | no | `queue` | Label that enqueues a PR |
 | `dry_run` | no | `false` | Log intent without mutating |
-| `local_merge` | no | `false` | Perform merges locally via `git` in the runner instead of the REST `merges` API. Required for custom merge drivers (see below) |
+| `local_merge` | no | `true` | Perform merges locally via `git` in the runner (required for custom merge drivers). Set `"false"` to use the server-side REST `merges` API instead; that path ignores merge drivers but does not need `actions/checkout`. See [Custom merge drivers](#custom-merge-drivers) |
 
 ## Custom merge drivers
 
@@ -498,7 +525,6 @@ jobs:
         with:
           token:        ${{ secrets.MERGE_QUEUE_TOKEN }}
           ci_workflow:  .github/workflows/ci.yml
-          local_merge:  "true"
           bisect:       ${{ github.event.inputs.bisect }}
           batch_prs:    ${{ github.event.inputs.batch_prs }}
 ```
