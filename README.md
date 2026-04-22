@@ -361,6 +361,110 @@ success.
 | `queue_label` | no | `queue` | Label that enqueues a PR |
 | `dry_run` | no | `false` | Log intent without mutating |
 
+## Custom merge drivers
+
+Git supports [custom merge drivers](https://git-scm.com/docs/gitattributes#_defining_a_custom_merge_driver)
+for resolving conflicts on specific file types — e.g. auto-merging
+`package-lock.json`, `Cargo.lock`, `CHANGELOG.md`, or generated files
+that would otherwise conflict on every parallel PR.
+
+### Current status
+
+**Custom merge drivers are not invoked by the action's default merge
+path.** All merges go through GitHub's REST
+`POST /repos/{owner}/{repo}/merges` endpoint, which runs server-side and
+ignores `.gitattributes` and `merge.<name>.driver` configuration. When a
+PR can't be merged cleanly by the server it is labelled `queue:failed` —
+there is no retry with a custom driver.
+
+For merge drivers to participate in batching, the merge must happen
+locally in the runner where a real `git` binary can read your
+`.gitattributes` and dispatch to the driver. The sections below describe
+the repository-side setup (what you commit) and the action-side changes
+required (what this action still needs to gain).
+
+### Repository-side setup
+
+The driver script **must be committed to the repository** so it is on
+disk after `actions/checkout` — if it isn't in the working tree at
+merge time, `git merge` has nothing to exec.
+
+1. **Commit the driver** into the repo, e.g.
+   `.merge-drivers/lockfile-merge.sh`. Make it executable and record the
+   bit in git:
+
+   ```bash
+   chmod +x .merge-drivers/lockfile-merge.sh
+   git add .merge-drivers/lockfile-merge.sh
+   git update-index --chmod=+x .merge-drivers/lockfile-merge.sh
+   ```
+
+   The driver must write the resolved content to `%A` and exit `0` on
+   success, non-zero on unresolvable conflict. See
+   [gitattributes(5)](https://git-scm.com/docs/gitattributes#_defining_a_custom_merge_driver)
+   for the full contract.
+
+2. **Commit `.gitattributes`** mapping paths to the driver name:
+
+   ```gitattributes
+   package-lock.json merge=lockfile
+   pnpm-lock.yaml    merge=lockfile
+   CHANGELOG.md      merge=union
+   ```
+
+   (`union` is a built-in driver; `lockfile` above is the custom one.)
+
+3. **Register the driver at runtime.** `merge.<name>.driver` lives in
+   `.git/config`, which is not tracked. The merge-queue workflow must
+   set it after checkout and before any merge runs:
+
+   ```yaml
+   - uses: actions/checkout@v4
+     with:
+       fetch-depth: 0
+       token: ${{ secrets.MERGE_QUEUE_TOKEN }}
+
+   - name: Register custom merge drivers
+     run: |
+       git config merge.lockfile.name "Auto-merge lockfiles"
+       git config merge.lockfile.driver ".merge-drivers/lockfile-merge.sh %O %A %B %L %P"
+       git config merge.lockfile.recursive binary
+   ```
+
+   The `%` placeholders are defined by git:
+
+   | Placeholder | Meaning |
+   |-------------|---------|
+   | `%O` | path to the common-ancestor version |
+   | `%A` | path to the current/ours version (driver writes result here) |
+   | `%B` | path to the other/theirs version |
+   | `%L` | conflict-marker size |
+   | `%P` | pathname of the file being merged |
+
+4. **Install any interpreters or tooling the driver needs** (Node,
+   Python, a specific CLI) as earlier steps in the same job, before the
+   merge-queue action runs.
+
+5. **Do not rely on `~/.gitconfig`** or user-scoped config — Actions
+   runners are ephemeral and the config must be set on every run.
+
+### Action-side requirements (not yet implemented)
+
+For the setup above to actually take effect during batching, the action
+needs to perform merges locally instead of through the REST `merges`
+endpoint. That requires:
+
+- a checked-out working tree for the batch branch in the runner;
+- shelling out to `git merge` (which consults `.gitattributes` and the
+  registered `merge.<name>.driver`) instead of calling
+  `octokit.rest.repos.merge`;
+- pushing the resulting commit via `git push` or the Git Data API.
+
+Until that lands, committing the driver and `.gitattributes` as above is
+a no-op at queue time, but leaves your repo ready for the switch and
+keeps the driver usable for local `git merge`/`git rebase` outside the
+queue.
+
 ## Development
 
 ### Prerequisites
