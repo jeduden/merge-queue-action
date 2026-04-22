@@ -871,6 +871,31 @@ describe("runProcess", () => {
     ).toBe(true);
   });
 
+  it("logs uncertainty when all getPR calls throw in ensurePRClosedAfterMerge", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    const logs: string[] = [];
+
+    // Allow the first getPR call (drift check) to succeed, then always throw
+    let getPRCallCount = 0;
+    const originalGetPR = api.getPR.bind(api);
+    api.getPR = async (n: number) => {
+      getPRCallCount++;
+      if (getPRCallCount === 1) return originalGetPR(n);
+      throw new Error("API timeout");
+    };
+
+    await runProcess(api, git, cfg, (m) => logs.push(m));
+
+    expect(
+      logs.some((l) => l.includes("unable to confirm PR is closed")),
+    ).toBe(true);
+    expect(logs.some((l) => l.includes("is still open"))).toBe(false);
+  });
+
   it("warns when closePR throws in ensurePRClosedAfterMerge", async () => {
     const api = newMockAPI();
     api.prs.set("queue", [makePR(1)]);

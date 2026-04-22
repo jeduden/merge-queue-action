@@ -102,16 +102,24 @@ async function ensurePRClosedAfterMerge(
   log: (msg: string) => void,
 ): Promise<void> {
   const attempts = 3;
+  let confirmedOpen = false;
   for (let i = 0; i < attempts; i++) {
     try {
       const current = await api.getPR(prNumber);
       if (current.state === "closed") return;
+      confirmedOpen = true;
     } catch (err) {
       log(`Warning: failed to read PR #${prNumber} state after merge: ${err}`);
     }
     if (i < attempts - 1) await sleep(50);
   }
-  log(`PR #${prNumber} is still open after merge; closing explicitly`);
+  if (confirmedOpen) {
+    log(`PR #${prNumber} is still open after merge; closing explicitly`);
+  } else {
+    log(
+      `PR #${prNumber}: unable to confirm PR is closed; attempting to close explicitly`,
+    );
+  }
   try {
     await api.closePR(prNumber);
   } catch (err) {
