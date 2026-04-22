@@ -41,6 +41,10 @@ function requireCtx(cfg: Config): CommentCtx {
   return cfg.commentCtx;
 }
 
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 export type { CommentCtx };
 
 /** FullAPI combines all GitHub API interfaces needed by the orchestration. */
@@ -89,6 +93,31 @@ async function postComment(
     await api.comment(prNumber, body);
   } catch (err) {
     log(`Warning: failed to comment on PR #${prNumber}: ${err}`);
+  }
+}
+
+async function ensurePRClosedAfterMerge(
+  api: FullAPI,
+  prNumber: number,
+  log: (msg: string) => void,
+): Promise<void> {
+  const attempts = 3;
+  for (let i = 0; i < attempts; i++) {
+    let current: PR;
+    try {
+      current = await api.getPR(prNumber);
+    } catch (err) {
+      log(`Warning: failed to read PR #${prNumber} state after merge: ${err}`);
+      return;
+    }
+    if (current.state === "closed") return;
+    if (i < attempts - 1) await sleep(50);
+  }
+  log(`PR #${prNumber} is still open after merge; closing explicitly`);
+  try {
+    await api.closePR(prNumber);
+  } catch (err) {
+    log(`Warning: failed to close PR #${prNumber}: ${err}`);
   }
 }
 
@@ -347,6 +376,32 @@ export async function runProcess(
   }
 
   // 6. CI passed — merge to main
+  if (!cfg.dryRun) {
+    const drifted = [] as { number: number; snapshot: string; current: string }[];
+    for (const mp of result.merged) {
+      const current = await api.getPR(mp.number);
+      if (current.headSHA !== mp.headSHA) {
+        drifted.push({
+          number: mp.number,
+          snapshot: mp.headSHA,
+          current: current.headSHA,
+        });
+      }
+    }
+    if (drifted.length > 0) {
+      for (const d of drifted) {
+        log(
+          `PR #${d.number} head changed while CI ran (${d.snapshot} -> ${d.current}); skipping stale batch`,
+        );
+      }
+      await cleanupBranch(result.branch);
+      await requeueAll(
+        "PR head changed while batch CI was running; queue will retry with a fresh batch",
+      );
+      return;
+    }
+  }
+
   let mergeSha = "";
   try {
     mergeSha = await b.completeMerge(result.branch);
@@ -371,6 +426,7 @@ export async function runProcess(
       } catch {
         /* best effort */
       }
+      await ensurePRClosedAfterMerge(api, pr.number, log);
       await postComment(
         api,
         pr.number,

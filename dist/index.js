@@ -29943,6 +29943,9 @@ function requireCtx(cfg) {
     }
     return cfg.commentCtx;
 }
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
 function hasWritePermission(perm) {
     return perm === "write" || perm === "maintain" || perm === "admin";
 }
@@ -29973,6 +29976,30 @@ async function postComment(api, prNumber, body, log) {
     }
     catch (err) {
         log(`Warning: failed to comment on PR #${prNumber}: ${err}`);
+    }
+}
+async function ensurePRClosedAfterMerge(api, prNumber, log) {
+    const attempts = 3;
+    for (let i = 0; i < attempts; i++) {
+        let current;
+        try {
+            current = await api.getPR(prNumber);
+        }
+        catch (err) {
+            log(`Warning: failed to read PR #${prNumber} state after merge: ${err}`);
+            return;
+        }
+        if (current.state === "closed")
+            return;
+        if (i < attempts - 1)
+            await sleep(50);
+    }
+    log(`PR #${prNumber} is still open after merge; closing explicitly`);
+    try {
+        await api.closePR(prNumber);
+    }
+    catch (err) {
+        log(`Warning: failed to close PR #${prNumber}: ${err}`);
     }
 }
 async function handleCIFailure(api, cfg, ctx, q, gitOps, prs, result, ciRunUrl, log) {
@@ -30159,6 +30186,27 @@ async function runProcess(api, gitOps, cfg, log, actor) {
         }
     }
     // 6. CI passed — merge to main
+    if (!cfg.dryRun) {
+        const drifted = [];
+        for (const mp of result.merged) {
+            const current = await api.getPR(mp.number);
+            if (current.headSHA !== mp.headSHA) {
+                drifted.push({
+                    number: mp.number,
+                    snapshot: mp.headSHA,
+                    current: current.headSHA,
+                });
+            }
+        }
+        if (drifted.length > 0) {
+            for (const d of drifted) {
+                log(`PR #${d.number} head changed while CI ran (${d.snapshot} -> ${d.current}); skipping stale batch`);
+            }
+            await cleanupBranch(result.branch);
+            await requeueAll("PR head changed while batch CI was running; queue will retry with a fresh batch");
+            return;
+        }
+    }
     let mergeSha = "";
     try {
         mergeSha = await b.completeMerge(result.branch);
@@ -30180,6 +30228,7 @@ async function runProcess(api, gitOps, cfg, log, actor) {
             catch {
                 /* best effort */
             }
+            await ensurePRClosedAfterMerge(api, pr.number, log);
             await postComment(api, pr.number, (0, comments_js_1.commentMerged)(ctx, mergeSha, ciRunUrl), log);
         }
     }
@@ -30778,6 +30827,7 @@ class GitHubClient {
                     headRef,
                     headSHA: pr.head.sha,
                     title: pr.title,
+                    state: pr.state,
                     createdAt: Math.floor(new Date(pr.created_at).getTime() / 1000),
                 });
                 if (limit > 0 && result.length >= limit) {
@@ -30899,6 +30949,7 @@ class GitHubClient {
             headRef,
             headSHA: pr.head.sha,
             title: pr.title,
+            state: pr.state,
             createdAt: Math.floor(new Date(pr.created_at).getTime() / 1000),
         };
     }

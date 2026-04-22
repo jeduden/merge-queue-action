@@ -30,12 +30,17 @@ const MERGE_SHA = "abcdef1234567890";
 
 // --- mocks ---
 
-function makePR(n: number, headRef = `branch-${n}`): PR {
+function makePR(
+  n: number,
+  headRef = `branch-${n}`,
+  state: "open" | "closed" = "open",
+): PR {
   return {
     number: n,
     headRef,
     headSHA: `sha-${n}`,
     title: `PR #${n}`,
+    state,
     createdAt: n * 100,
   };
 }
@@ -48,6 +53,7 @@ function newMockAPI(): FullAPI & {
   ciConclusion: string;
   actorPerms: Map<string, string>;
   createdLabels: { name: string; color: string; desc: string }[];
+  closedPRs: number[];
 } {
   const mock = {
     prs: new Map<string, PR[]>(),
@@ -61,6 +67,7 @@ function newMockAPI(): FullAPI & {
     ciConclusion: "success",
     actorPerms: new Map<string, string>(),
     createdLabels: [] as { name: string; color: string; desc: string }[],
+    closedPRs: [] as number[],
 
     async listPRsWithLabel(label: string, _limit: number): Promise<PR[]> {
       return mock.prs.get(label) ?? [];
@@ -101,7 +108,9 @@ function newMockAPI(): FullAPI & {
     async waitForWorkflowRun(): Promise<WorkflowRunResult> {
       return { conclusion: mock.ciConclusion, htmlUrl: CI_RUN_URL };
     },
-    async closePR(): Promise<void> {},
+    async closePR(prNumber: number): Promise<void> {
+      mock.closedPRs.push(prNumber);
+    },
     async getPR(prNumber: number): Promise<PR> {
       // Search across all label sets for the PR
       for (const prs of mock.prs.values()) {
@@ -303,6 +312,56 @@ describe("runProcess", () => {
     expect(c1.some((s) => s.includes(CI_RUN_PATH_FRAGMENT))).toBe(true);
     expect(c1.some((s) => s.includes("Merge Queue** — merged"))).toBe(true);
     expect(c1.some((s) => s.includes(MERGE_SHA))).toBe(true);
+  });
+
+  it("requeues stale batch when a merged PR head drifts before fast-forward", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+
+    api.getPR = async (prNumber: number) => ({
+      ...makePR(prNumber),
+      headSHA: `sha-${prNumber}-new`,
+      state: "open",
+    });
+
+    await runProcess(api, git, cfg, nop);
+
+    expect(git.ffRef).toBe("");
+    expect(git.deleted.length).toBeGreaterThan(0);
+    expect(api.labels.get(1)).toContain("queue");
+    const c = api.comments.get(1) ?? [];
+    expect(
+      c.some(
+        (s) =>
+          s.includes("Merge Queue** — requeued") &&
+          s.includes("head changed while batch CI was running"),
+      ),
+    ).toBe(true);
+  });
+
+  it("explicitly closes merged PR when it remains open after retries", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    let getPRCalls = 0;
+
+    api.getPR = async (prNumber: number) => {
+      getPRCalls++;
+      return makePR(prNumber, `branch-${prNumber}`, "open");
+    };
+
+    await runProcess(api, git, cfg, nop);
+
+    expect(getPRCalls).toBeGreaterThanOrEqual(4);
+    expect(api.closedPRs).toContain(1);
+    const c = api.comments.get(1) ?? [];
+    expect(c.some((s) => s.includes("Merge Queue** — merged"))).toBe(true);
+    expect(c.some((s) => s.includes(MERGE_SHA))).toBe(true);
   });
 
   it("posts error comments when CI trigger fails and requeues", async () => {
