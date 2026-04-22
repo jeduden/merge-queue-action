@@ -1,8 +1,8 @@
 name: merge-queue
 description: >-
-  Bors-style merge queue with batching and bisection. Performs merges
-  locally via `git` so custom merge drivers take effect; set
-  local_merge: false to fall back to server-side API merges.
+  Bors-style merge queue with batching and bisection. Merges PRs into
+  the batch branch locally via `git merge` so custom merge drivers
+  (.gitattributes + merge.<name>.driver) take effect.
 
 inputs:
   token:
@@ -24,15 +24,6 @@ inputs:
   dry_run:
     description: Log intent without mutating
     default: "false"
-  local_merge:
-    description: >-
-      Perform merges locally via `git` in the runner (default) so
-      custom merge drivers (.gitattributes + merge.<name>.driver) take
-      effect. Requires `actions/checkout` with `fetch-depth: 0` and a
-      token that can push to the repo to run before this action. Set
-      to "false" to fall back to the server-side REST merges API
-      (drivers are ignored in that mode).
-    default: "true"
   batch_prs:
     description: >-
       JSON array of PR numbers for bisection (set automatically

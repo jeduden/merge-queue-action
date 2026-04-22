@@ -35,34 +35,29 @@ Node.js-based GitHub Action — no compiled binary required.
 
 ### How merging works in detail
 
-By default the per-PR merge step runs locally via `git merge` in the
-runner's working tree so committed `.gitattributes` and
-`merge.<name>.driver` config take effect. Branch creation,
-fast-forward and deletion still go through the GitHub REST API. See
-[Custom merge drivers](#custom-merge-drivers) for the driver setup.
-
-Setting `local_merge: "false"` falls back to the all-server-side flow
-described below; the only behavioural change is that the merge step
-calls `POST /repos/{owner}/{repo}/merges` instead of running `git` in
-the runner. Branch creation, CI dispatch, fast-forward and deletion
-are identical in both modes.
-
-The server-side flow (also what happens for the non-merge steps when
-`local_merge: "true"`):
+The action runs in a job that has already checked out the repository
+(see [Quick start](#quick-start) for the required steps). Branch
+creation, fast-forward and deletion go through the GitHub Git Data
+API; the per-PR merge step runs `git merge` in the runner's working
+tree so committed `.gitattributes` and `merge.<name>.driver` config
+take effect. See [Custom merge drivers](#custom-merge-drivers) for the
+driver setup.
 
 1. **Batch branch creation** — A new branch `merge-queue/batch-<ID>` is
    created from the current tip of `main` using the
    [Create a reference](https://docs.github.com/en/rest/git/refs#create-a-reference)
-   API (`POST /repos/{owner}/{repo}/git/refs`).
+   API (`POST /repos/{owner}/{repo}/git/refs`), then fetched and
+   checked out locally.
 
-2. **Server-side merges** — Each PR's head ref is merged into the batch
-   branch using the
-   [Merge a branch](https://docs.github.com/en/rest/branches/branches#merge-a-branch)
-   API (`POST /repos/{owner}/{repo}/merges`). This merges each PR into
-   the batch branch, typically producing a merge commit when the histories
-   have diverged (using the message `Merge PR #N: <title>` when such a
-   merge commit is created). If a PR produces a merge conflict (HTTP 409),
-   it is skipped and labelled `queue:failed`; remaining PRs continue.
+2. **Local merges** — Each PR's head SHA is fetched and merged into
+   the batch branch with `git merge --no-ff -m "Merge PR #N: <title>"`.
+   Because the merge runs locally, `.gitattributes` and any registered
+   `merge.<name>.driver` config are consulted exactly as they would be
+   for a developer running `git merge`. If a PR still conflicts after
+   drivers run, the action aborts that merge, leaves the working tree
+   clean, skips the PR, and labels it `queue:failed`; remaining PRs
+   continue. The resulting batch branch is pushed to `origin` before
+   CI is triggered.
 
 3. **CI verification** — The CI workflow is triggered on the batch branch
    via `workflow_dispatch`. Because the batch branch contains the result
@@ -344,14 +339,11 @@ jobs:
           batch_prs: ${{ github.event.inputs.batch_prs }}
 ```
 
-The `actions/checkout` step is required so the action can run `git
-merge` locally (custom merge drivers take effect this way). Use your
-`MERGE_QUEUE_TOKEN` on `actions/checkout` — not the default
-`GITHUB_TOKEN` — so the subsequent batch-branch push is authorized by
-the same actor that bypasses your ruleset. If you have no custom
-drivers and prefer the server-side merge path, set `local_merge:
-"false"` on the action step; the checkout is no longer required in
-that case.
+The `actions/checkout` step is required — the action runs `git merge`
+locally so custom merge drivers can take effect. Use your
+`MERGE_QUEUE_TOKEN` on `actions/checkout` (not the default
+`GITHUB_TOKEN`) so the subsequent batch-branch push is authorized by
+the same actor that bypasses your ruleset.
 
 ### 2. Set up your CI workflow and token
 
@@ -394,7 +386,6 @@ success.
 | `batch_size` | no | `5` | Max PRs per batch |
 | `queue_label` | no | `queue` | Label that enqueues a PR |
 | `dry_run` | no | `false` | Log intent without mutating |
-| `local_merge` | no | `true` | Perform merges locally via `git` in the runner (required for custom merge drivers). Set `"false"` to use the server-side REST `merges` API instead; that path ignores merge drivers but does not need `actions/checkout`. See [Custom merge drivers](#custom-merge-drivers) |
 
 ## Custom merge drivers
 
@@ -405,19 +396,13 @@ that would otherwise conflict on every parallel PR.
 
 ### How it works
 
-By default the action merges server-side via `POST /repos/{owner}/{repo}/merges`,
-which ignores `.gitattributes` and `merge.<name>.driver` config. To opt
-into driver-aware merges, set `local_merge: true` on the action step. In
-that mode batch branch creation, fast-forward and deletion still go
-through the Git Data API (so rulesets and fast-forward-only semantics
-are unchanged), but the per-PR merges run via `git merge` in the
-runner's checked-out working tree. `git` consults your committed
-`.gitattributes`, dispatches to any registered `merge.<name>.driver`,
-and the resulting merge commit is pushed to the batch branch.
-
-If a local merge still conflicts after the driver runs, the PR is
-reported as conflicted and labelled `queue:failed` — the same behaviour
-as the server-side path.
+Per-PR merges run via `git merge` in the runner's checked-out working
+tree, so `git` consults your committed `.gitattributes` and dispatches
+to any registered `merge.<name>.driver`. Batch branch creation,
+fast-forward and deletion still go through the Git Data API, so
+rulesets and fast-forward-only semantics are unchanged. If a merge
+still conflicts after the driver runs, the PR is reported as
+conflicted and labelled `queue:failed`.
 
 ### Repository-side setup
 
@@ -484,55 +469,23 @@ merge time, `git merge` has nothing to exec.
 5. **Do not rely on `~/.gitconfig`** or user-scoped config — Actions
    runners are ephemeral and the config must be set on every run.
 
-### Full workflow example with custom drivers
+### Wiring it into the workflow
+
+Extend the [Quick start](#quick-start) workflow by registering the
+driver in the step that already sets the git identity:
 
 ```yaml
-# .github/workflows/merge-queue.yml
-name: Merge Queue
-on:
-  pull_request:
-    types: [labeled]
-  workflow_dispatch:
-    inputs:
-      batch_prs:
-        type: string
-      bisect:
-        type: boolean
-        default: false
-
-concurrency:
-  group: merge-queue
-  cancel-in-progress: false
-
-jobs:
-  queue:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.MERGE_QUEUE_TOKEN }}
-
-      - name: Register custom merge drivers
-        run: |
-          git config user.email "merge-queue@users.noreply.github.com"
-          git config user.name  "merge-queue-bot"
-          git config merge.lockfile.name   "Auto-merge lockfiles"
-          git config merge.lockfile.driver ".merge-drivers/lockfile-merge.sh %O %A %B %L %P"
-          git config merge.lockfile.recursive binary
-
-      - uses: jeduden/merge-queue-action@v0.3.0
-        with:
-          token:        ${{ secrets.MERGE_QUEUE_TOKEN }}
-          ci_workflow:  .github/workflows/ci.yml
-          bisect:       ${{ github.event.inputs.bisect }}
-          batch_prs:    ${{ github.event.inputs.batch_prs }}
+- name: Configure git identity and merge drivers
+  run: |
+    git config user.email "merge-queue@users.noreply.github.com"
+    git config user.name  "merge-queue-bot"
+    git config merge.lockfile.name   "Auto-merge lockfiles"
+    git config merge.lockfile.driver ".merge-drivers/lockfile-merge.sh %O %A %B %L %P"
+    git config merge.lockfile.recursive binary
 ```
 
-The `actions/checkout` token must be able to push — use your
-`MERGE_QUEUE_TOKEN` here, not the default `GITHUB_TOKEN`, so the
-batch-branch push and the fast-forward are authorized by the same
-actor that bypasses your ruleset.
+Nothing else needs to change — the action picks the driver up from
+`.git/config` the moment it runs `git merge`.
 
 ## Development
 
@@ -564,17 +517,11 @@ npm run typecheck
 src/main.ts             Entry point
 src/action.ts           Action orchestration (process & bisect flows)
 src/github.ts           GitHub REST API client
-src/gitops.ts           Server-side git operations via REST API
-src/localgitops.ts      Local-merge git operations (for custom merge drivers)
+src/gitops.ts           Git operations: branch refs via REST API, per-PR merges via local `git`
 src/queue.ts            Label state machine
 src/batch.ts            Batch branch creation and multi-PR merge
 src/bisect.ts           Pure split function for binary bisection
 ```
-
-By default all git operations (branch creation, merge, fast-forward,
-delete) use the GitHub REST API server-side — no local `git` binary is
-required. When `local_merge: true`, the per-PR merge step shells out to
-the runner's `git` so custom merge drivers can take effect.
 
 ## When to upgrade to a full merge-queue server
 

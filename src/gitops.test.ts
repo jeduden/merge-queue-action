@@ -9,7 +9,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { LocalGitOps, defaultExec, type Exec } from "./localgitops.js";
+import { GitOps, defaultExec, type Exec } from "./gitops.js";
 
 interface FakeRef {
   ref: string;
@@ -73,7 +73,7 @@ function makeFakeOctokit(initialRefs: FakeRef[] = []) {
   return { octokit, calls, refs };
 }
 
-describe("LocalGitOps with injected exec", () => {
+describe("GitOps with injected exec", () => {
   it("createBranchFromRef calls both the API and git fetch+checkout", async () => {
     const { octokit, calls } = makeFakeOctokit([
       { ref: "heads/main", sha: "deadbeef" },
@@ -84,7 +84,7 @@ describe("LocalGitOps with injected exec", () => {
       return { code: 0, stdout: "", stderr: "" };
     };
     // biome-ignore lint/suspicious/noExplicitAny: test double
-    const ops = new LocalGitOps(octokit as any, "o", "r", { exec });
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
 
     await ops.createBranchFromRef("merge-queue/batch-1", "main");
 
@@ -114,7 +114,7 @@ describe("LocalGitOps with injected exec", () => {
       return { code: 0, stdout: "", stderr: "" };
     };
     // biome-ignore lint/suspicious/noExplicitAny: test double
-    const ops = new LocalGitOps(octokit as any, "o", "r", { exec });
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
 
     const ok = await ops.mergeBranch("batch", "sha-1", "msg");
     expect(ok).toBe(false);
@@ -128,7 +128,7 @@ describe("LocalGitOps with injected exec", () => {
     const { octokit } = makeFakeOctokit();
     const exec: Exec = async () => ({ code: 0, stdout: "", stderr: "" });
     // biome-ignore lint/suspicious/noExplicitAny: test double
-    const ops = new LocalGitOps(octokit as any, "o", "r", { exec });
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
     const ok = await ops.mergeBranch("batch", "sha-1", "msg");
     expect(ok).toBe(true);
   });
@@ -142,7 +142,7 @@ describe("LocalGitOps with injected exec", () => {
       return { code: 0, stdout: "", stderr: "" };
     };
     // biome-ignore lint/suspicious/noExplicitAny: test double
-    const ops = new LocalGitOps(octokit as any, "o", "r", { exec });
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
     await expect(ops.pushBranch("batch")).rejects.toThrow("remote rejected");
   });
 
@@ -151,7 +151,7 @@ describe("LocalGitOps with injected exec", () => {
       { ref: "heads/batch", sha: "abc123" },
     ]);
     // biome-ignore lint/suspicious/noExplicitAny: test double
-    const ops = new LocalGitOps(octokit as any, "o", "r");
+    const ops = new GitOps(octokit as any, "o", "r");
     const sha = await ops.fastForwardMain("batch");
     expect(sha).toBe("abc123");
     expect(calls).toContain("updateRef:heads/main:force=false");
@@ -162,13 +162,13 @@ describe("LocalGitOps with injected exec", () => {
       { ref: "heads/batch", sha: "abc" },
     ]);
     // biome-ignore lint/suspicious/noExplicitAny: test double
-    const ops = new LocalGitOps(octokit as any, "o", "r");
+    const ops = new GitOps(octokit as any, "o", "r");
     await ops.deleteBranch("batch");
     expect(calls).toContain("deleteRef:heads/batch");
   });
 });
 
-describe("LocalGitOps against a real git repo (integration)", () => {
+describe("GitOps against a real git repo (integration)", () => {
   let tmp: string;
   let bare: string;
   let work: string;
@@ -184,7 +184,7 @@ describe("LocalGitOps against a real git repo (integration)", () => {
   }
 
   beforeEach(async () => {
-    tmp = mkdtempSync(join(tmpdir(), "localgitops-"));
+    tmp = mkdtempSync(join(tmpdir(), "gitops-"));
     bare = join(tmp, "remote.git");
     work = join(tmp, "work");
 
@@ -249,7 +249,7 @@ describe("LocalGitOps against a real git repo (integration)", () => {
     await runIn(work, "checkout", "main");
 
     // biome-ignore lint/suspicious/noExplicitAny: test double
-    const ops = new LocalGitOps(makeOctokitBackedByBare() as any, "o", "r", {
+    const ops = new GitOps(makeOctokitBackedByBare() as any, "o", "r", {
       exec: execInWork(),
     });
 
@@ -290,7 +290,7 @@ describe("LocalGitOps against a real git repo (integration)", () => {
     await runIn(work, "checkout", "main");
 
     // biome-ignore lint/suspicious/noExplicitAny: test double
-    const ops = new LocalGitOps(makeOctokitBackedByBare() as any, "o", "r", {
+    const ops = new GitOps(makeOctokitBackedByBare() as any, "o", "r", {
       exec: execInWork(),
     });
 
@@ -363,7 +363,7 @@ describe("LocalGitOps against a real git repo (integration)", () => {
     await runIn(work, "checkout", "main");
 
     // biome-ignore lint/suspicious/noExplicitAny: test double
-    const ops = new LocalGitOps(makeOctokitBackedByBare() as any, "o", "r", {
+    const ops = new GitOps(makeOctokitBackedByBare() as any, "o", "r", {
       exec: execInWork(),
     });
 

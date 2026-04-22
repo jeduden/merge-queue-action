@@ -30988,102 +30988,12 @@ exports.GitHubClient = GitHubClient;
 /***/ }),
 
 /***/ 2635:
-/***/ ((__unused_webpack_module, exports) => {
-
-"use strict";
-
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.GitOps = void 0;
-/**
- * GitOps implements GitOperator using the GitHub API.
- * All operations are server-side — no local git binary required.
- */
-class GitOps {
-    octokit;
-    owner;
-    repo;
-    log;
-    constructor(octokit, owner, repo, log) {
-        this.octokit = octokit;
-        this.owner = owner;
-        this.repo = repo;
-        this.log = log ?? (() => { });
-    }
-    async createBranchFromRef(branch, baseRef) {
-        this.log(`Creating branch ${branch} from ${baseRef}`);
-        const { data: ref } = await this.octokit.rest.git.getRef({
-            owner: this.owner,
-            repo: this.repo,
-            ref: `heads/${baseRef}`,
-        });
-        const sha = ref.object.sha;
-        await this.octokit.rest.git.createRef({
-            owner: this.owner,
-            repo: this.repo,
-            ref: `refs/heads/${branch}`,
-            sha,
-        });
-    }
-    async mergeBranch(branch, sourceRef, commitMsg) {
-        this.log(`Merging ${sourceRef} into ${branch}`);
-        try {
-            await this.octokit.rest.repos.merge({
-                owner: this.owner,
-                repo: this.repo,
-                base: branch,
-                head: sourceRef,
-                commit_message: commitMsg,
-            });
-            return true;
-        }
-        catch (err) {
-            if (err.status === 409)
-                return false;
-            throw err;
-        }
-    }
-    async pushBranch(branch) {
-        // Server-side merges are already pushed — nothing to do
-        this.log(`Branch ${branch} already up to date on remote`);
-    }
-    async fastForwardMain(ref) {
-        this.log(`Fast-forwarding main to ${ref}`);
-        const { data: srcRef } = await this.octokit.rest.git.getRef({
-            owner: this.owner,
-            repo: this.repo,
-            ref: `heads/${ref}`,
-        });
-        const sha = srcRef.object.sha;
-        await this.octokit.rest.git.updateRef({
-            owner: this.owner,
-            repo: this.repo,
-            ref: `heads/main`,
-            sha,
-            force: false,
-        });
-        return sha;
-    }
-    async deleteBranch(branch) {
-        this.log(`Deleting branch ${branch}`);
-        await this.octokit.rest.git.deleteRef({
-            owner: this.owner,
-            repo: this.repo,
-            ref: `heads/${branch}`,
-        });
-    }
-}
-exports.GitOps = GitOps;
-
-
-/***/ }),
-
-/***/ 9240:
 /***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.LocalGitOps = void 0;
+exports.GitOps = void 0;
 exports.defaultExec = defaultExec;
 const node_child_process_1 = __nccwpck_require__(1421);
 function defaultExec(cwd) {
@@ -31107,16 +31017,17 @@ function defaultExec(cwd) {
     });
 }
 /**
- * LocalGitOps implements GitOperator by shelling out to a local `git`
- * binary in the runner's working tree. This path respects
- * `.gitattributes` and `merge.<name>.driver` config, so repositories
- * with custom merge drivers can use them during batch merges.
+ * GitOps implements GitOperator using a hybrid of the GitHub Git Data
+ * API (for branch creation, fast-forward and deletion) and local
+ * `git merge` (for per-PR merges). Running the merge locally is what
+ * lets `.gitattributes` and `merge.<name>.driver` config take effect,
+ * so repos with custom merge drivers see them honoured during batching.
  *
- * Branch creation, fast-forward and deletion still go through the Git
- * Data API so they remain atomic and ruleset-friendly; only the actual
- * merges run locally.
+ * The workflow calling this action must run `actions/checkout` with a
+ * pushable token before the action step so the working tree is ready
+ * for `git fetch` / `git merge` / `git push`.
  */
-class LocalGitOps {
+class GitOps {
     octokit;
     owner;
     repo;
@@ -31130,8 +31041,7 @@ class LocalGitOps {
         this.log = opts?.log ?? (() => { });
     }
     async git(args) {
-        const res = await this.exec(args);
-        return res;
+        return this.exec(args);
     }
     async gitOrThrow(args) {
         const res = await this.git(args);
@@ -31141,7 +31051,7 @@ class LocalGitOps {
         return res.stdout;
     }
     async createBranchFromRef(branch, baseRef) {
-        this.log(`Creating branch ${branch} from ${baseRef} (API + local)`);
+        this.log(`Creating branch ${branch} from ${baseRef}`);
         const { data: ref } = await this.octokit.rest.git.getRef({
             owner: this.owner,
             repo: this.repo,
@@ -31168,7 +31078,7 @@ class LocalGitOps {
         ]);
     }
     async mergeBranch(branch, sourceRef, commitMsg) {
-        this.log(`Merging ${sourceRef} into ${branch} locally`);
+        this.log(`Merging ${sourceRef} into ${branch}`);
         await this.gitOrThrow(["checkout", branch]);
         await this.gitOrThrow(["fetch", "--no-tags", "origin", sourceRef]);
         const merge = await this.git([
@@ -31220,7 +31130,7 @@ class LocalGitOps {
         });
     }
 }
-exports.LocalGitOps = LocalGitOps;
+exports.GitOps = GitOps;
 
 
 /***/ }),
@@ -31268,7 +31178,6 @@ const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
 const github_js_1 = __nccwpck_require__(9248);
 const gitops_js_1 = __nccwpck_require__(2635);
-const localgitops_js_1 = __nccwpck_require__(9240);
 const action_js_1 = __nccwpck_require__(2929);
 function loadInputs() {
     return {
@@ -31277,7 +31186,6 @@ function loadInputs() {
         batchSize: parseInt(core.getInput("batch_size") || "5", 10),
         queueLabel: core.getInput("queue_label") || "queue",
         dryRun: core.getInput("dry_run") === "true",
-        localMerge: core.getInput("local_merge") === "true",
         batchPrs: core.getInput("batch_prs") || "",
         bisect: core.getInput("bisect") === "true",
     };
@@ -31296,11 +31204,9 @@ async function run() {
     const { owner, repo } = github.context.repo;
     const log = core.info;
     const client = new github_js_1.GitHubClient(inputs.token, owner, repo, log);
-    const gitOps = inputs.localMerge
-        ? new localgitops_js_1.LocalGitOps(client.octokit, owner, repo, { log })
-        : new gitops_js_1.GitOps(client.octokit, owner, repo, log);
+    const gitOps = new gitops_js_1.GitOps(client.octokit, owner, repo, { log });
     log(`Repository context: ${owner}/${repo} (GITHUB_REPOSITORY=${process.env.GITHUB_REPOSITORY ?? "unset"})`);
-    log(`Queue label: "${inputs.queueLabel}" batchSize=${inputs.batchSize} dryRun=${inputs.dryRun} localMerge=${inputs.localMerge} bisect=${inputs.bisect}`);
+    log(`Queue label: "${inputs.queueLabel}" batchSize=${inputs.batchSize} dryRun=${inputs.dryRun} bisect=${inputs.bisect}`);
     const actor = process.env.GITHUB_ACTOR;
     const cfg = {
         ciWorkflow: inputs.ciWorkflow,
