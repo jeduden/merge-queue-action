@@ -2,7 +2,9 @@ import * as core from "@actions/core";
 import * as github from "@actions/github";
 import { GitHubClient } from "./github.js";
 import { GitOps } from "./gitops.js";
+import { LocalGitOps } from "./localgitops.js";
 import { runProcess, runBisect, type Config } from "./action.js";
+import type { GitOperator } from "./batch.js";
 import type { CommentCtx } from "./comments.js";
 
 interface EntryInputs {
@@ -11,6 +13,7 @@ interface EntryInputs {
   batchSize: number;
   queueLabel: string;
   dryRun: boolean;
+  localMerge: boolean;
   batchPrs: string;
   bisect: boolean;
 }
@@ -22,6 +25,7 @@ function loadInputs(): EntryInputs {
     batchSize: parseInt(core.getInput("batch_size") || "5", 10),
     queueLabel: core.getInput("queue_label") || "queue",
     dryRun: core.getInput("dry_run") === "true",
+    localMerge: core.getInput("local_merge") === "true",
     batchPrs: core.getInput("batch_prs") || "",
     bisect: core.getInput("bisect") === "true",
   };
@@ -47,12 +51,14 @@ async function run(): Promise<void> {
   const { owner, repo } = github.context.repo;
   const log = core.info;
   const client = new GitHubClient(inputs.token, owner, repo, log);
-  const gitOps = new GitOps(client.octokit, owner, repo, log);
+  const gitOps: GitOperator = inputs.localMerge
+    ? new LocalGitOps(client.octokit, owner, repo, { log })
+    : new GitOps(client.octokit, owner, repo, log);
   log(
     `Repository context: ${owner}/${repo} (GITHUB_REPOSITORY=${process.env.GITHUB_REPOSITORY ?? "unset"})`,
   );
   log(
-    `Queue label: "${inputs.queueLabel}" batchSize=${inputs.batchSize} dryRun=${inputs.dryRun} bisect=${inputs.bisect}`,
+    `Queue label: "${inputs.queueLabel}" batchSize=${inputs.batchSize} dryRun=${inputs.dryRun} localMerge=${inputs.localMerge} bisect=${inputs.bisect}`,
   );
   const actor = process.env.GITHUB_ACTOR;
 

@@ -31077,6 +31077,154 @@ exports.GitOps = GitOps;
 
 /***/ }),
 
+/***/ 9240:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.LocalGitOps = void 0;
+exports.defaultExec = defaultExec;
+const node_child_process_1 = __nccwpck_require__(1421);
+function defaultExec(cwd) {
+    return (args, opts) => new Promise((resolve, reject) => {
+        const child = (0, node_child_process_1.spawn)("git", args, {
+            cwd: opts?.cwd ?? cwd,
+            env: process.env,
+        });
+        let stdout = "";
+        let stderr = "";
+        child.stdout.on("data", (d) => {
+            stdout += d.toString();
+        });
+        child.stderr.on("data", (d) => {
+            stderr += d.toString();
+        });
+        child.on("error", reject);
+        child.on("close", (code) => {
+            resolve({ code: code ?? -1, stdout, stderr });
+        });
+    });
+}
+/**
+ * LocalGitOps implements GitOperator by shelling out to a local `git`
+ * binary in the runner's working tree. This path respects
+ * `.gitattributes` and `merge.<name>.driver` config, so repositories
+ * with custom merge drivers can use them during batch merges.
+ *
+ * Branch creation, fast-forward and deletion still go through the Git
+ * Data API so they remain atomic and ruleset-friendly; only the actual
+ * merges run locally.
+ */
+class LocalGitOps {
+    octokit;
+    owner;
+    repo;
+    exec;
+    log;
+    constructor(octokit, owner, repo, opts) {
+        this.octokit = octokit;
+        this.owner = owner;
+        this.repo = repo;
+        this.exec = opts?.exec ?? defaultExec();
+        this.log = opts?.log ?? (() => { });
+    }
+    async git(args) {
+        const res = await this.exec(args);
+        return res;
+    }
+    async gitOrThrow(args) {
+        const res = await this.git(args);
+        if (res.code !== 0) {
+            throw new Error(`git ${args.join(" ")} failed (exit ${res.code}): ${res.stderr.trim() || res.stdout.trim()}`);
+        }
+        return res.stdout;
+    }
+    async createBranchFromRef(branch, baseRef) {
+        this.log(`Creating branch ${branch} from ${baseRef} (API + local)`);
+        const { data: ref } = await this.octokit.rest.git.getRef({
+            owner: this.owner,
+            repo: this.repo,
+            ref: `heads/${baseRef}`,
+        });
+        const sha = ref.object.sha;
+        await this.octokit.rest.git.createRef({
+            owner: this.owner,
+            repo: this.repo,
+            ref: `refs/heads/${branch}`,
+            sha,
+        });
+        await this.gitOrThrow([
+            "fetch",
+            "--no-tags",
+            "origin",
+            `+refs/heads/${branch}:refs/remotes/origin/${branch}`,
+        ]);
+        await this.gitOrThrow([
+            "checkout",
+            "-B",
+            branch,
+            `refs/remotes/origin/${branch}`,
+        ]);
+    }
+    async mergeBranch(branch, sourceRef, commitMsg) {
+        this.log(`Merging ${sourceRef} into ${branch} locally`);
+        await this.gitOrThrow(["checkout", branch]);
+        await this.gitOrThrow(["fetch", "--no-tags", "origin", sourceRef]);
+        const merge = await this.git([
+            "merge",
+            "--no-ff",
+            "--no-edit",
+            "-m",
+            commitMsg,
+            sourceRef,
+        ]);
+        if (merge.code === 0)
+            return true;
+        this.log(`git merge returned ${merge.code}; aborting and reporting conflict. stderr: ${merge.stderr.trim()}`);
+        const abort = await this.git(["merge", "--abort"]);
+        if (abort.code !== 0) {
+            // Leave the working tree tidy even if --abort is a no-op (merge
+            // may have failed before touching the index).
+            await this.git(["reset", "--hard", "HEAD"]);
+        }
+        return false;
+    }
+    async pushBranch(branch) {
+        this.log(`Pushing ${branch} to origin`);
+        await this.gitOrThrow(["push", "origin", `${branch}:refs/heads/${branch}`]);
+    }
+    async fastForwardMain(ref) {
+        this.log(`Fast-forwarding main to ${ref}`);
+        const { data: srcRef } = await this.octokit.rest.git.getRef({
+            owner: this.owner,
+            repo: this.repo,
+            ref: `heads/${ref}`,
+        });
+        const sha = srcRef.object.sha;
+        await this.octokit.rest.git.updateRef({
+            owner: this.owner,
+            repo: this.repo,
+            ref: `heads/main`,
+            sha,
+            force: false,
+        });
+        return sha;
+    }
+    async deleteBranch(branch) {
+        this.log(`Deleting branch ${branch}`);
+        await this.octokit.rest.git.deleteRef({
+            owner: this.owner,
+            repo: this.repo,
+            ref: `heads/${branch}`,
+        });
+    }
+}
+exports.LocalGitOps = LocalGitOps;
+
+
+/***/ }),
+
 /***/ 1730:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -31120,6 +31268,7 @@ const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
 const github_js_1 = __nccwpck_require__(9248);
 const gitops_js_1 = __nccwpck_require__(2635);
+const localgitops_js_1 = __nccwpck_require__(9240);
 const action_js_1 = __nccwpck_require__(2929);
 function loadInputs() {
     return {
@@ -31128,6 +31277,7 @@ function loadInputs() {
         batchSize: parseInt(core.getInput("batch_size") || "5", 10),
         queueLabel: core.getInput("queue_label") || "queue",
         dryRun: core.getInput("dry_run") === "true",
+        localMerge: core.getInput("local_merge") === "true",
         batchPrs: core.getInput("batch_prs") || "",
         bisect: core.getInput("bisect") === "true",
     };
@@ -31146,9 +31296,11 @@ async function run() {
     const { owner, repo } = github.context.repo;
     const log = core.info;
     const client = new github_js_1.GitHubClient(inputs.token, owner, repo, log);
-    const gitOps = new gitops_js_1.GitOps(client.octokit, owner, repo, log);
+    const gitOps = inputs.localMerge
+        ? new localgitops_js_1.LocalGitOps(client.octokit, owner, repo, { log })
+        : new gitops_js_1.GitOps(client.octokit, owner, repo, log);
     log(`Repository context: ${owner}/${repo} (GITHUB_REPOSITORY=${process.env.GITHUB_REPOSITORY ?? "unset"})`);
-    log(`Queue label: "${inputs.queueLabel}" batchSize=${inputs.batchSize} dryRun=${inputs.dryRun} bisect=${inputs.bisect}`);
+    log(`Queue label: "${inputs.queueLabel}" batchSize=${inputs.batchSize} dryRun=${inputs.dryRun} localMerge=${inputs.localMerge} bisect=${inputs.bisect}`);
     const actor = process.env.GITHUB_ACTOR;
     const cfg = {
         ciWorkflow: inputs.ciWorkflow,
@@ -31422,6 +31574,14 @@ module.exports = require("https");
 
 "use strict";
 module.exports = require("net");
+
+/***/ }),
+
+/***/ 1421:
+/***/ ((module) => {
+
+"use strict";
+module.exports = require("node:child_process");
 
 /***/ }),
 

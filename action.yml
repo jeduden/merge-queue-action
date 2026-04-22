@@ -1,7 +1,8 @@
 name: merge-queue
 description: >-
-  Bors-style merge queue with batching and bisection.
-  All git operations use the GitHub API server-side — no checkout needed.
+  Bors-style merge queue with batching and bisection. Defaults to
+  server-side API merges; set local_merge: true to merge via local git
+  (required for custom merge drivers).
 
 inputs:
   token:
@@ -22,6 +23,16 @@ inputs:
     default: queue
   dry_run:
     description: Log intent without mutating
+    default: "false"
+  local_merge:
+    description: >-
+      Perform merges locally via `git` in the runner instead of the
+      GitHub REST merges API. Required for custom merge drivers
+      (.gitattributes + merge.<name>.driver) to take effect. When
+      enabled, the workflow must run `actions/checkout` with
+      `fetch-depth: 0` and a token that can push to the repo before
+      this action runs, and must register any custom drivers via
+      `git config merge.<name>.driver ...`.
     default: "false"
   batch_prs:
     description: >-
