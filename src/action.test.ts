@@ -342,6 +342,34 @@ describe("runProcess", () => {
     ).toBe(true);
   });
 
+  it("cleans up, requeues, and throws when getPR fails during drift check", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+
+    api.getPR = async () => {
+      throw new Error("API unavailable");
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow(
+      "checking PR drift after CI",
+    );
+
+    expect(git.ffRef).toBe("");
+    expect(git.deleted.length).toBeGreaterThan(0);
+    expect(api.labels.get(1)).toContain("queue");
+    const c = api.comments.get(1) ?? [];
+    expect(
+      c.some(
+        (s) =>
+          s.includes("Merge Queue** — requeued") &&
+          s.includes("failed to verify PR state after CI"),
+      ),
+    ).toBe(true);
+  });
+
   it("explicitly closes merged PR when it remains open after retries", async () => {
     const api = newMockAPI();
     api.prs.set("queue", [makePR(1)]);
@@ -362,6 +390,33 @@ describe("runProcess", () => {
     const c = api.comments.get(1) ?? [];
     expect(c.some((s) => s.includes("Merge Queue** — merged"))).toBe(true);
     expect(c.some((s) => s.includes(MERGE_SHA))).toBe(true);
+  });
+
+  it("still closes merged PR when getPR keeps failing during close-check retries", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    let driftCheckDone = false;
+
+    api.getPR = async (prNumber: number) => {
+      // First call (drift check before FF) returns matching SHA so we proceed
+      if (!driftCheckDone) {
+        driftCheckDone = true;
+        return makePR(prNumber, `branch-${prNumber}`, "open");
+      }
+      // All subsequent calls (close-check retries) fail
+      throw new Error("read timeout");
+    };
+
+    const logs: string[] = [];
+    await runProcess(api, git, cfg, (m) => logs.push(m));
+
+    expect(api.closedPRs).toContain(1);
+    expect(logs.some((l) => l.includes("failed to read PR #1 state after merge"))).toBe(true);
+    const c = api.comments.get(1) ?? [];
+    expect(c.some((s) => s.includes("Merge Queue** — merged"))).toBe(true);
   });
 
   it("posts error comments when CI trigger fails and requeues", async () => {

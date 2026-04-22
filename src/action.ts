@@ -103,14 +103,12 @@ async function ensurePRClosedAfterMerge(
 ): Promise<void> {
   const attempts = 3;
   for (let i = 0; i < attempts; i++) {
-    let current: PR;
     try {
-      current = await api.getPR(prNumber);
+      const current = await api.getPR(prNumber);
+      if (current.state === "closed") return;
     } catch (err) {
       log(`Warning: failed to read PR #${prNumber} state after merge: ${err}`);
-      return;
     }
-    if (current.state === "closed") return;
     if (i < attempts - 1) await sleep(50);
   }
   log(`PR #${prNumber} is still open after merge; closing explicitly`);
@@ -378,15 +376,25 @@ export async function runProcess(
   // 6. CI passed — merge to main
   if (!cfg.dryRun) {
     const drifted = [] as { number: number; snapshot: string; current: string }[];
-    for (const mp of result.merged) {
-      const current = await api.getPR(mp.number);
-      if (current.headSHA !== mp.headSHA) {
-        drifted.push({
-          number: mp.number,
-          snapshot: mp.headSHA,
-          current: current.headSHA,
-        });
+    try {
+      for (const mp of result.merged) {
+        const current = await api.getPR(mp.number);
+        if (current.headSHA !== mp.headSHA) {
+          drifted.push({
+            number: mp.number,
+            snapshot: mp.headSHA,
+            current: current.headSHA,
+          });
+        }
       }
+    } catch (err) {
+      await cleanupBranch(result.branch);
+      await requeueAll(
+        `failed to verify PR state after CI: ${formatErrorForComment(err)}`,
+      );
+      throw new Error(
+        `checking PR drift after CI: ${formatErrorForComment(err)}`,
+      );
     }
     if (drifted.length > 0) {
       for (const d of drifted) {
