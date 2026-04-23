@@ -74,13 +74,16 @@ function makeFakeOctokit(initialRefs: FakeRef[] = []) {
 }
 
 describe("GitOps with injected exec", () => {
-  it("createBranchFromRef calls both the API and git fetch+checkout", async () => {
+  it("createBranchFromRef asserts worktree, calls the API, then fetch+checkout", async () => {
     const { octokit, calls } = makeFakeOctokit([
       { ref: "heads/main", sha: "deadbeef" },
     ]);
     const execCalls: string[][] = [];
     const exec: Exec = async (args) => {
       execCalls.push(args);
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
+        return { code: 0, stdout: "true\n", stderr: "" };
+      }
       return { code: 0, stdout: "", stderr: "" };
     };
     // biome-ignore lint/suspicious/noExplicitAny: test double
@@ -92,11 +95,16 @@ describe("GitOps with injected exec", () => {
       "getRef:heads/main",
       "createRef:refs/heads/merge-queue/batch-1",
     ]);
-    expect(execCalls[0][0]).toBe("fetch");
-    expect(execCalls[0]).toContain(
+    // Worktree readiness check runs first.
+    expect(execCalls[0]).toEqual(["rev-parse", "--is-inside-work-tree"]);
+    expect(execCalls[1]).toEqual(["remote", "get-url", "origin"]);
+    // Then fetch + checkout.
+    const fetchCall = execCalls.find((c) => c[0] === "fetch");
+    expect(fetchCall).toContain(
       "+refs/heads/merge-queue/batch-1:refs/remotes/origin/merge-queue/batch-1",
     );
-    expect(execCalls[1].slice(0, 3)).toEqual([
+    const checkoutCall = execCalls.find((c) => c[0] === "checkout");
+    expect(checkoutCall?.slice(0, 3)).toEqual([
       "checkout",
       "-B",
       "merge-queue/batch-1",
@@ -131,6 +139,59 @@ describe("GitOps with injected exec", () => {
     const ops = new GitOps(octokit as any, "o", "r", { exec });
     const ok = await ops.mergeBranch("batch", "sha-1", "msg");
     expect(ok).toBe(true);
+  });
+
+  it("mergeBranch throws (not conflict) when git merge exits with a non-1 error", async () => {
+    const { octokit } = makeFakeOctokit();
+    const exec: Exec = async (args) => {
+      if (args[0] === "merge" && args[1] !== "--abort") {
+        // e.g. exit 128 — "fatal: not a valid object name"
+        return { code: 128, stdout: "", stderr: "fatal: bad revision" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    await expect(ops.mergeBranch("batch", "sha-1", "msg")).rejects.toThrow(
+      "git merge failed (exit 128)",
+    );
+  });
+
+  it("createBranchFromRef throws a targeted error when not in a worktree", async () => {
+    const { octokit } = makeFakeOctokit([
+      { ref: "heads/main", sha: "deadbeef" },
+    ]);
+    const exec: Exec = async (args) => {
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
+        return { code: 128, stdout: "", stderr: "not a git repo" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    await expect(
+      ops.createBranchFromRef("merge-queue/batch-1", "main"),
+    ).rejects.toThrow(/actions\/checkout/);
+  });
+
+  it("createBranchFromRef throws a targeted error when origin is missing", async () => {
+    const { octokit } = makeFakeOctokit([
+      { ref: "heads/main", sha: "deadbeef" },
+    ]);
+    const exec: Exec = async (args) => {
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
+        return { code: 0, stdout: "true\n", stderr: "" };
+      }
+      if (args[0] === "remote" && args[1] === "get-url") {
+        return { code: 2, stdout: "", stderr: "no such remote" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    await expect(
+      ops.createBranchFromRef("merge-queue/batch-1", "main"),
+    ).rejects.toThrow(/origin/);
   });
 
   it("gitOrThrow surfaces stderr on non-merge failures", async () => {
@@ -192,6 +253,9 @@ describe("GitOps against a real git repo (integration)", () => {
     await runIn(tmp, "clone", bare, work);
     await runIn(work, "config", "user.email", "test@example.com");
     await runIn(work, "config", "user.name", "Test");
+    // Disable any signing inherited from /etc/gitconfig or $HOME — the
+    // test must not shell out to a signing hook (some CI sandboxes,
+    // incl. the Claude Code sandbox, install one globally).
     await runIn(work, "config", "commit.gpgsign", "false");
     await runIn(work, "config", "tag.gpgsign", "false");
     await runIn(work, "config", "gpg.format", "openpgp");
@@ -217,7 +281,11 @@ describe("GitOps against a real git repo (integration)", () => {
       rest: {
         git: {
           async getRef({ ref }: { ref: string }) {
-            const sha = await runIn(bare, "rev-parse", ref);
+            // GitOps passes `heads/<name>` (the REST API shape); the
+            // bare repo speaks full refs. Normalize so this isn't
+            // relying on `rev-parse`'s shorthand resolution.
+            const full = ref.startsWith("refs/") ? ref : `refs/${ref}`;
+            const sha = await runIn(bare, "rev-parse", full);
             return { data: { object: { sha } } };
           },
           async createRef({ ref, sha }: { ref: string; sha: string }) {
@@ -269,6 +337,18 @@ describe("GitOps against a real git repo (integration)", () => {
       "refs/heads/merge-queue/batch-x",
     );
     expect(branchSha).toMatch(/^[0-9a-f]{40}$/);
+
+    // The merge commit subject is part of the action's contract with
+    // the README ("Merge PR #N: <title>"). Pin it so refactors can't
+    // silently change the format downstream reviewers rely on.
+    const subject = await runIn(
+      work,
+      "log",
+      "-1",
+      "--format=%s",
+      "merge-queue/batch-x",
+    );
+    expect(subject).toBe("Merge PR #1: add a");
   });
 
   it("reports conflict (returns false) when merge cannot auto-resolve", async () => {

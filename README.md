@@ -404,6 +404,14 @@ rulesets and fast-forward-only semantics are unchanged. If a merge
 still conflicts after the driver runs, the PR is reported as
 conflicted and labelled `queue:failed`.
 
+> **Security note:** custom merge drivers execute arbitrary code in
+> the runner on every batched merge, with access to the runner's
+> environment — including `MERGE_QUEUE_TOKEN` if the workflow exposes
+> it. Anyone who can land a commit on a branch that feeds the queue
+> can change what the driver does, so treat `.merge-drivers/**` and
+> `.gitattributes` as protected paths: require code-owner review, or
+> gate them behind a ruleset the same way you gate `.github/workflows/`.
+
 ### Repository-side setup
 
 The driver script **must be committed to the repository** so it is on

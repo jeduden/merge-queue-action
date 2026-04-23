@@ -34,6 +34,15 @@ export declare class GitOps implements GitOperator {
     });
     private git;
     private gitOrThrow;
+    /**
+     * Verify the runner is actually inside a git working tree with an
+     * `origin` remote before we issue any `git` command. Without this
+     * check, callers who forgot `actions/checkout` (or ran the action in
+     * a directory with no remote) would hit a generic `git ... failed`
+     * error deep in the merge flow; this surfaces the real problem early
+     * and points at the required workflow step.
+     */
+    private assertWorktreeReady;
     createBranchFromRef(branch: string, baseRef: string): Promise<void>;
     mergeBranch(branch: string, sourceRef: string, commitMsg: string): Promise<boolean>;
     pushBranch(branch: string): Promise<void>;

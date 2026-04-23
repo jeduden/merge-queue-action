@@ -22,7 +22,15 @@ export function defaultExec(cwd?: string): Exec {
     new Promise((resolve, reject) => {
       const child = spawn("git", args, {
         cwd: opts?.cwd ?? cwd,
-        env: process.env,
+        // Force non-interactive git. Without this, a missing credential
+        // helper or a misconfigured remote can cause `git fetch`/`push`
+        // to block waiting for a terminal prompt, which in a runner
+        // manifests as the job hanging until the job timeout.
+        env: {
+          ...process.env,
+          GIT_TERMINAL_PROMPT: "0",
+          GIT_ASKPASS: "/bin/true",
+        },
       });
       let stdout = "";
       let stderr = "";
@@ -84,8 +92,33 @@ export class GitOps implements GitOperator {
     return res.stdout;
   }
 
+  /**
+   * Verify the runner is actually inside a git working tree with an
+   * `origin` remote before we issue any `git` command. Without this
+   * check, callers who forgot `actions/checkout` (or ran the action in
+   * a directory with no remote) would hit a generic `git ... failed`
+   * error deep in the merge flow; this surfaces the real problem early
+   * and points at the required workflow step.
+   */
+  private async assertWorktreeReady(): Promise<void> {
+    const inside = await this.git(["rev-parse", "--is-inside-work-tree"]);
+    if (inside.code !== 0 || inside.stdout.trim() !== "true") {
+      throw new Error(
+        "merge-queue-action must run in a checked-out git working tree — add an `actions/checkout` step with `fetch-depth: 0` and a pushable token before this action.",
+      );
+    }
+    const remote = await this.git(["remote", "get-url", "origin"]);
+    if (remote.code !== 0) {
+      throw new Error(
+        "merge-queue-action could not find an `origin` remote in the working tree — make sure `actions/checkout` ran in the same job with the merge-queue token.",
+      );
+    }
+  }
+
   async createBranchFromRef(branch: string, baseRef: string): Promise<void> {
     this.log(`Creating branch ${branch} from ${baseRef}`);
+
+    await this.assertWorktreeReady();
 
     const { data: ref } = await this.octokit.rest.git.getRef({
       owner: this.owner,
@@ -123,32 +156,55 @@ export class GitOps implements GitOperator {
     this.log(`Merging ${sourceRef} into ${branch}`);
 
     await this.gitOrThrow(["checkout", branch]);
+    // Fetch by raw SHA: this works on GitHub because
+    // `uploadpack.allowReachableSHA1InWant` is enabled, which makes PR
+    // head SHAs — including fork-PR heads, reachable via
+    // `refs/pull/<N>/head` — fetchable without knowing the ref name.
+    // If you "optimise" this to fetch a branch, fork PRs will break.
     await this.gitOrThrow(["fetch", "--no-tags", "origin", sourceRef]);
 
     const merge = await this.git([
       "merge",
       "--no-ff",
-      "--no-edit",
       "-m",
       commitMsg,
       sourceRef,
     ]);
     if (merge.code === 0) return true;
 
+    // git merge returns 1 on a real merge conflict; any other non-zero
+    // exit is a real error (missing user.email, unknown revision,
+    // failed hook, etc.) and must surface as a throw rather than being
+    // mis-labelled `queue:failed`.
+    if (merge.code !== 1) {
+      throw new Error(
+        `git merge failed (exit ${merge.code}): ${merge.stderr.trim() || merge.stdout.trim()}`,
+      );
+    }
+
     this.log(
-      `git merge returned ${merge.code}; aborting and reporting conflict. stderr: ${merge.stderr.trim()}`,
+      `git merge reported a conflict (exit 1); aborting. stderr: ${merge.stderr.trim()}`,
     );
     const abort = await this.git(["merge", "--abort"]);
     if (abort.code !== 0) {
       // Leave the working tree tidy even if --abort is a no-op (merge
       // may have failed before touching the index).
-      await this.git(["reset", "--hard", "HEAD"]);
+      const reset = await this.git(["reset", "--hard", "HEAD"]);
+      if (reset.code !== 0) {
+        this.log(
+          `Warning: working tree may be dirty after failed merge abort + reset (reset stderr: ${reset.stderr.trim()})`,
+        );
+      }
     }
     return false;
   }
 
   async pushBranch(branch: string): Promise<void> {
     this.log(`Pushing ${branch} to origin`);
+    // No `--force-with-lease` / `--force`: batch branches are
+    // single-writer and disposable, so any concurrent update means
+    // something has gone wrong and the push *should* fail loudly
+    // rather than clobber the other writer.
     await this.gitOrThrow(["push", "origin", `${branch}:refs/heads/${branch}`]);
   }
 
