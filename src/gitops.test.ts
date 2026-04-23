@@ -116,7 +116,10 @@ describe("GitOps with injected exec", () => {
     const execCalls: string[][] = [];
     const exec: Exec = async (args) => {
       execCalls.push(args);
-      if (args[0] === "merge" && args[1] !== "--abort") {
+      // Real merge invocation carries `-c commit.gpgsign=false` before
+      // the `merge` subcommand; abort is a bare `["merge", "--abort"]`.
+      const mergeIdx = args.indexOf("merge");
+      if (mergeIdx >= 0 && args[mergeIdx + 1] !== "--abort") {
         return { code: 1, stdout: "", stderr: "CONFLICT (content)" };
       }
       return { code: 0, stdout: "", stderr: "" };
@@ -130,6 +133,14 @@ describe("GitOps with injected exec", () => {
       (c) => c[0] === "merge" && c[1] === "--abort",
     );
     expect(mergeAbort).toBeDefined();
+
+    // The merge attempt must disable gpg signing so inherited signing
+    // config on self-hosted runners can't silently break batching.
+    const mergeAttempt = execCalls.find(
+      (c) =>
+        c.includes("merge") && c[c.indexOf("merge") + 1] !== "--abort",
+    );
+    expect(mergeAttempt).toContain("commit.gpgsign=false");
   });
 
   it("mergeBranch returns true on clean merge", async () => {
@@ -144,7 +155,8 @@ describe("GitOps with injected exec", () => {
   it("mergeBranch throws (not conflict) when git merge exits with a non-1 error", async () => {
     const { octokit } = makeFakeOctokit();
     const exec: Exec = async (args) => {
-      if (args[0] === "merge" && args[1] !== "--abort") {
+      const mergeIdx = args.indexOf("merge");
+      if (mergeIdx >= 0 && args[mergeIdx + 1] !== "--abort") {
         // e.g. exit 128 — "fatal: not a valid object name"
         return { code: 128, stdout: "", stderr: "fatal: bad revision" };
       }

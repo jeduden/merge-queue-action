@@ -25,11 +25,15 @@ export function defaultExec(cwd?: string): Exec {
         // Force non-interactive git. Without this, a missing credential
         // helper or a misconfigured remote can cause `git fetch`/`push`
         // to block waiting for a terminal prompt, which in a runner
-        // manifests as the job hanging until the job timeout.
+        // manifests as the job hanging until the job timeout. We
+        // deliberately do NOT set GIT_ASKPASS to a platform-specific
+        // binary (e.g. `/bin/true`) so the action stays portable
+        // across ubuntu/macos/windows runners — GIT_TERMINAL_PROMPT=0
+        // alone is enough to fail fast, and the existing credential
+        // helper configured by `actions/checkout` still handles auth.
         env: {
           ...process.env,
           GIT_TERMINAL_PROMPT: "0",
-          GIT_ASKPASS: "/bin/true",
         },
       });
       let stdout = "";
@@ -163,7 +167,17 @@ export class GitOps implements GitOperator {
     // If you "optimise" this to fetch a branch, fork PRs will break.
     await this.gitOrThrow(["fetch", "--no-tags", "origin", sourceRef]);
 
+    // `-c commit.gpgsign=false` / `-c tag.gpgsign=false`: `git merge
+    // --no-ff` creates a merge commit and would otherwise inherit any
+    // global signing config (common on self-hosted runners). If the
+    // signing key isn't available to the action, signing blocks the
+    // merge — disable it explicitly for this invocation only so repo
+    // and user config elsewhere are untouched.
     const merge = await this.git([
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      "tag.gpgsign=false",
       "merge",
       "--no-ff",
       "-m",

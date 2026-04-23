@@ -214,7 +214,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - run: npm test
 ```
 
@@ -317,7 +317,7 @@ jobs:
   queue:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
           token: ${{ secrets.MERGE_QUEUE_TOKEN }}
@@ -330,7 +330,7 @@ jobs:
       # Optional: register any custom merge drivers here, e.g.
       #   git config merge.lockfile.driver ".merge-drivers/lockfile.sh %O %A %B %L %P"
 
-      - uses: jeduden/merge-queue-action@v0.3.0
+      - uses: jeduden/merge-queue-action@e5ec6faf13c700775aa47f910c60003cf3e6b2f6 # v0.3.0
         with:
           token: ${{ secrets.MERGE_QUEUE_TOKEN }}
           ci_workflow: .github/workflows/ci.yml
@@ -344,6 +344,14 @@ locally so custom merge drivers can take effect. Use your
 `MERGE_QUEUE_TOKEN` on `actions/checkout` (not the default
 `GITHUB_TOKEN`) so the subsequent batch-branch push is authorized by
 the same actor that bypasses your ruleset.
+
+> **On action pinning**: the snippets in this README pin
+> `actions/checkout` and `jeduden/merge-queue-action` to full commit
+> SHAs (with a trailing `# v<n>` comment for readability) rather than
+> floating tags. Tags are mutable on GitHub and mutable refs in a CI
+> workflow are a supply-chain risk; pin to the SHA you've reviewed
+> and update it deliberately. Re-pin with `gh api repos/<owner>/<repo>/git/refs/tags/<tag>`
+> or the GitHub web UI "Browse at this version".
 
 ### 2. Set up your CI workflow and token
 
@@ -448,7 +456,7 @@ merge time, `git merge` has nothing to exec.
    set it after checkout and before any merge runs:
 
    ```yaml
-   - uses: actions/checkout@v4
+   - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
      with:
        fetch-depth: 0
        token: ${{ secrets.MERGE_QUEUE_TOKEN }}
