@@ -117,6 +117,17 @@ export class GitOps implements GitOperator {
         "merge-queue-action could not find an `origin` remote in the working tree — make sure `actions/checkout` ran in the same job with the merge-queue token.",
       );
     }
+    // `actions/checkout` defaults to `fetch-depth: 1`, which produces a
+    // shallow clone. Local merges of PR head SHAs — especially across
+    // older common ancestors — need full history; refuse early with a
+    // targeted message instead of letting a later `git merge` fail
+    // with a confusing "fatal: refusing to merge unrelated histories".
+    const shallow = await this.git(["rev-parse", "--is-shallow-repository"]);
+    if (shallow.code === 0 && shallow.stdout.trim() === "true") {
+      throw new Error(
+        "merge-queue-action requires a full-history clone, but the working tree is a shallow repository. Set `fetch-depth: 0` on the `actions/checkout` step (or run `git fetch --unshallow` before invoking this action).",
+      );
+    }
   }
 
   async createBranchFromRef(branch: string, baseRef: string): Promise<void> {
@@ -167,8 +178,13 @@ export class GitOps implements GitOperator {
           ref: `heads/${branch}`,
         });
       } catch (delErr) {
+        // Use Error.message when possible so the warning stays
+        // actionable — plain `${delErr}` renders plain objects as
+        // `[object Object]`.
+        const msg =
+          delErr instanceof Error ? delErr.message : String(delErr);
         this.log(
-          `Warning: failed to delete leaked branch ${branch}: ${delErr}`,
+          `Warning: failed to delete leaked branch ${branch}: ${msg}`,
         );
       }
       throw err;

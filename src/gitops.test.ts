@@ -84,6 +84,9 @@ describe("GitOps with injected exec", () => {
       if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
         return { code: 0, stdout: "true\n", stderr: "" };
       }
+      if (args[0] === "rev-parse" && args[1] === "--is-shallow-repository") {
+        return { code: 0, stdout: "false\n", stderr: "" };
+      }
       return { code: 0, stdout: "", stderr: "" };
     };
     // biome-ignore lint/suspicious/noExplicitAny: test double
@@ -98,6 +101,7 @@ describe("GitOps with injected exec", () => {
     // Worktree readiness check runs first.
     expect(execCalls[0]).toEqual(["rev-parse", "--is-inside-work-tree"]);
     expect(execCalls[1]).toEqual(["remote", "get-url", "origin"]);
+    expect(execCalls[2]).toEqual(["rev-parse", "--is-shallow-repository"]);
     // Then fetch + checkout.
     const fetchCall = execCalls.find((c) => c[0] === "fetch");
     expect(fetchCall).toContain(
@@ -204,6 +208,29 @@ describe("GitOps with injected exec", () => {
     await expect(
       ops.createBranchFromRef("merge-queue/batch-1", "main"),
     ).rejects.toThrow(/origin/);
+  });
+
+  it("createBranchFromRef throws a targeted error when the clone is shallow", async () => {
+    const { octokit } = makeFakeOctokit([
+      { ref: "heads/main", sha: "deadbeef" },
+    ]);
+    const exec: Exec = async (args) => {
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
+        return { code: 0, stdout: "true\n", stderr: "" };
+      }
+      if (args[0] === "remote" && args[1] === "get-url") {
+        return { code: 0, stdout: "origin\n", stderr: "" };
+      }
+      if (args[0] === "rev-parse" && args[1] === "--is-shallow-repository") {
+        return { code: 0, stdout: "true\n", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    await expect(
+      ops.createBranchFromRef("merge-queue/batch-1", "main"),
+    ).rejects.toThrow(/fetch-depth: 0|unshallow/);
   });
 
   it("createBranchFromRef deletes the leaked remote ref if local fetch/checkout fails", async () => {

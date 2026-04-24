@@ -350,8 +350,11 @@ the same actor that bypasses your ruleset.
 > SHAs (with a trailing `# v<n>` comment for readability) rather than
 > floating tags. Tags are mutable on GitHub and mutable refs in a CI
 > workflow are a supply-chain risk; pin to the SHA you've reviewed
-> and update it deliberately. Re-pin with `gh api repos/<owner>/<repo>/git/refs/tags/<tag>`
-> or the GitHub web UI "Browse at this version".
+> and update it deliberately. Re-pin with
+> `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` (note the singular
+> `ref` — this is the documented "Get a reference" endpoint and
+> returns `.object.sha` directly) or the GitHub web UI's
+> "Browse at this version".
 
 ### 2. Set up your CI workflow and token
 
