@@ -10,7 +10,7 @@ import {
 } from "./queue.js";
 import { Batch, type BatchPR, type MergeResult, type GitOperator } from "./batch.js";
 import { split } from "./bisect.js";
-import { noopReporter, type Reporter } from "./reporter.js";
+import { errorMessage, noopReporter, type Reporter } from "./reporter.js";
 import {
   type CommentCtx,
   formatErrorForComment,
@@ -144,7 +144,7 @@ async function handleCIFailure(
   try {
     await gitOps.deleteBranch(result.branch);
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
+    const detail = errorMessage(err);
     await reporter.withScope(prs.map((p) => p.number), () =>
       reporter.warn(
         `failed to delete batch branch \`${result.branch}\` after CI failure: ${detail}`,
@@ -254,7 +254,7 @@ export async function runProcess(
       try {
         await gitOps.deleteBranch(branch);
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = errorMessage(err);
         await reporter.withScope(prs.map((p) => p.number), () =>
           reporter.warn(
             `failed to delete batch branch \`${branch}\`: ${detail}`,
@@ -308,7 +308,7 @@ export async function runProcess(
       try {
         await gitOps.deleteBranch(result.branch);
       } catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = errorMessage(err);
         await reporter.withScope(prs.map((p) => p.number), () =>
           reporter.warn(
             `failed to delete empty batch branch \`${result.branch}\`: ${detail}`,
@@ -496,7 +496,7 @@ async function handleBisectObservationFailure(
   try {
     await gitOps.deleteBranch(branch);
   } catch (err) {
-    const detail = err instanceof Error ? err.message : String(err);
+    const detail = errorMessage(err);
     const candidates = prNumbers.filter((n) => !excluded.has(n));
     await reporter.withScope(candidates, () =>
       reporter.warn(
@@ -771,7 +771,7 @@ export async function runBisect(
     try {
       await gitOps.deleteBranch(result.branch);
     } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err);
+      const detail = errorMessage(err);
       const candidates = prNumbers.filter((n) => !excluded.has(n));
       await reporter.withScope(candidates, () =>
         reporter.warn(

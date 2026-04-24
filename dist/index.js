@@ -30014,7 +30014,7 @@ async function handleCIFailure(api, cfg, ctx, q, gitOps, reporter, prs, result, 
         await gitOps.deleteBranch(result.branch);
     }
     catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = (0, reporter_js_1.errorMessage)(err);
         await reporter.withScope(prs.map((p) => p.number), () => reporter.warn(`failed to delete batch branch \`${result.branch}\` after CI failure: ${detail}`));
     }
     if (result.merged.length === 1) {
@@ -30092,7 +30092,7 @@ async function runProcess(api, gitOps, cfg, log, actor, reporter = reporter_js_1
                 await gitOps.deleteBranch(branch);
             }
             catch (err) {
-                const detail = err instanceof Error ? err.message : String(err);
+                const detail = (0, reporter_js_1.errorMessage)(err);
                 await reporter.withScope(prs.map((p) => p.number), () => reporter.warn(`failed to delete batch branch \`${branch}\`: ${detail}`));
             }
         }
@@ -30136,7 +30136,7 @@ async function runProcess(api, gitOps, cfg, log, actor, reporter = reporter_js_1
                 await gitOps.deleteBranch(result.branch);
             }
             catch (err) {
-                const detail = err instanceof Error ? err.message : String(err);
+                const detail = (0, reporter_js_1.errorMessage)(err);
                 await reporter.withScope(prs.map((p) => p.number), () => reporter.warn(`failed to delete empty batch branch \`${result.branch}\`: ${detail}`));
             }
         }
@@ -30261,7 +30261,7 @@ async function handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prM
         await gitOps.deleteBranch(branch);
     }
     catch (err) {
-        const detail = err instanceof Error ? err.message : String(err);
+        const detail = (0, reporter_js_1.errorMessage)(err);
         const candidates = prNumbers.filter((n) => !excluded.has(n));
         await reporter.withScope(candidates, () => reporter.warn(`failed to delete bisect branch \`${branch}\` during observation-failure cleanup: ${detail}`));
     }
@@ -30457,7 +30457,7 @@ async function runBisect(api, gitOps, cfg, log, reporter = reporter_js_1.noopRep
             await gitOps.deleteBranch(result.branch);
         }
         catch (err) {
-            const detail = err instanceof Error ? err.message : String(err);
+            const detail = (0, reporter_js_1.errorMessage)(err);
             const candidates = prNumbers.filter((n) => !excluded.has(n));
             await reporter.withScope(candidates, () => reporter.warn(`failed to delete bisect branch \`${result.branch}\` after left-half CI failure: ${detail}`));
         }
@@ -30575,8 +30575,7 @@ class Batch {
                         await this.git.deleteBranch(branch);
                     }
                     catch (delErr) {
-                        const detail = delErr instanceof Error ? delErr.message : String(delErr);
-                        await this.reporter.warn(`failed to delete batch branch \`${branch}\` after a merge error: ${detail}`);
+                        await this.reporter.warn(`failed to delete batch branch \`${branch}\` after a merge error: ${(0, reporter_js_1.errorMessage)(delErr)}`);
                     }
                     throw new Error(`merging PR #${pr.number}: ${err}`);
                 }
@@ -31176,14 +31175,13 @@ class GitOps {
                 });
             }
             catch (delErr) {
-                // Use Error.message when possible so the warning stays
-                // actionable — plain `${delErr}` renders plain objects as
-                // `[object Object]`. Reporter.warn also routes this to every
-                // PR currently in scope, so an orphan `merge-queue/batch-*`
-                // on origin surfaces on the affected PRs, not just the
-                // Actions log.
-                const msg = delErr instanceof Error ? delErr.message : String(delErr);
-                await this.reporter.warn(`failed to delete leaked batch branch \`${branch}\` on origin after a local fetch/checkout error: ${msg}`);
+                // `errorMessage` handles Error / string / `{ message }` /
+                // other shapes so plain-object rejections don't render as
+                // `[object Object]` in the log or the PR comment.
+                // Reporter.warn also routes this to every PR in scope, so
+                // an orphan `merge-queue/batch-*` on origin surfaces on
+                // the affected PRs, not just the Actions log.
+                await this.reporter.warn(`failed to delete leaked batch branch \`${branch}\` on origin after a local fetch/checkout error: ${(0, reporter_js_1.errorMessage)(delErr)}`);
             }
             throw err;
         }
@@ -31537,7 +31535,39 @@ exports.Queue = Queue;
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.PRReporter = exports.noopReporter = void 0;
+exports.errorMessage = errorMessage;
 const comments_js_1 = __nccwpck_require__(9333);
+/**
+ * Extract a short, readable message from an arbitrary thrown value.
+ *
+ * Shapes in priority order:
+ *   1. `Error` — use `err.message`.
+ *   2. string — use the string itself.
+ *   3. plain object with a string `message` (e.g. octokit's
+ *      `RequestError` before it's been wrapped into a real Error) —
+ *      use that `message`.
+ *   4. anything else — `String(err)` (which can degrade to
+ *      `[object Object]` for exotic throws, but at least won't
+ *      crash).
+ *
+ * Exists so call sites don't inline `err instanceof Error ? ... :
+ * String(err)` at every catch. That pattern doubles branch count
+ * per site AND silently renders plain objects as `[object Object]`
+ * in logs/PR comments; centralising it keeps warnings actionable.
+ */
+function errorMessage(err) {
+    if (err instanceof Error)
+        return err.message;
+    if (typeof err === "string")
+        return err;
+    if (typeof err === "object" &&
+        err !== null &&
+        "message" in err &&
+        typeof err.message === "string") {
+        return err.message;
+    }
+    return String(err);
+}
 /** Default no-op reporter — handy for tests and for the `dryRun` path. */
 exports.noopReporter = {
     info: () => { },
@@ -31582,10 +31612,10 @@ class PRReporter {
             }
             catch (err) {
                 // Don't rethrow — reporter failures must never abort the
-                // run. Log with a real message string rather than letting
-                // `${err}` render an object as `[object Object]`.
-                const detail = err instanceof Error ? err.message : String(err);
-                this.log(`Warning: failed to post merge-queue warning comment on PR #${pr}: ${detail}`);
+                // run. Extract a real message string so plain-object
+                // rejections (e.g. octokit `RequestError`s before they're
+                // wrapped) don't render as `[object Object]` in the log.
+                this.log(`Warning: failed to post merge-queue warning comment on PR #${pr}: ${errorMessage(err)}`);
             }
         }
     }

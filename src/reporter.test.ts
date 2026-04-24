@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   PRReporter,
+  errorMessage,
   noopReporter,
   type CommentPoster,
 } from "./reporter.js";
@@ -122,9 +123,11 @@ describe("PRReporter", () => {
     expect(logged.some((m) => m.includes("418 teapot"))).toBe(true);
   });
 
-  it("formats non-Error poster failures without turning them into [object Object]", async () => {
+  it("formats non-Error poster failures by extracting `.message`", async () => {
     const poster = makePoster();
     poster.failOn = 7;
+    // Simulates the shape of an unwrapped octokit RequestError: a
+    // plain object with `status` + `message`, not a real Error.
     poster.failError = { status: 503, message: "gone" };
     const logged: string[] = [];
     const r = new PRReporter({
@@ -136,19 +139,13 @@ describe("PRReporter", () => {
     await r.withScope([7], async () => {
       await r.warn("thing");
     });
-    // The object's String() form is what we get; make sure it's NOT
-    // [object Object] verbatim (implementation detail: we delegate to
-    // String() which yields "[object Object]" for plain objects —
-    // that's an acknowledged limitation of non-Error rejections and
-    // documented; real callers should throw Errors).
     const failureLine = logged.find((m) =>
       m.includes("failed to post merge-queue warning comment on PR #7"),
     );
     expect(failureLine).toBeDefined();
-    // Either shows "[object Object]" (String()) OR "gone" if the
-    // error happens to be an Error-like. Accept either, but the line
-    // must be emitted.
-    expect(failureLine).toMatch(/\[object Object\]|gone/);
+    // Must show the extracted `.message` ("gone"), NOT "[object Object]".
+    expect(failureLine).toContain("gone");
+    expect(failureLine).not.toContain("[object Object]");
   });
 
   it("withScope restores the previous scope on success", async () => {
@@ -237,5 +234,44 @@ describe("noopReporter", () => {
     await expect(noopReporter.warn("x")).resolves.toBeUndefined();
     const result = await noopReporter.withScope([1, 2], async () => "ok");
     expect(result).toBe("ok");
+  });
+});
+
+describe("errorMessage", () => {
+  it("uses Error.message", () => {
+    expect(errorMessage(new Error("boom"))).toBe("boom");
+  });
+
+  it("uses a string value verbatim", () => {
+    expect(errorMessage("boom")).toBe("boom");
+  });
+
+  it("extracts .message from a plain object (octokit-shaped)", () => {
+    expect(errorMessage({ status: 500, message: "server down" })).toBe(
+      "server down",
+    );
+  });
+
+  it("ignores a non-string .message and falls back to String()", () => {
+    // Object with a non-string `message`: don't pick it up, fall
+    // back to String() so we don't return `undefined` or a number.
+    expect(errorMessage({ message: 42 })).toBe("[object Object]");
+  });
+
+  it("falls back to String() for numbers and booleans", () => {
+    expect(errorMessage(42)).toBe("42");
+    expect(errorMessage(false)).toBe("false");
+  });
+
+  it("falls back to String() for null/undefined safely", () => {
+    expect(errorMessage(null)).toBe("null");
+    expect(errorMessage(undefined)).toBe("undefined");
+  });
+
+  it("falls back to String() for a plain object with no message", () => {
+    // Known limitation: truly opaque objects degrade to
+    // `[object Object]`. Documented so the fallback behaviour is
+    // stable.
+    expect(errorMessage({ foo: "bar" })).toBe("[object Object]");
   });
 });

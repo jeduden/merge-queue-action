@@ -1,4 +1,4 @@
-import { noopReporter, type Reporter } from "./reporter.js";
+import { errorMessage, noopReporter, type Reporter } from "./reporter.js";
 
 /** GitOperator defines the interface for git operations. */
 export interface GitOperator {
@@ -87,10 +87,8 @@ export class Batch {
           try {
             await this.git.deleteBranch(branch);
           } catch (delErr) {
-            const detail =
-              delErr instanceof Error ? delErr.message : String(delErr);
             await this.reporter.warn(
-              `failed to delete batch branch \`${branch}\` after a merge error: ${detail}`,
+              `failed to delete batch branch \`${branch}\` after a merge error: ${errorMessage(delErr)}`,
             );
           }
           throw new Error(`merging PR #${pr.number}: ${err}`);

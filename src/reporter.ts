@@ -1,6 +1,38 @@
 import { commentOperatorWarning } from "./comments.js";
 import type { CommentCtx } from "./comments.js";
 
+/**
+ * Extract a short, readable message from an arbitrary thrown value.
+ *
+ * Shapes in priority order:
+ *   1. `Error` — use `err.message`.
+ *   2. string — use the string itself.
+ *   3. plain object with a string `message` (e.g. octokit's
+ *      `RequestError` before it's been wrapped into a real Error) —
+ *      use that `message`.
+ *   4. anything else — `String(err)` (which can degrade to
+ *      `[object Object]` for exotic throws, but at least won't
+ *      crash).
+ *
+ * Exists so call sites don't inline `err instanceof Error ? ... :
+ * String(err)` at every catch. That pattern doubles branch count
+ * per site AND silently renders plain objects as `[object Object]`
+ * in logs/PR comments; centralising it keeps warnings actionable.
+ */
+export function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  if (typeof err === "string") return err;
+  if (
+    typeof err === "object" &&
+    err !== null &&
+    "message" in err &&
+    typeof (err as { message: unknown }).message === "string"
+  ) {
+    return (err as { message: string }).message;
+  }
+  return String(err);
+}
+
 /** Minimal comment-poster interface — lets tests mock without pulling in the full GitHubAPI. */
 export interface CommentPoster {
   comment(prNumber: number, body: string): Promise<void>;
@@ -88,12 +120,11 @@ export class PRReporter implements Reporter {
         await this.poster.comment(pr, body);
       } catch (err) {
         // Don't rethrow — reporter failures must never abort the
-        // run. Log with a real message string rather than letting
-        // `${err}` render an object as `[object Object]`.
-        const detail =
-          err instanceof Error ? err.message : String(err);
+        // run. Extract a real message string so plain-object
+        // rejections (e.g. octokit `RequestError`s before they're
+        // wrapped) don't render as `[object Object]` in the log.
         this.log(
-          `Warning: failed to post merge-queue warning comment on PR #${pr}: ${detail}`,
+          `Warning: failed to post merge-queue warning comment on PR #${pr}: ${errorMessage(err)}`,
         );
       }
     }

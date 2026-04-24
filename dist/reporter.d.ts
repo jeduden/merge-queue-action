@@ -1,4 +1,23 @@
 import type { CommentCtx } from "./comments.js";
+/**
+ * Extract a short, readable message from an arbitrary thrown value.
+ *
+ * Shapes in priority order:
+ *   1. `Error` — use `err.message`.
+ *   2. string — use the string itself.
+ *   3. plain object with a string `message` (e.g. octokit's
+ *      `RequestError` before it's been wrapped into a real Error) —
+ *      use that `message`.
+ *   4. anything else — `String(err)` (which can degrade to
+ *      `[object Object]` for exotic throws, but at least won't
+ *      crash).
+ *
+ * Exists so call sites don't inline `err instanceof Error ? ... :
+ * String(err)` at every catch. That pattern doubles branch count
+ * per site AND silently renders plain objects as `[object Object]`
+ * in logs/PR comments; centralising it keeps warnings actionable.
+ */
+export declare function errorMessage(err: unknown): string;
 /** Minimal comment-poster interface — lets tests mock without pulling in the full GitHubAPI. */
 export interface CommentPoster {
     comment(prNumber: number, body: string): Promise<void>;
