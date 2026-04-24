@@ -1,6 +1,6 @@
 {
   "name": "merge-queue-action",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
   "description": "Bors-style merge queue with batching and bisection",
   "main": "dist/index.js",

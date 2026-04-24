@@ -107,6 +107,43 @@ Worst case: after the initial failed full-batch CI run, bisection needs
 
 ## Repository setup
 
+### Upgrading from 0.3.x
+
+`v0.4.0` moves per-PR merges from GitHub's server-side merge endpoint
+to a local `git merge` in the runner so committed `.gitattributes`
+and `merge.<name>.driver` configs take effect. **Workflows must now
+include an `actions/checkout` step** with a pushable token before
+the `merge-queue-action` step. The minimal change to an existing
+0.3.x workflow:
+
+```diff
+ jobs:
+   queue:
+     runs-on: ubuntu-latest
+     steps:
++      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
++        with:
++          fetch-depth: 0
++          token: ${{ secrets.MERGE_QUEUE_TOKEN }}
++
++      - name: Configure git identity
++        run: |
++          git config user.email "merge-queue@users.noreply.github.com"
++          git config user.name  "merge-queue-bot"
++
+       - uses: jeduden/merge-queue-action@<sha> # v0.4.0
+         with:
+           token: ${{ secrets.MERGE_QUEUE_TOKEN }}
+           ci_workflow: .github/workflows/ci.yml
+```
+
+`fetch-depth: 0` is required — the action refuses early on a shallow
+clone with a targeted error pointing here. The token on
+`actions/checkout` must match the one on the action step (typically
+`MERGE_QUEUE_TOKEN`) so the batch-branch push is authorized by the
+same actor that bypasses your ruleset. No other inputs changed; the
+default merge behaviour is otherwise identical.
+
 ### Required repository / ruleset configuration
 
 The action updates `main` by directly moving the branch ref via the Git
