@@ -14,23 +14,33 @@ import type { CommentCtx } from "./comments.js";
  *      `[object Object]` for exotic throws, but at least won't
  *      crash).
  *
+ * The entire body is wrapped in try/catch so that truly exotic
+ * throws — objects with throwing `message` getters, throwing
+ * `toString()`, proxies that trap on property access — can't in
+ * turn throw out of an error-handling path. In that last-resort
+ * case we return a fixed string so callers stay on the happy path.
+ *
  * Exists so call sites don't inline `err instanceof Error ? ... :
  * String(err)` at every catch. That pattern doubles branch count
  * per site AND silently renders plain objects as `[object Object]`
  * in logs/PR comments; centralising it keeps warnings actionable.
  */
 export function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  if (typeof err === "string") return err;
-  if (
-    typeof err === "object" &&
-    err !== null &&
-    "message" in err &&
-    typeof (err as { message: unknown }).message === "string"
-  ) {
-    return (err as { message: string }).message;
+  try {
+    if (err instanceof Error) return err.message;
+    if (typeof err === "string") return err;
+    if (
+      typeof err === "object" &&
+      err !== null &&
+      "message" in err &&
+      typeof (err as { message: unknown }).message === "string"
+    ) {
+      return (err as { message: string }).message;
+    }
+    return String(err);
+  } catch {
+    return "unknown error";
   }
-  return String(err);
 }
 
 /** Minimal comment-poster interface — lets tests mock without pulling in the full GitHubAPI. */

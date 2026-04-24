@@ -80,6 +80,48 @@ describe("PRReporter", () => {
     expect(poster.calls[0].body).toContain(ctx.actionRunUrl);
   });
 
+  it("multi-line warn bodies survive the blockquote (every line prefixed with `> `)", async () => {
+    const poster = makePoster();
+    const r = new PRReporter({
+      poster,
+      ctx,
+      log: () => {},
+      dryRun: false,
+    });
+    const multiLine = "first line\nsecond line\nthird line";
+    await r.withScope([42], async () => {
+      await r.warn(multiLine);
+    });
+    const body = poster.calls[0].body;
+    // Every line of the multi-line input must be inside the
+    // blockquote; without the fix, only "first line" would be
+    // blockquoted and the rest would render as prose.
+    expect(body).toContain("> first line");
+    expect(body).toContain("> second line");
+    expect(body).toContain("> third line");
+  });
+
+  it("very long warn bodies are truncated so comments don't blow up the thread", async () => {
+    const poster = makePoster();
+    const r = new PRReporter({
+      poster,
+      ctx,
+      log: () => {},
+      dryRun: false,
+    });
+    // ~100 KiB — well past the 4000-char cap.
+    const huge = "x".repeat(100_000);
+    await r.withScope([1], async () => {
+      await r.warn(huge);
+    });
+    const body = poster.calls[0].body;
+    // Truncation marker present and body size bounded (the prefix/
+    // suffix around the truncated block is small, so the full
+    // comment stays well under 10 KiB).
+    expect(body).toContain("…");
+    expect(body.length).toBeLessThan(10_000);
+  });
+
   it("warn in dryRun logs but does not comment", async () => {
     const poster = makePoster();
     const logged: string[] = [];
@@ -273,5 +315,31 @@ describe("errorMessage", () => {
     // `[object Object]`. Documented so the fallback behaviour is
     // stable.
     expect(errorMessage({ foo: "bar" })).toBe("[object Object]");
+  });
+
+  it("does not itself throw if the thrown value's `message` getter throws", () => {
+    const exotic = {};
+    Object.defineProperty(exotic, "message", {
+      get() {
+        throw new Error("getter exploded");
+      },
+      enumerable: true,
+    });
+    // Must return a string (the safe fallback), not rethrow.
+    expect(() => errorMessage(exotic)).not.toThrow();
+    expect(errorMessage(exotic)).toBe("unknown error");
+  });
+
+  it("does not itself throw if the thrown value's `toString()` throws", () => {
+    const exotic = {
+      toString() {
+        throw new Error("toString exploded");
+      },
+    };
+    // `String()` invokes `toString`, which throws. errorMessage
+    // must catch the throw and return the fixed fallback rather
+    // than propagating out of an error-handling path.
+    expect(() => errorMessage(exotic)).not.toThrow();
+    expect(errorMessage(exotic)).toBe("unknown error");
   });
 });

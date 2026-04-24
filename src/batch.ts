@@ -91,7 +91,14 @@ export class Batch {
               `failed to delete batch branch \`${branch}\` after a merge error: ${errorMessage(delErr)}`,
             );
           }
-          throw new Error(`merging PR #${pr.number}: ${err}`);
+          // `errorMessage(err)` keeps the thrown message readable
+          // for non-Error rejections; `{ cause }` preserves the
+          // original value for structured debuggers (Node logs the
+          // cause chain in its default Error printer).
+          throw new Error(
+            `merging PR #${pr.number}: ${errorMessage(err)}`,
+            { cause: err },
+          );
         }
 
         if (!ok) {

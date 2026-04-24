@@ -150,13 +150,26 @@ export function commentBisecting(
  * marker so future tooling can recognise and collapse these.
  */
 export function commentOperatorWarning(ctx: CommentCtx, msg: string): string {
+  // Normalise `msg` for Markdown: prefix every line with `> ` so a
+  // multi-line error (typically stderr/stdout from a failed
+  // subprocess) stays inside the blockquote, and cap the total
+  // length so a stray 100 KiB stderr doesn't blow up the PR thread.
+  // Backticks are left alone — inside a blockquote they render as
+  // inline code, which is the right treatment for command output.
+  const MAX = 4000;
+  const trimmed =
+    msg.length > MAX ? `${msg.slice(0, MAX - 1)}…` : msg;
+  const quoted = trimmed
+    .split("\n")
+    .map((line) => `> ${line}`)
+    .join("\n");
   return [
     "<!-- merge-queue:warning -->",
     `⚠️ ${BRAND} — queue warning`,
     "",
     "The merge queue hit a non-fatal issue while processing this PR:",
     "",
-    `> ${msg}`,
+    quoted,
     "",
     `[View merge queue run](${ctx.actionRunUrl}).`,
     "",

@@ -30577,7 +30577,11 @@ class Batch {
                     catch (delErr) {
                         await this.reporter.warn(`failed to delete batch branch \`${branch}\` after a merge error: ${(0, reporter_js_1.errorMessage)(delErr)}`);
                     }
-                    throw new Error(`merging PR #${pr.number}: ${err}`);
+                    // `errorMessage(err)` keeps the thrown message readable
+                    // for non-Error rejections; `{ cause }` preserves the
+                    // original value for structured debuggers (Node logs the
+                    // cause chain in its default Error printer).
+                    throw new Error(`merging PR #${pr.number}: ${(0, reporter_js_1.errorMessage)(err)}`, { cause: err });
                 }
                 if (!ok) {
                     result.conflicted.push(pr);
@@ -30757,13 +30761,25 @@ function commentBisecting(ctx, batchBranch, leftCount, totalCount, ciRunUrl) {
  * marker so future tooling can recognise and collapse these.
  */
 function commentOperatorWarning(ctx, msg) {
+    // Normalise `msg` for Markdown: prefix every line with `> ` so a
+    // multi-line error (typically stderr/stdout from a failed
+    // subprocess) stays inside the blockquote, and cap the total
+    // length so a stray 100 KiB stderr doesn't blow up the PR thread.
+    // Backticks are left alone — inside a blockquote they render as
+    // inline code, which is the right treatment for command output.
+    const MAX = 4000;
+    const trimmed = msg.length > MAX ? `${msg.slice(0, MAX - 1)}…` : msg;
+    const quoted = trimmed
+        .split("\n")
+        .map((line) => `> ${line}`)
+        .join("\n");
     return [
         "<!-- merge-queue:warning -->",
         `⚠️ ${BRAND} — queue warning`,
         "",
         "The merge queue hit a non-fatal issue while processing this PR:",
         "",
-        `> ${msg}`,
+        quoted,
         "",
         `[View merge queue run](${ctx.actionRunUrl}).`,
         "",
@@ -31550,23 +31566,34 @@ const comments_js_1 = __nccwpck_require__(9333);
  *      `[object Object]` for exotic throws, but at least won't
  *      crash).
  *
+ * The entire body is wrapped in try/catch so that truly exotic
+ * throws — objects with throwing `message` getters, throwing
+ * `toString()`, proxies that trap on property access — can't in
+ * turn throw out of an error-handling path. In that last-resort
+ * case we return a fixed string so callers stay on the happy path.
+ *
  * Exists so call sites don't inline `err instanceof Error ? ... :
  * String(err)` at every catch. That pattern doubles branch count
  * per site AND silently renders plain objects as `[object Object]`
  * in logs/PR comments; centralising it keeps warnings actionable.
  */
 function errorMessage(err) {
-    if (err instanceof Error)
-        return err.message;
-    if (typeof err === "string")
-        return err;
-    if (typeof err === "object" &&
-        err !== null &&
-        "message" in err &&
-        typeof err.message === "string") {
-        return err.message;
+    try {
+        if (err instanceof Error)
+            return err.message;
+        if (typeof err === "string")
+            return err;
+        if (typeof err === "object" &&
+            err !== null &&
+            "message" in err &&
+            typeof err.message === "string") {
+            return err.message;
+        }
+        return String(err);
     }
-    return String(err);
+    catch {
+        return "unknown error";
+    }
 }
 /** Default no-op reporter — handy for tests and for the `dryRun` path. */
 exports.noopReporter = {
