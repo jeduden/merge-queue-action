@@ -138,18 +138,41 @@ export class GitOps implements GitOperator {
       sha,
     });
 
-    await this.gitOrThrow([
-      "fetch",
-      "--no-tags",
-      "origin",
-      `+refs/heads/${branch}:refs/remotes/origin/${branch}`,
-    ]);
-    await this.gitOrThrow([
-      "checkout",
-      "-B",
-      branch,
-      `refs/remotes/origin/${branch}`,
-    ]);
+    // Best-effort cleanup: the remote ref is already created, so if
+    // fetch/checkout fails locally we'd otherwise leak a
+    // `merge-queue/batch-*` branch on origin. Delete the ref before
+    // rethrowing so subsequent retries aren't polluted by stale
+    // branches.
+    try {
+      await this.gitOrThrow([
+        "fetch",
+        "--no-tags",
+        "origin",
+        `+refs/heads/${branch}:refs/remotes/origin/${branch}`,
+      ]);
+      await this.gitOrThrow([
+        "checkout",
+        "-B",
+        branch,
+        `refs/remotes/origin/${branch}`,
+      ]);
+    } catch (err) {
+      this.log(
+        `Local fetch/checkout failed after creating ${branch} on origin; deleting the leaked ref`,
+      );
+      try {
+        await this.octokit.rest.git.deleteRef({
+          owner: this.owner,
+          repo: this.repo,
+          ref: `heads/${branch}`,
+        });
+      } catch (delErr) {
+        this.log(
+          `Warning: failed to delete leaked branch ${branch}: ${delErr}`,
+        );
+      }
+      throw err;
+    }
   }
 
   async mergeBranch(
@@ -205,8 +228,12 @@ export class GitOps implements GitOperator {
       // may have failed before touching the index).
       const reset = await this.git(["reset", "--hard", "HEAD"]);
       if (reset.code !== 0) {
-        this.log(
-          `Warning: working tree may be dirty after failed merge abort + reset (reset stderr: ${reset.stderr.trim()})`,
+        // Both cleanup paths failed — the working tree may be dirty,
+        // which would silently corrupt the next PR's merge if we kept
+        // going. Throw so the batch stops and the failure surfaces
+        // with enough detail to diagnose.
+        throw new Error(
+          `failed to clean up conflicted merge: both \`git merge --abort\` and \`git reset --hard HEAD\` failed; worktree is in an unknown state. abort stderr: ${abort.stderr.trim()}; reset stderr: ${reset.stderr.trim()}`,
         );
       }
     }

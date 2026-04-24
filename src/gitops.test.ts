@@ -206,6 +206,54 @@ describe("GitOps with injected exec", () => {
     ).rejects.toThrow(/origin/);
   });
 
+  it("createBranchFromRef deletes the leaked remote ref if local fetch/checkout fails", async () => {
+    const { octokit, calls } = makeFakeOctokit([
+      { ref: "heads/main", sha: "deadbeef" },
+    ]);
+    const exec: Exec = async (args) => {
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
+        return { code: 0, stdout: "true\n", stderr: "" };
+      }
+      if (args[0] === "remote" && args[1] === "get-url") {
+        return { code: 0, stdout: "origin\n", stderr: "" };
+      }
+      if (args[0] === "fetch") {
+        return { code: 128, stdout: "", stderr: "fatal: object not found" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    await expect(
+      ops.createBranchFromRef("merge-queue/batch-1", "main"),
+    ).rejects.toThrow("fatal: object not found");
+    // Ref was created and then deleted on the failure path.
+    expect(calls).toContain("createRef:refs/heads/merge-queue/batch-1");
+    expect(calls).toContain("deleteRef:heads/merge-queue/batch-1");
+  });
+
+  it("mergeBranch throws when both merge --abort and reset --hard fail", async () => {
+    const { octokit } = makeFakeOctokit();
+    const exec: Exec = async (args) => {
+      const mergeIdx = args.indexOf("merge");
+      if (mergeIdx >= 0 && args[mergeIdx + 1] !== "--abort") {
+        return { code: 1, stdout: "", stderr: "CONFLICT (content)" };
+      }
+      if (args[0] === "merge" && args[1] === "--abort") {
+        return { code: 128, stdout: "", stderr: "abort failed" };
+      }
+      if (args[0] === "reset" && args[1] === "--hard") {
+        return { code: 128, stdout: "", stderr: "reset failed" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    await expect(ops.mergeBranch("batch", "sha-1", "msg")).rejects.toThrow(
+      /worktree is in an unknown state/,
+    );
+  });
+
   it("gitOrThrow surfaces stderr on non-merge failures", async () => {
     const { octokit } = makeFakeOctokit();
     const exec: Exec = async (args) => {
