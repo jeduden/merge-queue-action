@@ -367,7 +367,7 @@ jobs:
       # Optional: register any custom merge drivers here, e.g.
       #   git config merge.lockfile.driver ".merge-drivers/lockfile.sh %O %A %B %L %P"
 
-      - uses: jeduden/merge-queue-action@e5ec6faf13c700775aa47f910c60003cf3e6b2f6 # v0.3.0
+      - uses: jeduden/merge-queue-action@<commit-sha-of-v0.4.0-release> # v0.4.0
         with:
           token: ${{ secrets.MERGE_QUEUE_TOKEN }}
           ci_workflow: .github/workflows/ci.yml
@@ -375,6 +375,12 @@ jobs:
           bisect: ${{ github.event.inputs.bisect }}
           batch_prs: ${{ github.event.inputs.batch_prs }}
 ```
+
+> **Replace `<commit-sha-of-v0.4.0-release>` before using.** Look up
+> the SHA on the v0.4.0 [release page](https://github.com/jeduden/merge-queue-action/releases/tag/v0.4.0)
+> or run `gh api repos/jeduden/merge-queue-action/git/ref/tags/v0.4.0`
+> and copy `.object.sha`. The placeholder is intentional so adopters
+> can't accidentally land on a stale v0.3.x SHA.
 
 The `actions/checkout` step is required — the action runs `git merge`
 locally so custom merge drivers can take effect. Use your
