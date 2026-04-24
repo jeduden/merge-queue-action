@@ -29936,6 +29936,7 @@ exports.runSetup = runSetup;
 const queue_js_1 = __nccwpck_require__(6556);
 const batch_js_1 = __nccwpck_require__(2983);
 const bisect_js_1 = __nccwpck_require__(6537);
+const reporter_js_1 = __nccwpck_require__(5622);
 const comments_js_1 = __nccwpck_require__(9333);
 function requireCtx(cfg) {
     if (!cfg.commentCtx) {
@@ -30007,13 +30008,14 @@ async function ensurePRClosedAfterMerge(api, prNumber, log) {
         log(`Warning: failed to close PR #${prNumber}: ${err}`);
     }
 }
-async function handleCIFailure(api, cfg, ctx, q, gitOps, prs, result, ciRunUrl, log) {
+async function handleCIFailure(api, cfg, ctx, q, gitOps, reporter, prs, result, ciRunUrl, log) {
     // Clean up the failed batch branch
     try {
         await gitOps.deleteBranch(result.branch);
     }
     catch (err) {
-        log(`Warning: failed to delete batch branch ${result.branch}: ${err}`);
+        const detail = err instanceof Error ? err.message : String(err);
+        await reporter.withScope(prs.map((p) => p.number), () => reporter.warn(`failed to delete batch branch \`${result.branch}\` after CI failure: ${detail}`));
     }
     if (result.merged.length === 1) {
         // Single PR failed — mark it
@@ -30038,7 +30040,7 @@ async function handleCIFailure(api, cfg, ctx, q, gitOps, prs, result, ciRunUrl, 
         });
     }
 }
-async function runProcess(api, gitOps, cfg, log, actor) {
+async function runProcess(api, gitOps, cfg, log, actor, reporter = reporter_js_1.noopReporter) {
     const ctx = requireCtx(cfg);
     // Check actor permission
     if (actor) {
@@ -30050,7 +30052,7 @@ async function runProcess(api, gitOps, cfg, log, actor) {
         log(`Actor ${actor} has "${perm}" permission, proceeding`);
     }
     const q = new queue_js_1.Queue(api, cfg.queueLabel, cfg.dryRun, log);
-    const b = new batch_js_1.Batch(gitOps, cfg.dryRun, log);
+    const b = new batch_js_1.Batch(gitOps, cfg.dryRun, log, reporter);
     // 1. Collect queued PRs
     const prs = await q.collect(cfg.batchSize);
     if (prs.length === 0) {
@@ -30090,7 +30092,8 @@ async function runProcess(api, gitOps, cfg, log, actor) {
                 await gitOps.deleteBranch(branch);
             }
             catch (err) {
-                log(`Warning: failed to delete branch ${branch}: ${err}`);
+                const detail = err instanceof Error ? err.message : String(err);
+                await reporter.withScope(prs.map((p) => p.number), () => reporter.warn(`failed to delete batch branch \`${branch}\`: ${detail}`));
             }
         }
     };
@@ -30133,7 +30136,8 @@ async function runProcess(api, gitOps, cfg, log, actor) {
                 await gitOps.deleteBranch(result.branch);
             }
             catch (err) {
-                log(`Warning: failed to delete empty batch branch: ${err}`);
+                const detail = err instanceof Error ? err.message : String(err);
+                await reporter.withScope(prs.map((p) => p.number), () => reporter.warn(`failed to delete empty batch branch \`${result.branch}\`: ${detail}`));
             }
         }
         return;
@@ -30181,7 +30185,7 @@ async function runProcess(api, gitOps, cfg, log, actor) {
         }
         if (runResult.conclusion !== "success") {
             try {
-                await handleCIFailure(api, cfg, ctx, q, gitOps, prs, result, ciRunUrl, log);
+                await handleCIFailure(api, cfg, ctx, q, gitOps, reporter, prs, result, ciRunUrl, log);
             }
             catch (err) {
                 await requeueAll(`error handling CI failure: ${(0, comments_js_1.formatErrorForComment)(err)}`);
@@ -30252,12 +30256,14 @@ async function runProcess(api, gitOps, cfg, log, actor) {
  * observed (timeout/API error) — without this, the batch branch would leak
  * and the PRs would be stuck in `queue:active`.
  */
-async function handleBisectObservationFailure(api, ctx, q, gitOps, prMap, prNumbers, excluded, branch, reason, log) {
+async function handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prMap, prNumbers, excluded, branch, reason, log) {
     try {
         await gitOps.deleteBranch(branch);
     }
     catch (err) {
-        log(`Warning: failed to delete bisect branch ${branch}: ${err}`);
+        const detail = err instanceof Error ? err.message : String(err);
+        const candidates = prNumbers.filter((n) => !excluded.has(n));
+        await reporter.withScope(candidates, () => reporter.warn(`failed to delete bisect branch \`${branch}\` during observation-failure cleanup: ${detail}`));
     }
     for (const n of prNumbers) {
         if (excluded.has(n))
@@ -30275,7 +30281,7 @@ async function handleBisectObservationFailure(api, ctx, q, gitOps, prMap, prNumb
         await postComment(api, n, (0, comments_js_1.commentRequeued)(ctx, reason), log);
     }
 }
-async function runBisect(api, gitOps, cfg, log) {
+async function runBisect(api, gitOps, cfg, log, reporter = reporter_js_1.noopReporter) {
     const ctx = requireCtx(cfg);
     const prListStr = cfg.batchPrs;
     if (!prListStr) {
@@ -30297,7 +30303,7 @@ async function runBisect(api, gitOps, cfg, log) {
         return;
     }
     const q = new queue_js_1.Queue(api, cfg.queueLabel, cfg.dryRun, log);
-    const b = new batch_js_1.Batch(gitOps, cfg.dryRun, log);
+    const b = new batch_js_1.Batch(gitOps, cfg.dryRun, log, reporter);
     // Fetch only the specific PRs we are bisecting (avoids listing entire active queue)
     const prMap = new Map();
     for (const n of prNumbers) {
@@ -30376,7 +30382,7 @@ async function runBisect(api, gitOps, cfg, log) {
                 return await api.findWorkflowRun(cfg.ciWorkflow, result.branch, dispatchedAt);
             }
             catch (err) {
-                await handleBisectObservationFailure(api, ctx, q, gitOps, prMap, prNumbers, excluded, result.branch, `failed to locate bisect CI run: ${(0, comments_js_1.formatErrorForComment)(err)}`, log);
+                await handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prMap, prNumbers, excluded, result.branch, `failed to locate bisect CI run: ${(0, comments_js_1.formatErrorForComment)(err)}`, log);
                 throw new Error(`locating bisect CI run: ${(0, comments_js_1.formatErrorForComment)(err)}`);
             }
         })();
@@ -30394,7 +30400,7 @@ async function runBisect(api, gitOps, cfg, log) {
             runResult = await api.waitForWorkflowRun(runHandle.runId);
         }
         catch (err) {
-            await handleBisectObservationFailure(api, ctx, q, gitOps, prMap, prNumbers, excluded, result.branch, `failed to read bisect CI status: ${(0, comments_js_1.formatErrorForComment)(err)}`, log);
+            await handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prMap, prNumbers, excluded, result.branch, `failed to read bisect CI status: ${(0, comments_js_1.formatErrorForComment)(err)}`, log);
             throw new Error(`getting bisect CI status: ${(0, comments_js_1.formatErrorForComment)(err)}`);
         }
         conclusion = runResult.conclusion;
@@ -30451,7 +30457,9 @@ async function runBisect(api, gitOps, cfg, log) {
             await gitOps.deleteBranch(result.branch);
         }
         catch (err) {
-            log(`Warning: failed to delete bisect branch ${result.branch}: ${err}`);
+            const detail = err instanceof Error ? err.message : String(err);
+            const candidates = prNumbers.filter((n) => !excluded.has(n));
+            await reporter.withScope(candidates, () => reporter.warn(`failed to delete bisect branch \`${result.branch}\` after left-half CI failure: ${detail}`));
         }
         if (mergedLeft.length === 1) {
             // Single PR is the culprit
@@ -30515,21 +30523,24 @@ async function runSetup(api, cfg, log) {
 /***/ }),
 
 /***/ 2983:
-/***/ ((__unused_webpack_module, exports) => {
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
 
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.Batch = void 0;
+const reporter_js_1 = __nccwpck_require__(5622);
 /** Batch manages batch branch creation and merging. */
 class Batch {
     git;
     dryRun;
     log;
-    constructor(git, dryRun, log) {
+    reporter;
+    constructor(git, dryRun, log, reporter) {
         this.git = git;
         this.dryRun = dryRun;
         this.log = log ?? (() => { });
+        this.reporter = reporter ?? reporter_js_1.noopReporter;
     }
     /**
      * Creates a batch branch from main and merges each PR into it.
@@ -30538,41 +30549,49 @@ class Batch {
     async createAndMerge(batchID, prs) {
         const branch = `merge-queue/batch-${batchID}`;
         const result = { branch, merged: [], conflicted: [] };
-        this.log(`Creating batch branch ${branch} from main`);
-        if (!this.dryRun) {
-            await this.git.createBranchFromRef(branch, "main");
-        }
-        for (const pr of prs) {
-            this.log(`Merging PR #${pr.number} (${pr.headRef}) into ${branch}`);
-            if (this.dryRun) {
-                result.merged.push(pr);
-                continue;
+        // Scope Reporter warnings raised inside this call (including
+        // those raised by GitOps via the Reporter) to the PRs that are
+        // part of this batch. Errors emitted before this point — e.g.
+        // during label collection — would not carry PR routing.
+        const prNumbers = prs.map((p) => p.number);
+        return this.reporter.withScope(prNumbers, async () => {
+            this.log(`Creating batch branch ${branch} from main`);
+            if (!this.dryRun) {
+                await this.git.createBranchFromRef(branch, "main");
             }
-            const msg = `Merge PR #${pr.number}: ${pr.title}`;
-            let ok;
-            try {
-                ok = await this.git.mergeBranch(branch, pr.headSHA, msg);
-            }
-            catch (err) {
+            for (const pr of prs) {
+                this.log(`Merging PR #${pr.number} (${pr.headRef}) into ${branch}`);
+                if (this.dryRun) {
+                    result.merged.push(pr);
+                    continue;
+                }
+                const msg = `Merge PR #${pr.number}: ${pr.title}`;
+                let ok;
                 try {
-                    await this.git.deleteBranch(branch);
+                    ok = await this.git.mergeBranch(branch, pr.headSHA, msg);
                 }
-                catch (delErr) {
-                    this.log(`Warning: failed to delete batch branch ${branch}: ${delErr}`);
+                catch (err) {
+                    try {
+                        await this.git.deleteBranch(branch);
+                    }
+                    catch (delErr) {
+                        const detail = delErr instanceof Error ? delErr.message : String(delErr);
+                        await this.reporter.warn(`failed to delete batch branch \`${branch}\` after a merge error: ${detail}`);
+                    }
+                    throw new Error(`merging PR #${pr.number}: ${err}`);
                 }
-                throw new Error(`merging PR #${pr.number}: ${err}`);
+                if (!ok) {
+                    result.conflicted.push(pr);
+                    continue;
+                }
+                result.merged.push(pr);
             }
-            if (!ok) {
-                result.conflicted.push(pr);
-                continue;
+            if (result.merged.length > 0 && !this.dryRun) {
+                this.log(`Pushing batch branch ${branch}`);
+                await this.git.pushBranch(branch);
             }
-            result.merged.push(pr);
-        }
-        if (result.merged.length > 0 && !this.dryRun) {
-            this.log(`Pushing batch branch ${branch}`);
-            await this.git.pushBranch(branch);
-        }
-        return result;
+            return result;
+        });
     }
     /** Fast-forwards main to the batch branch and cleans up. Returns the new main SHA. */
     async completeMerge(branch) {
@@ -30624,6 +30643,7 @@ exports.commentMerged = commentMerged;
 exports.commentCIFailed = commentCIFailed;
 exports.commentMergeConflict = commentMergeConflict;
 exports.commentBisecting = commentBisecting;
+exports.commentOperatorWarning = commentOperatorWarning;
 exports.commentRequeued = commentRequeued;
 function formatErrorForComment(err, maxLen = 200) {
     let raw;
@@ -30729,6 +30749,26 @@ function commentBisecting(ctx, batchBranch, leftCount, totalCount, ciRunUrl) {
         `A larger batch failed CI. Bisection is isolating the culprit: this run tests up to **${leftCount} of ${totalCount}** candidate PRs on ${branchLink(ctx, batchBranch)}. [View current bisect CI run](${ciRunUrl}).`,
         "",
         "**Next:** No action needed — you'll be notified when the culprit is isolated or this PR merges.",
+    ].join("\n");
+}
+/**
+ * Operator-facing warning posted when the queue hits a non-fatal but
+ * worth-surfacing condition (leaked refs, teardown failures,
+ * unexpected cleanup paths). The leading HTML comment is a dedup
+ * marker so future tooling can recognise and collapse these.
+ */
+function commentOperatorWarning(ctx, msg) {
+    return [
+        "<!-- merge-queue:warning -->",
+        `⚠️ ${BRAND} — queue warning`,
+        "",
+        "The merge queue hit a non-fatal issue while processing this PR:",
+        "",
+        `> ${msg}`,
+        "",
+        `[View merge queue run](${ctx.actionRunUrl}).`,
+        "",
+        "**Next:** No action needed — the queue will continue. If the warning repeats across runs, investigate via the run log.",
     ].join("\n");
 }
 function commentRequeued(ctx, reason) {
@@ -30996,6 +31036,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.GitOps = void 0;
 exports.defaultExec = defaultExec;
 const node_child_process_1 = __nccwpck_require__(1421);
+const reporter_js_1 = __nccwpck_require__(5622);
 function defaultExec(cwd) {
     return (args, opts) => new Promise((resolve, reject) => {
         const child = (0, node_child_process_1.spawn)("git", args, {
@@ -31045,12 +31086,14 @@ class GitOps {
     repo;
     exec;
     log;
+    reporter;
     constructor(octokit, owner, repo, opts) {
         this.octokit = octokit;
         this.owner = owner;
         this.repo = repo;
         this.exec = opts?.exec ?? defaultExec();
         this.log = opts?.log ?? (() => { });
+        this.reporter = opts?.reporter ?? reporter_js_1.noopReporter;
     }
     async git(args) {
         return this.exec(args);
@@ -31135,9 +31178,12 @@ class GitOps {
             catch (delErr) {
                 // Use Error.message when possible so the warning stays
                 // actionable — plain `${delErr}` renders plain objects as
-                // `[object Object]`.
+                // `[object Object]`. Reporter.warn also routes this to every
+                // PR currently in scope, so an orphan `merge-queue/batch-*`
+                // on origin surfaces on the affected PRs, not just the
+                // Actions log.
                 const msg = delErr instanceof Error ? delErr.message : String(delErr);
-                this.log(`Warning: failed to delete leaked branch ${branch}: ${msg}`);
+                await this.reporter.warn(`failed to delete leaked batch branch \`${branch}\` on origin after a local fetch/checkout error: ${msg}`);
             }
             throw err;
         }
@@ -31275,6 +31321,7 @@ const core = __importStar(__nccwpck_require__(7484));
 const github = __importStar(__nccwpck_require__(3228));
 const github_js_1 = __nccwpck_require__(9248);
 const gitops_js_1 = __nccwpck_require__(2635);
+const reporter_js_1 = __nccwpck_require__(5622);
 const action_js_1 = __nccwpck_require__(2929);
 function loadInputs() {
     return {
@@ -31301,7 +31348,14 @@ async function run() {
     const { owner, repo } = github.context.repo;
     const log = core.info;
     const client = new github_js_1.GitHubClient(inputs.token, owner, repo, log);
-    const gitOps = new gitops_js_1.GitOps(client.octokit, owner, repo, { log });
+    const commentCtx = buildCommentCtx(owner, repo, inputs.queueLabel);
+    const reporter = new reporter_js_1.PRReporter({
+        poster: client,
+        ctx: commentCtx,
+        log,
+        dryRun: inputs.dryRun,
+    });
+    const gitOps = new gitops_js_1.GitOps(client.octokit, owner, repo, { log, reporter });
     log(`Repository context: ${owner}/${repo} (GITHUB_REPOSITORY=${process.env.GITHUB_REPOSITORY ?? "unset"})`);
     log(`Queue label: "${inputs.queueLabel}" batchSize=${inputs.batchSize} dryRun=${inputs.dryRun} bisect=${inputs.bisect}`);
     const actor = process.env.GITHUB_ACTOR;
@@ -31311,13 +31365,13 @@ async function run() {
         queueLabel: inputs.queueLabel,
         dryRun: inputs.dryRun,
         batchPrs: inputs.batchPrs,
-        commentCtx: buildCommentCtx(owner, repo, inputs.queueLabel),
+        commentCtx,
     };
     if (inputs.bisect) {
-        await (0, action_js_1.runBisect)(client, gitOps, cfg, log);
+        await (0, action_js_1.runBisect)(client, gitOps, cfg, log, reporter);
     }
     else {
-        await (0, action_js_1.runProcess)(client, gitOps, cfg, log, actor);
+        await (0, action_js_1.runProcess)(client, gitOps, cfg, log, actor, reporter);
     }
 }
 run().catch((err) => core.setFailed(err instanceof Error ? err.message : String(err)));
@@ -31472,6 +31526,81 @@ class Queue {
     }
 }
 exports.Queue = Queue;
+
+
+/***/ }),
+
+/***/ 5622:
+/***/ ((__unused_webpack_module, exports, __nccwpck_require__) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PRReporter = exports.noopReporter = void 0;
+const comments_js_1 = __nccwpck_require__(9333);
+/** Default no-op reporter — handy for tests and for the `dryRun` path. */
+exports.noopReporter = {
+    info: () => { },
+    warn: async () => { },
+    withScope: async (_prs, fn) => fn(),
+};
+/**
+ * PRReporter is the production Reporter. Warnings are logged and,
+ * when PRs are in scope, posted once per PR with a
+ * `<!-- merge-queue:warning -->` marker so readers (humans and
+ * bots) can find or dedupe them.
+ */
+class PRReporter {
+    poster;
+    ctx;
+    log;
+    dryRun;
+    scope = [];
+    constructor(opts) {
+        this.poster = opts.poster;
+        this.ctx = opts.ctx;
+        this.log = opts.log;
+        this.dryRun = opts.dryRun;
+    }
+    info(msg) {
+        this.log(msg);
+    }
+    async warn(msg) {
+        this.log(`Warning: ${msg}`);
+        if (this.dryRun)
+            return;
+        if (this.scope.length === 0)
+            return;
+        // Snapshot the scope: if `warn` is awaited across a scope change
+        // (unlikely in practice but cheap to be safe), we still comment
+        // on the PRs the warning was raised for, not a later scope's.
+        const targets = [...this.scope];
+        const body = (0, comments_js_1.commentOperatorWarning)(this.ctx, msg);
+        for (const pr of targets) {
+            try {
+                await this.poster.comment(pr, body);
+            }
+            catch (err) {
+                // Don't rethrow — reporter failures must never abort the
+                // run. Log with a real message string rather than letting
+                // `${err}` render an object as `[object Object]`.
+                const detail = err instanceof Error ? err.message : String(err);
+                this.log(`Warning: failed to post merge-queue warning comment on PR #${pr}: ${detail}`);
+            }
+        }
+    }
+    async withScope(prs, fn) {
+        const prev = this.scope;
+        this.scope = [...prs];
+        try {
+            return await fn();
+        }
+        finally {
+            this.scope = prev;
+        }
+    }
+}
+exports.PRReporter = PRReporter;
 
 
 /***/ }),

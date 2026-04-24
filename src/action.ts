@@ -10,6 +10,7 @@ import {
 } from "./queue.js";
 import { Batch, type BatchPR, type MergeResult, type GitOperator } from "./batch.js";
 import { split } from "./bisect.js";
+import { noopReporter, type Reporter } from "./reporter.js";
 import {
   type CommentCtx,
   formatErrorForComment,
@@ -133,6 +134,7 @@ async function handleCIFailure(
   ctx: CommentCtx,
   q: Queue,
   gitOps: GitOperator,
+  reporter: Reporter,
   prs: PR[],
   result: MergeResult,
   ciRunUrl: string,
@@ -142,7 +144,12 @@ async function handleCIFailure(
   try {
     await gitOps.deleteBranch(result.branch);
   } catch (err) {
-    log(`Warning: failed to delete batch branch ${result.branch}: ${err}`);
+    const detail = err instanceof Error ? err.message : String(err);
+    await reporter.withScope(prs.map((p) => p.number), () =>
+      reporter.warn(
+        `failed to delete batch branch \`${result.branch}\` after CI failure: ${detail}`,
+      ),
+    );
   }
 
   if (result.merged.length === 1) {
@@ -182,6 +189,7 @@ export async function runProcess(
   cfg: Config,
   log: (msg: string) => void,
   actor?: string,
+  reporter: Reporter = noopReporter,
 ): Promise<void> {
   const ctx = requireCtx(cfg);
 
@@ -198,7 +206,7 @@ export async function runProcess(
   }
 
   const q = new Queue(api, cfg.queueLabel, cfg.dryRun, log);
-  const b = new Batch(gitOps, cfg.dryRun, log);
+  const b = new Batch(gitOps, cfg.dryRun, log, reporter);
 
   // 1. Collect queued PRs
   const prs = await q.collect(cfg.batchSize);
@@ -246,7 +254,12 @@ export async function runProcess(
       try {
         await gitOps.deleteBranch(branch);
       } catch (err) {
-        log(`Warning: failed to delete branch ${branch}: ${err}`);
+        const detail = err instanceof Error ? err.message : String(err);
+        await reporter.withScope(prs.map((p) => p.number), () =>
+          reporter.warn(
+            `failed to delete batch branch \`${branch}\`: ${detail}`,
+          ),
+        );
       }
     }
   };
@@ -295,7 +308,12 @@ export async function runProcess(
       try {
         await gitOps.deleteBranch(result.branch);
       } catch (err) {
-        log(`Warning: failed to delete empty batch branch: ${err}`);
+        const detail = err instanceof Error ? err.message : String(err);
+        await reporter.withScope(prs.map((p) => p.number), () =>
+          reporter.warn(
+            `failed to delete empty batch branch \`${result.branch}\`: ${detail}`,
+          ),
+        );
       }
     }
     return;
@@ -366,6 +384,7 @@ export async function runProcess(
           ctx,
           q,
           gitOps,
+          reporter,
           prs,
           result,
           ciRunUrl,
@@ -466,6 +485,7 @@ async function handleBisectObservationFailure(
   ctx: CommentCtx,
   q: Queue,
   gitOps: GitOperator,
+  reporter: Reporter,
   prMap: Map<number, PR>,
   prNumbers: number[],
   excluded: Set<number>,
@@ -476,7 +496,13 @@ async function handleBisectObservationFailure(
   try {
     await gitOps.deleteBranch(branch);
   } catch (err) {
-    log(`Warning: failed to delete bisect branch ${branch}: ${err}`);
+    const detail = err instanceof Error ? err.message : String(err);
+    const candidates = prNumbers.filter((n) => !excluded.has(n));
+    await reporter.withScope(candidates, () =>
+      reporter.warn(
+        `failed to delete bisect branch \`${branch}\` during observation-failure cleanup: ${detail}`,
+      ),
+    );
   }
   for (const n of prNumbers) {
     if (excluded.has(n)) continue;
@@ -497,6 +523,7 @@ export async function runBisect(
   gitOps: GitOperator,
   cfg: Config,
   log: (msg: string) => void,
+  reporter: Reporter = noopReporter,
 ): Promise<void> {
   const ctx = requireCtx(cfg);
   const prListStr = cfg.batchPrs;
@@ -522,7 +549,7 @@ export async function runBisect(
   }
 
   const q = new Queue(api, cfg.queueLabel, cfg.dryRun, log);
-  const b = new Batch(gitOps, cfg.dryRun, log);
+  const b = new Batch(gitOps, cfg.dryRun, log, reporter);
 
   // Fetch only the specific PRs we are bisecting (avoids listing entire active queue)
   const prMap = new Map<number, PR>();
@@ -620,6 +647,7 @@ export async function runBisect(
           ctx,
           q,
           gitOps,
+          reporter,
           prMap,
           prNumbers,
           excluded,
@@ -662,6 +690,7 @@ export async function runBisect(
         ctx,
         q,
         gitOps,
+        reporter,
         prMap,
         prNumbers,
         excluded,
@@ -742,8 +771,12 @@ export async function runBisect(
     try {
       await gitOps.deleteBranch(result.branch);
     } catch (err) {
-      log(
-        `Warning: failed to delete bisect branch ${result.branch}: ${err}`,
+      const detail = err instanceof Error ? err.message : String(err);
+      const candidates = prNumbers.filter((n) => !excluded.has(n));
+      await reporter.withScope(candidates, () =>
+        reporter.warn(
+          `failed to delete bisect branch \`${result.branch}\` after left-half CI failure: ${detail}`,
+        ),
       );
     }
 

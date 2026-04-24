@@ -2,6 +2,7 @@ import * as core from "@actions/core";
 import * as github from "@actions/github";
 import { GitHubClient } from "./github.js";
 import { GitOps } from "./gitops.js";
+import { PRReporter } from "./reporter.js";
 import { runProcess, runBisect, type Config } from "./action.js";
 import type { CommentCtx } from "./comments.js";
 
@@ -47,7 +48,14 @@ async function run(): Promise<void> {
   const { owner, repo } = github.context.repo;
   const log = core.info;
   const client = new GitHubClient(inputs.token, owner, repo, log);
-  const gitOps = new GitOps(client.octokit, owner, repo, { log });
+  const commentCtx = buildCommentCtx(owner, repo, inputs.queueLabel);
+  const reporter = new PRReporter({
+    poster: client,
+    ctx: commentCtx,
+    log,
+    dryRun: inputs.dryRun,
+  });
+  const gitOps = new GitOps(client.octokit, owner, repo, { log, reporter });
   log(
     `Repository context: ${owner}/${repo} (GITHUB_REPOSITORY=${process.env.GITHUB_REPOSITORY ?? "unset"})`,
   );
@@ -62,13 +70,13 @@ async function run(): Promise<void> {
     queueLabel: inputs.queueLabel,
     dryRun: inputs.dryRun,
     batchPrs: inputs.batchPrs,
-    commentCtx: buildCommentCtx(owner, repo, inputs.queueLabel),
+    commentCtx,
   };
 
   if (inputs.bisect) {
-    await runBisect(client, gitOps, cfg, log);
+    await runBisect(client, gitOps, cfg, log, reporter);
   } else {
-    await runProcess(client, gitOps, cfg, log, actor);
+    await runProcess(client, gitOps, cfg, log, actor, reporter);
   }
 }
 

@@ -12,4 +12,11 @@ export declare function commentMerged(ctx: CommentCtx, mergeSha: string, ciRunUr
 export declare function commentCIFailed(ctx: CommentCtx, ciRunUrl: string, viaBisection: boolean): string;
 export declare function commentMergeConflict(ctx: CommentCtx): string;
 export declare function commentBisecting(ctx: CommentCtx, batchBranch: string, leftCount: number, totalCount: number, ciRunUrl: string): string;
+/**
+ * Operator-facing warning posted when the queue hits a non-fatal but
+ * worth-surfacing condition (leaked refs, teardown failures,
+ * unexpected cleanup paths). The leading HTML comment is a dedup
+ * marker so future tooling can recognise and collapse these.
+ */
+export declare function commentOperatorWarning(ctx: CommentCtx, msg: string): string;
 export declare function commentRequeued(ctx: CommentCtx, reason: string): string;

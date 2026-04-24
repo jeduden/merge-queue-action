@@ -1,3 +1,4 @@
+import { type Reporter } from "./reporter.js";
 /** GitOperator defines the interface for git operations. */
 export interface GitOperator {
     createBranchFromRef(branch: string, baseRef: string): Promise<void>;
@@ -26,7 +27,8 @@ export declare class Batch {
     private git;
     private dryRun;
     private log;
-    constructor(git: GitOperator, dryRun: boolean, log?: LogFunc);
+    private reporter;
+    constructor(git: GitOperator, dryRun: boolean, log?: LogFunc, reporter?: Reporter);
     /**
      * Creates a batch branch from main and merges each PR into it.
      * PRs that conflict are recorded in the result but do not stop the process.

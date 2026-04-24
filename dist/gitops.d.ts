@@ -1,5 +1,6 @@
 import type * as github from "@actions/github";
 import type { GitOperator } from "./batch.js";
+import { type Reporter } from "./reporter.js";
 type Octokit = ReturnType<typeof github.getOctokit>;
 type LogFunc = (msg: string) => void;
 export interface ExecResult {
@@ -28,9 +29,11 @@ export declare class GitOps implements GitOperator {
     private repo;
     private exec;
     private log;
+    private reporter;
     constructor(octokit: Octokit, owner: string, repo: string, opts?: {
         exec?: Exec;
         log?: LogFunc;
+        reporter?: Reporter;
     });
     private git;
     private gitOrThrow;

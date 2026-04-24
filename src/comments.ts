@@ -143,6 +143,27 @@ export function commentBisecting(
   ].join("\n");
 }
 
+/**
+ * Operator-facing warning posted when the queue hits a non-fatal but
+ * worth-surfacing condition (leaked refs, teardown failures,
+ * unexpected cleanup paths). The leading HTML comment is a dedup
+ * marker so future tooling can recognise and collapse these.
+ */
+export function commentOperatorWarning(ctx: CommentCtx, msg: string): string {
+  return [
+    "<!-- merge-queue:warning -->",
+    `⚠️ ${BRAND} — queue warning`,
+    "",
+    "The merge queue hit a non-fatal issue while processing this PR:",
+    "",
+    `> ${msg}`,
+    "",
+    `[View merge queue run](${ctx.actionRunUrl}).`,
+    "",
+    "**Next:** No action needed — the queue will continue. If the warning repeats across runs, investigate via the run log.",
+  ].join("\n");
+}
+
 export function commentRequeued(ctx: CommentCtx, reason: string): string {
   return [
     `⏳ ${BRAND} — requeued`,

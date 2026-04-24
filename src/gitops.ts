@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type * as github from "@actions/github";
 import type { GitOperator } from "./batch.js";
+import { noopReporter, type Reporter } from "./reporter.js";
 
 type Octokit = ReturnType<typeof github.getOctokit>;
 
@@ -68,18 +69,20 @@ export class GitOps implements GitOperator {
   private repo: string;
   private exec: Exec;
   private log: LogFunc;
+  private reporter: Reporter;
 
   constructor(
     octokit: Octokit,
     owner: string,
     repo: string,
-    opts?: { exec?: Exec; log?: LogFunc },
+    opts?: { exec?: Exec; log?: LogFunc; reporter?: Reporter },
   ) {
     this.octokit = octokit;
     this.owner = owner;
     this.repo = repo;
     this.exec = opts?.exec ?? defaultExec();
     this.log = opts?.log ?? (() => {});
+    this.reporter = opts?.reporter ?? noopReporter;
   }
 
   private async git(args: string[]): Promise<ExecResult> {
@@ -180,11 +183,14 @@ export class GitOps implements GitOperator {
       } catch (delErr) {
         // Use Error.message when possible so the warning stays
         // actionable — plain `${delErr}` renders plain objects as
-        // `[object Object]`.
+        // `[object Object]`. Reporter.warn also routes this to every
+        // PR currently in scope, so an orphan `merge-queue/batch-*`
+        // on origin surfaces on the affected PRs, not just the
+        // Actions log.
         const msg =
           delErr instanceof Error ? delErr.message : String(delErr);
-        this.log(
-          `Warning: failed to delete leaked branch ${branch}: ${msg}`,
+        await this.reporter.warn(
+          `failed to delete leaked batch branch \`${branch}\` on origin after a local fetch/checkout error: ${msg}`,
         );
       }
       throw err;
