@@ -57,10 +57,10 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
       for (const issue of issues) {
         const isPR = !!issue.pull_request;
         const issueLabels = (issue.labels ?? [])
-          .map((l) =>
+          .map((l: string | { name?: string }) =>
             typeof l === "string" ? l : (l as { name?: string }).name ?? "",
           )
-          .filter((n) => n !== "");
+          .filter((n: string) => n !== "");
         this.log(
           `listPRsWithLabel:   #${issue.number} isPR=${isPR} state=${issue.state} labels=[${issueLabels.join(", ")}]`,
         );
