@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { GitOps, defaultExec, type Exec } from "./gitops.js";
+import { ConfigurationError } from "./errors.js";
 
 interface FakeRef {
   ref: string;
@@ -190,6 +191,24 @@ describe("GitOps with injected exec", () => {
     ).rejects.toThrow(/actions\/checkout/);
   });
 
+  it("throws ConfigurationError when not in a worktree", async () => {
+    const { octokit } = makeFakeOctokit([
+      { ref: "heads/main", sha: "deadbeef" },
+    ]);
+    const exec: Exec = async (args) => {
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
+        return { code: 128, stdout: "", stderr: "not a git repo" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    const err = await ops
+      .createBranchFromRef("merge-queue/batch-1", "main")
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConfigurationError);
+  });
+
   it("createBranchFromRef throws a targeted error when origin is missing", async () => {
     const { octokit } = makeFakeOctokit([
       { ref: "heads/main", sha: "deadbeef" },
@@ -208,6 +227,27 @@ describe("GitOps with injected exec", () => {
     await expect(
       ops.createBranchFromRef("merge-queue/batch-1", "main"),
     ).rejects.toThrow(/origin/);
+  });
+
+  it("throws ConfigurationError when origin remote is missing", async () => {
+    const { octokit } = makeFakeOctokit([
+      { ref: "heads/main", sha: "deadbeef" },
+    ]);
+    const exec: Exec = async (args) => {
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
+        return { code: 0, stdout: "true\n", stderr: "" };
+      }
+      if (args[0] === "remote" && args[1] === "get-url") {
+        return { code: 2, stdout: "", stderr: "no such remote" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    const err = await ops
+      .createBranchFromRef("merge-queue/batch-1", "main")
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConfigurationError);
   });
 
   it("createBranchFromRef throws a targeted error when the clone is shallow", async () => {
@@ -231,6 +271,30 @@ describe("GitOps with injected exec", () => {
     await expect(
       ops.createBranchFromRef("merge-queue/batch-1", "main"),
     ).rejects.toThrow(/fetch-depth: 0|unshallow/);
+  });
+
+  it("throws ConfigurationError when the clone is shallow", async () => {
+    const { octokit } = makeFakeOctokit([
+      { ref: "heads/main", sha: "deadbeef" },
+    ]);
+    const exec: Exec = async (args) => {
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
+        return { code: 0, stdout: "true\n", stderr: "" };
+      }
+      if (args[0] === "remote" && args[1] === "get-url") {
+        return { code: 0, stdout: "origin\n", stderr: "" };
+      }
+      if (args[0] === "rev-parse" && args[1] === "--is-shallow-repository") {
+        return { code: 0, stdout: "true\n", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    const err = await ops
+      .createBranchFromRef("merge-queue/batch-1", "main")
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ConfigurationError);
   });
 
   it("createBranchFromRef deletes the leaked remote ref if local fetch/checkout fails", async () => {

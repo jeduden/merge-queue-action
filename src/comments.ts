@@ -187,12 +187,37 @@ export function commentRequeued(ctx: CommentCtx, reason: string): string {
   return [
     `⏳ ${BRAND} — requeued`,
     "",
-    "The merge queue hit an error while processing this PR:",
+    "The merge queue hit a transient error while processing this PR:",
     "",
     `> ${reason}`,
     "",
     `[View merge queue run](${ctx.actionRunUrl}).`,
     "",
-    "**Next:** No action needed — the queue will retry on the next tick.",
+    "**Next:** No action needed — the queue will retry automatically on the next run.",
+  ].join("\n");
+}
+
+/**
+ * Posted when the merge queue action cannot proceed because the workflow is
+ * misconfigured (e.g. missing `actions/checkout`, shallow clone, wrong CI
+ * workflow name).  Unlike `commentRequeued`, this error will NOT resolve by
+ * itself — the operator must fix the issue before the PR can be retried.
+ */
+export function commentConfigError(ctx: CommentCtx, detail: string): string {
+  const normalised = detail.replace(/\r\n?/g, "\n");
+  const quoted = normalised
+    .split("\n")
+    .map((l) => `> ${l}`)
+    .join("\n");
+  return [
+    `🔴 ${BRAND} — action misconfigured`,
+    "",
+    "The merge queue cannot proceed because the workflow is misconfigured:",
+    "",
+    quoted,
+    "",
+    `[View merge queue run](${ctx.actionRunUrl}).`,
+    "",
+    `**Next:** Fix the configuration issue above, then re-add the \`${ctx.queueLabel}\` label to re-enter the queue.`,
   ].join("\n");
 }
