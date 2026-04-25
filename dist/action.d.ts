@@ -1,5 +1,6 @@
 import { type PR, type GitHubAPI, type WorkflowAPI } from "./queue.js";
 import { type GitOperator } from "./batch.js";
+import { type Reporter } from "./reporter.js";
 import { type CommentCtx } from "./comments.js";
 export interface Config {
     ciWorkflow: string;
@@ -23,6 +24,6 @@ export declare function hasWritePermission(perm: string): boolean;
  * Reads MERGE_QUEUE_WORKFLOW_FILE if set, otherwise parses GITHUB_WORKFLOW_REF.
  */
 export declare function selfWorkflowFile(): string;
-export declare function runProcess(api: FullAPI, gitOps: GitOperator, cfg: Config, log: (msg: string) => void, actor?: string): Promise<void>;
-export declare function runBisect(api: FullAPI, gitOps: GitOperator, cfg: Config, log: (msg: string) => void): Promise<void>;
+export declare function runProcess(api: FullAPI, gitOps: GitOperator, cfg: Config, log: (msg: string) => void, actor?: string, reporterArg?: Reporter): Promise<void>;
+export declare function runBisect(api: FullAPI, gitOps: GitOperator, cfg: Config, log: (msg: string) => void, reporterArg?: Reporter): Promise<void>;
 export declare function runSetup(api: GitHubAPI, cfg: Config, log: (msg: string) => void): Promise<void>;

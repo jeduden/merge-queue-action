@@ -143,6 +143,46 @@ export function commentBisecting(
   ].join("\n");
 }
 
+/**
+ * Operator-facing warning posted when the queue hits a non-fatal but
+ * worth-surfacing condition (leaked refs, teardown failures,
+ * unexpected cleanup paths). The leading HTML comment is a dedup
+ * marker so future tooling can recognise and collapse these.
+ */
+export function commentOperatorWarning(ctx: CommentCtx, msg: string): string {
+  // Normalise `msg` for Markdown: prefix every line with `> ` so a
+  // multi-line error (typically stderr/stdout from a failed
+  // subprocess) stays inside the blockquote, and cap the total
+  // length so a stray 100 KiB stderr doesn't blow up the PR thread.
+  // Backticks are left alone — inside a blockquote they render as
+  // inline code, which is the right treatment for command output.
+  const MAX = 4000;
+  // First normalise line endings: git on Windows runners emits CRLF,
+  // and a lone `\r` (classic Mac, occasional carriage-return-only
+  // progress lines from some subprocesses) shouldn't survive into
+  // the rendered Markdown either. Normalising before truncation
+  // also means the cap counts characters of normalised text.
+  const normalised = msg.replace(/\r\n?/g, "\n");
+  const trimmed =
+    normalised.length > MAX ? `${normalised.slice(0, MAX - 1)}…` : normalised;
+  const quoted = trimmed
+    .split("\n")
+    .map((line) => `> ${line}`)
+    .join("\n");
+  return [
+    "<!-- merge-queue:warning -->",
+    `⚠️ ${BRAND} — queue warning`,
+    "",
+    "The merge queue hit a non-fatal issue while processing this PR:",
+    "",
+    quoted,
+    "",
+    `[View merge queue run](${ctx.actionRunUrl}).`,
+    "",
+    "**Next:** No action needed — the queue will continue. If the warning repeats across runs, investigate via the run log.",
+  ].join("\n");
+}
+
 export function commentRequeued(ctx: CommentCtx, reason: string): string {
   return [
     `⏳ ${BRAND} — requeued`,

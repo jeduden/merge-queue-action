@@ -1,0 +1,413 @@
+import { describe, expect, it } from "vitest";
+import {
+  PRReporter,
+  errorMessage,
+  loggingReporter,
+  silentReporter,
+  type CommentPoster,
+} from "./reporter.js";
+import type { CommentCtx } from "./comments.js";
+
+const ctx: CommentCtx = {
+  serverUrl: "https://github.com",
+  ownerRepo: "o/r",
+  actionRunUrl: "https://github.com/o/r/actions/runs/1",
+  queueLabel: "queue",
+};
+
+function makePoster(): CommentPoster & {
+  calls: Array<{ pr: number; body: string }>;
+  failOn?: number;
+  failError?: unknown;
+} {
+  const p = {
+    calls: [] as Array<{ pr: number; body: string }>,
+    failOn: undefined as number | undefined,
+    failError: undefined as unknown,
+    async comment(pr: number, body: string) {
+      p.calls.push({ pr, body });
+      if (p.failOn === pr) {
+        throw p.failError ?? new Error("poster failed");
+      }
+    },
+  };
+  return p;
+}
+
+describe("PRReporter", () => {
+  it("info only logs", () => {
+    const poster = makePoster();
+    const logged: string[] = [];
+    const r = new PRReporter({
+      poster,
+      ctx,
+      log: (m) => logged.push(m),
+      dryRun: false,
+    });
+    r.info("hello");
+    expect(logged).toEqual(["hello"]);
+    expect(poster.calls).toEqual([]);
+  });
+
+  it("warn with no scope logs but does not comment", async () => {
+    const poster = makePoster();
+    const logged: string[] = [];
+    const r = new PRReporter({
+      poster,
+      ctx,
+      log: (m) => logged.push(m),
+      dryRun: false,
+    });
+    await r.warn("something happened");
+    expect(logged).toEqual(["Warning: something happened"]);
+    expect(poster.calls).toEqual([]);
+  });
+
+  it("warn inside withScope posts one comment per scoped PR", async () => {
+    const poster = makePoster();
+    const logged: string[] = [];
+    const r = new PRReporter({
+      poster,
+      ctx,
+      log: (m) => logged.push(m),
+      dryRun: false,
+    });
+    await r.withScope([1, 2, 3], async () => {
+      await r.warn("batch branch leaked");
+    });
+    expect(poster.calls.map((c) => c.pr)).toEqual([1, 2, 3]);
+    expect(poster.calls[0].body).toContain("<!-- merge-queue:warning -->");
+    expect(poster.calls[0].body).toContain("batch branch leaked");
+    expect(poster.calls[0].body).toContain(ctx.actionRunUrl);
+  });
+
+  it("multi-line warn bodies survive the blockquote (every line prefixed with `> `)", async () => {
+    const poster = makePoster();
+    const r = new PRReporter({
+      poster,
+      ctx,
+      log: () => {},
+      dryRun: false,
+    });
+    const multiLine = "first line\nsecond line\nthird line";
+    await r.withScope([42], async () => {
+      await r.warn(multiLine);
+    });
+    const body = poster.calls[0].body;
+    // Every line of the multi-line input must be inside the
+    // blockquote; without the fix, only "first line" would be
+    // blockquoted and the rest would render as prose.
+    expect(body).toContain("> first line");
+    expect(body).toContain("> second line");
+    expect(body).toContain("> third line");
+  });
+
+  it("CRLF and lone CR in warn bodies are normalised so comments don't render with stray `\\r`", async () => {
+    const poster = makePoster();
+    const r = new PRReporter({
+      poster,
+      ctx,
+      log: () => {},
+      dryRun: false,
+    });
+    // Mix of CRLF (Windows / git on Windows runners) and a lone CR
+    // (some progress-style output). Both should reduce to LF and
+    // the resulting blockquote should not contain raw \r anywhere.
+    const crlfMix = "windows line\r\nunix line\nmac line\rfinal line";
+    await r.withScope([1], async () => {
+      await r.warn(crlfMix);
+    });
+    const body = poster.calls[0].body;
+    expect(body).not.toContain("\r");
+    expect(body).toContain("> windows line");
+    expect(body).toContain("> unix line");
+    expect(body).toContain("> mac line");
+    expect(body).toContain("> final line");
+  });
+
+  it("very long warn bodies are truncated so comments don't blow up the thread", async () => {
+    const poster = makePoster();
+    const r = new PRReporter({
+      poster,
+      ctx,
+      log: () => {},
+      dryRun: false,
+    });
+    // ~100 KiB — well past the 4000-char cap.
+    const huge = "x".repeat(100_000);
+    await r.withScope([1], async () => {
+      await r.warn(huge);
+    });
+    const body = poster.calls[0].body;
+    // Truncation marker present and body size bounded (the prefix/
+    // suffix around the truncated block is small, so the full
+    // comment stays well under 10 KiB).
+    expect(body).toContain("…");
+    expect(body.length).toBeLessThan(10_000);
+  });
+
+  it("warn in dryRun logs but does not comment", async () => {
+    const poster = makePoster();
+    const logged: string[] = [];
+    const r = new PRReporter({
+      poster,
+      ctx,
+      log: (m) => logged.push(m),
+      dryRun: true,
+    });
+    await r.withScope([42], async () => {
+      await r.warn("would warn");
+    });
+    expect(logged).toEqual(["Warning: would warn"]);
+    expect(poster.calls).toEqual([]);
+  });
+
+  it("does not throw if the poster throws; logs per-PR failure", async () => {
+    const poster = makePoster();
+    poster.failOn = 2;
+    poster.failError = new Error("418 teapot");
+    const logged: string[] = [];
+    const r = new PRReporter({
+      poster,
+      ctx,
+      log: (m) => logged.push(m),
+      dryRun: false,
+    });
+    await r.withScope([1, 2, 3], async () => {
+      await r.warn("oops");
+    });
+    // PR 1 and PR 3 still got their comments — poster failure on 2
+    // didn't short-circuit the rest.
+    expect(poster.calls.map((c) => c.pr)).toEqual([1, 2, 3]);
+    // Failure surfaced in the log with the error's message, not
+    // `[object Object]`.
+    expect(
+      logged.some((m) =>
+        m.includes("failed to post merge-queue warning comment on PR #2"),
+      ),
+    ).toBe(true);
+    expect(logged.some((m) => m.includes("418 teapot"))).toBe(true);
+  });
+
+  it("formats non-Error poster failures by extracting `.message`", async () => {
+    const poster = makePoster();
+    poster.failOn = 7;
+    // Simulates the shape of an unwrapped octokit RequestError: a
+    // plain object with `status` + `message`, not a real Error.
+    poster.failError = { status: 503, message: "gone" };
+    const logged: string[] = [];
+    const r = new PRReporter({
+      poster,
+      ctx,
+      log: (m) => logged.push(m),
+      dryRun: false,
+    });
+    await r.withScope([7], async () => {
+      await r.warn("thing");
+    });
+    const failureLine = logged.find((m) =>
+      m.includes("failed to post merge-queue warning comment on PR #7"),
+    );
+    expect(failureLine).toBeDefined();
+    // Must show the extracted `.message` ("gone"), NOT "[object Object]".
+    expect(failureLine).toContain("gone");
+    expect(failureLine).not.toContain("[object Object]");
+  });
+
+  it("withScope restores the previous scope on success", async () => {
+    const poster = makePoster();
+    const r = new PRReporter({
+      poster,
+      ctx,
+      log: () => {},
+      dryRun: false,
+    });
+    await r.withScope([1, 2], async () => {
+      await r.withScope([99], async () => {
+        await r.warn("inner");
+      });
+      await r.warn("outer");
+    });
+    const inner = poster.calls.filter((c) => c.body.includes("inner"));
+    const outer = poster.calls.filter((c) => c.body.includes("outer"));
+    expect(inner.map((c) => c.pr)).toEqual([99]);
+    expect(outer.map((c) => c.pr)).toEqual([1, 2]);
+  });
+
+  it("withScope restores the previous scope on exception", async () => {
+    const poster = makePoster();
+    const r = new PRReporter({
+      poster,
+      ctx,
+      log: () => {},
+      dryRun: false,
+    });
+    await r.withScope([1, 2], async () => {
+      await expect(
+        r.withScope([99], async () => {
+          throw new Error("boom");
+        }),
+      ).rejects.toThrow("boom");
+      // After the throw, scope 1,2 must still be in effect.
+      await r.warn("after-throw");
+    });
+    expect(
+      poster.calls.filter((c) => c.body.includes("after-throw")).map((c) => c.pr),
+    ).toEqual([1, 2]);
+  });
+
+  it("warn's scope snapshot is stable if scope changes mid-await", async () => {
+    const poster = makePoster();
+    // Slow the poster so we can mutate scope between comments.
+    let resolveNext: (() => void) | null = null;
+    poster.comment = async (pr, body) => {
+      poster.calls.push({ pr, body });
+      await new Promise<void>((res) => {
+        resolveNext = res;
+      });
+    };
+    const r = new PRReporter({
+      poster,
+      ctx,
+      log: () => {},
+      dryRun: false,
+    });
+
+    const warnPromise = r.withScope([1, 2], () => r.warn("queued"));
+
+    // Wait a tick, then drain the first comment.
+    await Promise.resolve();
+    await Promise.resolve();
+    resolveNext?.();
+    resolveNext = null;
+    // While warn is mid-loop, swap the scope; this must NOT affect
+    // which PRs the in-flight warn targets.
+    const swap = r.withScope([999], async () => {});
+    await swap;
+
+    await Promise.resolve();
+    await Promise.resolve();
+    resolveNext?.();
+    await warnPromise;
+
+    expect(poster.calls.map((c) => c.pr)).toEqual([1, 2]);
+  });
+});
+
+describe("silentReporter", () => {
+  it("info/warn no-ops and withScope still runs fn", async () => {
+    expect(() => silentReporter.info("x")).not.toThrow();
+    await expect(silentReporter.warn("x")).resolves.toBeUndefined();
+    const result = await silentReporter.withScope([1, 2], async () => "ok");
+    expect(result).toBe("ok");
+  });
+});
+
+describe("loggingReporter", () => {
+  it("forwards info to the log function unchanged", () => {
+    const logged: string[] = [];
+    const r = loggingReporter((m) => logged.push(m));
+    r.info("hello");
+    expect(logged).toEqual(["hello"]);
+  });
+
+  it("forwards warn to the log function with a `Warning:` prefix", async () => {
+    const logged: string[] = [];
+    const r = loggingReporter((m) => logged.push(m));
+    await r.warn("something happened");
+    expect(logged).toEqual(["Warning: something happened"]);
+  });
+
+  it("withScope is a passthrough that runs the body and returns its value", async () => {
+    const logged: string[] = [];
+    const r = loggingReporter((m) => logged.push(m));
+    const result = await r.withScope([1, 2, 3], async () => {
+      await r.warn("scoped-warn");
+      return "ok";
+    });
+    expect(result).toBe("ok");
+    // No PR comment posted (loggingReporter has no poster); the
+    // warning must still appear in the log so operators see it.
+    expect(logged).toEqual(["Warning: scoped-warn"]);
+  });
+
+  it("propagates exceptions from the log callback rather than swallowing them", async () => {
+    const r = loggingReporter(() => {
+      throw new Error("log-broken");
+    });
+    // Contract: a logging Reporter is a thin shim around the
+    // caller's log function. Unlike PRReporter (which catches
+    // poster failures so a flaky comment API can't abort the run),
+    // logging-callback failures here SHOULD propagate so the test
+    // / caller sees the bug in their own log function instead of
+    // silently dropping output. info is sync, warn is async — both
+    // surface the exception.
+    expect(() => r.info("x")).toThrow("log-broken");
+    await expect(r.warn("x")).rejects.toThrow("log-broken");
+  });
+});
+
+describe("errorMessage", () => {
+  it("uses Error.message", () => {
+    expect(errorMessage(new Error("boom"))).toBe("boom");
+  });
+
+  it("uses a string value verbatim", () => {
+    expect(errorMessage("boom")).toBe("boom");
+  });
+
+  it("extracts .message from a plain object (octokit-shaped)", () => {
+    expect(errorMessage({ status: 500, message: "server down" })).toBe(
+      "server down",
+    );
+  });
+
+  it("ignores a non-string .message and falls back to String()", () => {
+    // Object with a non-string `message`: don't pick it up, fall
+    // back to String() so we don't return `undefined` or a number.
+    expect(errorMessage({ message: 42 })).toBe("[object Object]");
+  });
+
+  it("falls back to String() for numbers and booleans", () => {
+    expect(errorMessage(42)).toBe("42");
+    expect(errorMessage(false)).toBe("false");
+  });
+
+  it("falls back to String() for null/undefined safely", () => {
+    expect(errorMessage(null)).toBe("null");
+    expect(errorMessage(undefined)).toBe("undefined");
+  });
+
+  it("falls back to String() for a plain object with no message", () => {
+    // Known limitation: truly opaque objects degrade to
+    // `[object Object]`. Documented so the fallback behaviour is
+    // stable.
+    expect(errorMessage({ foo: "bar" })).toBe("[object Object]");
+  });
+
+  it("does not itself throw if the thrown value's `message` getter throws", () => {
+    const exotic = {};
+    Object.defineProperty(exotic, "message", {
+      get() {
+        throw new Error("getter exploded");
+      },
+      enumerable: true,
+    });
+    // Must return a string (the safe fallback), not rethrow.
+    expect(() => errorMessage(exotic)).not.toThrow();
+    expect(errorMessage(exotic)).toBe("unknown error");
+  });
+
+  it("does not itself throw if the thrown value's `toString()` throws", () => {
+    const exotic = {
+      toString() {
+        throw new Error("toString exploded");
+      },
+    };
+    // `String()` invokes `toString`, which throws. errorMessage
+    // must catch the throw and return the fixed fallback rather
+    // than propagating out of an error-handling path.
+    expect(() => errorMessage(exotic)).not.toThrow();
+    expect(errorMessage(exotic)).toBe("unknown error");
+  });
+});

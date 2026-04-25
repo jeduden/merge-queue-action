@@ -35,22 +35,29 @@ Node.js-based GitHub Action — no compiled binary required.
 
 ### How merging works in detail
 
-The action never uses `git` locally. Every git operation is performed
-server-side through the GitHub REST API:
+The action runs in a job that has already checked out the repository
+(see [Quick start](#quick-start) for the required steps). Branch
+creation, fast-forward and deletion go through the GitHub Git Data
+API; the per-PR merge step runs `git merge` in the runner's working
+tree so committed `.gitattributes` and `merge.<name>.driver` config
+take effect. See [Custom merge drivers](#custom-merge-drivers) for the
+driver setup.
 
 1. **Batch branch creation** — A new branch `merge-queue/batch-<ID>` is
    created from the current tip of `main` using the
    [Create a reference](https://docs.github.com/en/rest/git/refs#create-a-reference)
-   API (`POST /repos/{owner}/{repo}/git/refs`).
+   API (`POST /repos/{owner}/{repo}/git/refs`), then fetched and
+   checked out locally.
 
-2. **Server-side merges** — Each PR's head ref is merged into the batch
-   branch using the
-   [Merge a branch](https://docs.github.com/en/rest/branches/branches#merge-a-branch)
-   API (`POST /repos/{owner}/{repo}/merges`). This merges each PR into
-   the batch branch, typically producing a merge commit when the histories
-   have diverged (using the message `Merge PR #N: <title>` when such a
-   merge commit is created). If a PR produces a merge conflict (HTTP 409),
-   it is skipped and labelled `queue:failed`; remaining PRs continue.
+2. **Local merges** — Each PR's head SHA is fetched and merged into
+   the batch branch with `git merge --no-ff -m "Merge PR #N: <title>"`.
+   Because the merge runs locally, `.gitattributes` and any registered
+   `merge.<name>.driver` config are consulted exactly as they would be
+   for a developer running `git merge`. If a PR still conflicts after
+   drivers run, the action aborts that merge, leaves the working tree
+   clean, skips the PR, and labels it `queue:failed`; remaining PRs
+   continue. The resulting batch branch is pushed to `origin` before
+   CI is triggered.
 
 3. **CI verification** — The CI workflow is triggered on the batch branch
    via `workflow_dispatch`. Because the batch branch contains the result
@@ -99,6 +106,43 @@ Worst case: after the initial failed full-batch CI run, bisection needs
 `ceil(log₂(N)) + 1` additional CI runs to isolate a single failing PR.
 
 ## Repository setup
+
+### Upgrading from 0.3.x
+
+`v0.4.0` moves per-PR merges from GitHub's server-side merge endpoint
+to a local `git merge` in the runner so committed `.gitattributes`
+and `merge.<name>.driver` configs take effect. **Workflows must now
+include an `actions/checkout` step** with a pushable token before
+the `merge-queue-action` step. The minimal change to an existing
+0.3.x workflow:
+
+```diff
+ jobs:
+   queue:
+     runs-on: ubuntu-latest
+     steps:
++      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
++        with:
++          fetch-depth: 0
++          token: ${{ secrets.MERGE_QUEUE_TOKEN }}
++
++      - name: Configure git identity
++        run: |
++          git config user.email "merge-queue@users.noreply.github.com"
++          git config user.name  "merge-queue-bot"
++
+       - uses: jeduden/merge-queue-action@fef14f3a0c1d10ad387b002cdfb322ee113b9723 # v0.4.0
+         with:
+           token: ${{ secrets.MERGE_QUEUE_TOKEN }}
+           ci_workflow: .github/workflows/ci.yml
+```
+
+`fetch-depth: 0` is required — the action refuses early on a shallow
+clone with a targeted error pointing here. The token on
+`actions/checkout` must match the one on the action step (typically
+`MERGE_QUEUE_TOKEN`) so the batch-branch push is authorized by the
+same actor that bypasses your ruleset. No other inputs changed; the
+default merge behaviour is otherwise identical.
 
 ### Required repository / ruleset configuration
 
@@ -207,7 +251,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - run: npm test
 ```
 
@@ -310,7 +354,20 @@ jobs:
   queue:
     runs-on: ubuntu-latest
     steps:
-      - uses: jeduden/merge-queue-action@v0.3.0
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.MERGE_QUEUE_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config user.email "merge-queue@users.noreply.github.com"
+          git config user.name  "merge-queue-bot"
+
+      # Optional: register any custom merge drivers here, e.g.
+      #   git config merge.lockfile.driver ".merge-drivers/lockfile.sh %O %A %B %L %P"
+
+      - uses: jeduden/merge-queue-action@fef14f3a0c1d10ad387b002cdfb322ee113b9723 # v0.4.0
         with:
           token: ${{ secrets.MERGE_QUEUE_TOKEN }}
           ci_workflow: .github/workflows/ci.yml
@@ -318,6 +375,33 @@ jobs:
           bisect: ${{ github.event.inputs.bisect }}
           batch_prs: ${{ github.event.inputs.batch_prs }}
 ```
+
+> **About the merge-queue-action SHA above.** The pin
+> `fef14f3a0c1d10ad387b002cdfb322ee113b9723` is the head of the
+> branch that ships v0.4.0 — it's the same code that the v0.4.0 tag
+> will point at once cut. Once the release is published, re-pin to
+> the SHA from the
+> [v0.4.0 release page](https://github.com/jeduden/merge-queue-action/releases/tag/v0.4.0)
+> or run `gh api repos/jeduden/merge-queue-action/git/ref/tags/v0.4.0`
+> and copy `.object.sha` so the trailing `# v0.4.0` comment matches
+> a real published tag.
+
+The `actions/checkout` step is required — the action runs `git merge`
+locally so custom merge drivers can take effect. Use your
+`MERGE_QUEUE_TOKEN` on `actions/checkout` (not the default
+`GITHUB_TOKEN`) so the subsequent batch-branch push is authorized by
+the same actor that bypasses your ruleset.
+
+> **On action pinning**: the snippets in this README pin
+> `actions/checkout` and `jeduden/merge-queue-action` to full commit
+> SHAs (with a trailing `# v<n>` comment for readability) rather than
+> floating tags. Tags are mutable on GitHub and mutable refs in a CI
+> workflow are a supply-chain risk; pin to the SHA you've reviewed
+> and update it deliberately. Re-pin with
+> `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` (note the singular
+> `ref` — this is the documented "Get a reference" endpoint and
+> returns `.object.sha` directly) or the GitHub web UI's
+> "Browse at this version".
 
 ### 2. Set up your CI workflow and token
 
@@ -361,6 +445,114 @@ success.
 | `queue_label` | no | `queue` | Label that enqueues a PR |
 | `dry_run` | no | `false` | Log intent without mutating |
 
+## Custom merge drivers
+
+Git supports [custom merge drivers](https://git-scm.com/docs/gitattributes#_defining_a_custom_merge_driver)
+for resolving conflicts on specific file types — e.g. auto-merging
+`package-lock.json`, `Cargo.lock`, `CHANGELOG.md`, or generated files
+that would otherwise conflict on every parallel PR.
+
+### How it works
+
+Per-PR merges run via `git merge` in the runner's checked-out working
+tree, so `git` consults your committed `.gitattributes` and dispatches
+to any registered `merge.<name>.driver`. Batch branch creation,
+fast-forward and deletion still go through the Git Data API, so
+rulesets and fast-forward-only semantics are unchanged. If a merge
+still conflicts after the driver runs, the PR is reported as
+conflicted and labelled `queue:failed`.
+
+> **Security note:** custom merge drivers execute arbitrary code in
+> the runner on every batched merge, with access to the runner's
+> environment — including `MERGE_QUEUE_TOKEN` if the workflow exposes
+> it. Anyone who can land a commit on a branch that feeds the queue
+> can change what the driver does, so treat `.merge-drivers/**` and
+> `.gitattributes` as protected paths: require code-owner review, or
+> gate them behind a ruleset the same way you gate `.github/workflows/`.
+
+### Repository-side setup
+
+The driver script **must be committed to the repository** so it is on
+disk after `actions/checkout` — if it isn't in the working tree at
+merge time, `git merge` has nothing to exec.
+
+1. **Commit the driver** into the repo, e.g.
+   `.merge-drivers/lockfile-merge.sh`. Make it executable and record the
+   bit in git:
+
+   ```bash
+   chmod +x .merge-drivers/lockfile-merge.sh
+   git add .merge-drivers/lockfile-merge.sh
+   git update-index --chmod=+x .merge-drivers/lockfile-merge.sh
+   ```
+
+   The driver must write the resolved content to `%A` and exit `0` on
+   success, non-zero on unresolvable conflict. See
+   [gitattributes(5)](https://git-scm.com/docs/gitattributes#_defining_a_custom_merge_driver)
+   for the full contract.
+
+2. **Commit `.gitattributes`** mapping paths to the driver name:
+
+   ```gitattributes
+   package-lock.json merge=lockfile
+   pnpm-lock.yaml    merge=lockfile
+   CHANGELOG.md      merge=union
+   ```
+
+   (`union` is a built-in driver; `lockfile` above is the custom one.)
+
+3. **Register the driver at runtime.** `merge.<name>.driver` lives in
+   `.git/config`, which is not tracked. The merge-queue workflow must
+   set it after checkout and before any merge runs:
+
+   ```yaml
+   - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+     with:
+       fetch-depth: 0
+       token: ${{ secrets.MERGE_QUEUE_TOKEN }}
+
+   - name: Register custom merge drivers
+     run: |
+       git config merge.lockfile.name "Auto-merge lockfiles"
+       git config merge.lockfile.driver ".merge-drivers/lockfile-merge.sh %O %A %B %L %P"
+       git config merge.lockfile.recursive binary
+   ```
+
+   The `%` placeholders are defined by git:
+
+   | Placeholder | Meaning |
+   |-------------|---------|
+   | `%O` | path to the common-ancestor version |
+   | `%A` | path to the current/ours version (driver writes result here) |
+   | `%B` | path to the other/theirs version |
+   | `%L` | conflict-marker size |
+   | `%P` | pathname of the file being merged |
+
+4. **Install any interpreters or tooling the driver needs** (Node,
+   Python, a specific CLI) as earlier steps in the same job, before the
+   merge-queue action runs.
+
+5. **Do not rely on `~/.gitconfig`** or user-scoped config — Actions
+   runners are ephemeral and the config must be set on every run.
+
+### Wiring it into the workflow
+
+Extend the [Quick start](#quick-start) workflow by registering the
+driver in the step that already sets the git identity:
+
+```yaml
+- name: Configure git identity and merge drivers
+  run: |
+    git config user.email "merge-queue@users.noreply.github.com"
+    git config user.name  "merge-queue-bot"
+    git config merge.lockfile.name   "Auto-merge lockfiles"
+    git config merge.lockfile.driver ".merge-drivers/lockfile-merge.sh %O %A %B %L %P"
+    git config merge.lockfile.recursive binary
+```
+
+Nothing else needs to change — the action picks the driver up from
+`.git/config` the moment it runs `git merge`.
+
 ## Development
 
 ### Prerequisites
@@ -391,14 +583,11 @@ npm run typecheck
 src/main.ts             Entry point
 src/action.ts           Action orchestration (process & bisect flows)
 src/github.ts           GitHub REST API client
-src/gitops.ts           Server-side git operations (branch, merge, fast-forward)
+src/gitops.ts           Git operations: branch refs via REST API, per-PR merges via local `git`
 src/queue.ts            Label state machine
 src/batch.ts            Batch branch creation and multi-PR merge
 src/bisect.ts           Pure split function for binary bisection
 ```
-
-All git operations (branch creation, merge, fast-forward, delete) use the
-GitHub REST API server-side — no local `git` binary is required.
 
 ## When to upgrade to a full merge-queue server
 

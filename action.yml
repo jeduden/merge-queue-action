@@ -1,7 +1,11 @@
 name: merge-queue
 description: >-
-  Bors-style merge queue with batching and bisection.
-  All git operations use the GitHub API server-side — no checkout needed.
+  Bors-style merge queue with batching and bisection. Merges PRs into
+  the batch branch locally via `git merge` so custom merge drivers
+  (.gitattributes + merge.<name>.driver) take effect. Requires
+  `actions/checkout` with `fetch-depth: 0` and a push-capable token
+  to run before this action — see the README's "Upgrading from
+  0.3.x" section.
 
 inputs:
   token:

@@ -825,7 +825,9 @@ describe("runProcess", () => {
     await runProcess(api, git, cfg, (m) => logs.push(m));
 
     expect(
-      logs.some((l) => l.includes("Warning: failed to delete branch")),
+      logs.some((l) =>
+        l.includes("Warning: failed to delete batch branch"),
+      ),
     ).toBe(true);
   });
 

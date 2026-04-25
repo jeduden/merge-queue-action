@@ -129,6 +129,57 @@ describe("CreateAndMerge", () => {
     expect(git.deleted).toContain("merge-queue/batch-err");
   });
 
+  it("warns via Reporter when the cleanup deleteBranch also fails", async () => {
+    // Two-level failure: mergeBranch throws (triggers cleanup), and
+    // the deleteBranch teardown itself throws. The Reporter.warn call
+    // should surface the teardown failure; the original merge error
+    // still propagates as the thrown exception.
+    const git: GitOperator = {
+      async createBranchFromRef() {},
+      async mergeBranch() {
+        throw new Error("boom-merge");
+      },
+      async pushBranch() {},
+      async fastForwardMain() {
+        return "sha";
+      },
+      async deleteBranch() {
+        throw new Error("boom-delete");
+      },
+    };
+    const warned: Array<{ msg: string; scope: number[] }> = [];
+    let scope: number[] = [];
+    const reporter = {
+      info: () => {},
+      async warn(msg: string) {
+        warned.push({ msg, scope: [...scope] });
+      },
+      async withScope<T>(prs: number[], fn: () => Promise<T>) {
+        const prev = scope;
+        scope = prs;
+        try {
+          return await fn();
+        } finally {
+          scope = prev;
+        }
+      },
+    };
+    const b = new Batch(git, false, nop, reporter);
+    await expect(
+      b.createAndMerge("err", [
+        { number: 7, headRef: "f", headSHA: "sha-f", title: "T" },
+      ]),
+    ).rejects.toThrow("merging PR #7");
+
+    expect(warned).toHaveLength(1);
+    expect(warned[0].msg).toContain("failed to delete batch branch");
+    expect(warned[0].msg).toContain("boom-delete");
+    // The warning is scoped to the batch's PRs (7) at the moment it
+    // fires — confirming Batch.createAndMerge set scope via
+    // reporter.withScope before calling GitOps.
+    expect(warned[0].scope).toEqual([7]);
+  });
+
   it("propagates CreateBranchFromRef error", async () => {
     const git = newMockGit();
     git.failOn = "createBranchFromRef";
