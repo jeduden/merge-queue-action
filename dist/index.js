@@ -30776,7 +30776,13 @@ function commentOperatorWarning(ctx, msg) {
     // Backticks are left alone — inside a blockquote they render as
     // inline code, which is the right treatment for command output.
     const MAX = 4000;
-    const trimmed = msg.length > MAX ? `${msg.slice(0, MAX - 1)}…` : msg;
+    // First normalise line endings: git on Windows runners emits CRLF,
+    // and a lone `\r` (classic Mac, occasional carriage-return-only
+    // progress lines from some subprocesses) shouldn't survive into
+    // the rendered Markdown either. Normalising before truncation
+    // also means the cap counts characters of normalised text.
+    const normalised = msg.replace(/\r\n?/g, "\n");
+    const trimmed = normalised.length > MAX ? `${normalised.slice(0, MAX - 1)}…` : normalised;
     const quoted = trimmed
         .split("\n")
         .map((line) => `> ${line}`)

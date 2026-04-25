@@ -102,6 +102,29 @@ describe("PRReporter", () => {
     expect(body).toContain("> third line");
   });
 
+  it("CRLF and lone CR in warn bodies are normalised so comments don't render with stray `\\r`", async () => {
+    const poster = makePoster();
+    const r = new PRReporter({
+      poster,
+      ctx,
+      log: () => {},
+      dryRun: false,
+    });
+    // Mix of CRLF (Windows / git on Windows runners) and a lone CR
+    // (some progress-style output). Both should reduce to LF and
+    // the resulting blockquote should not contain raw \r anywhere.
+    const crlfMix = "windows line\r\nunix line\nmac line\rfinal line";
+    await r.withScope([1], async () => {
+      await r.warn(crlfMix);
+    });
+    const body = poster.calls[0].body;
+    expect(body).not.toContain("\r");
+    expect(body).toContain("> windows line");
+    expect(body).toContain("> unix line");
+    expect(body).toContain("> mac line");
+    expect(body).toContain("> final line");
+  });
+
   it("very long warn bodies are truncated so comments don't blow up the thread", async () => {
     const poster = makePoster();
     const r = new PRReporter({
@@ -308,13 +331,17 @@ describe("loggingReporter", () => {
     expect(logged).toEqual(["Warning: scoped-warn"]);
   });
 
-  it("never throws, even if the log callback itself throws", async () => {
+  it("propagates exceptions from the log callback rather than swallowing them", async () => {
     const r = loggingReporter(() => {
       throw new Error("log-broken");
     });
-    // info synchronously calls log; if log throws, info propagates
-    // (documented behaviour — the contract is that callers pass a
-    // safe log function). warn is async and follows the same rule.
+    // Contract: a logging Reporter is a thin shim around the
+    // caller's log function. Unlike PRReporter (which catches
+    // poster failures so a flaky comment API can't abort the run),
+    // logging-callback failures here SHOULD propagate so the test
+    // / caller sees the bug in their own log function instead of
+    // silently dropping output. info is sync, warn is async — both
+    // surface the exception.
     expect(() => r.info("x")).toThrow("log-broken");
     await expect(r.warn("x")).rejects.toThrow("log-broken");
   });

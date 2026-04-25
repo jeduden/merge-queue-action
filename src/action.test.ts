@@ -14,28 +14,6 @@ import type {
   WorkflowRunResult,
 } from "./queue.js";
 import type { GitOperator } from "./batch.js";
-import { PRReporter, type Reporter } from "./reporter.js";
-
-/**
- * Build a Reporter that logs warnings into the test's `logs` array
- * and never posts PR comments (dryRun=true). Use this wherever a
- * test asserts on a "Warning: …" log line emitted from the
- * action's cleanup paths; otherwise the default noopReporter
- * swallows the warning and the assertion fails misleadingly.
- */
-function makeLoggingReporter(logs: string[]): Reporter {
-  return new PRReporter({
-    poster: { comment: async () => {} },
-    ctx: {
-      serverUrl: "https://github.com",
-      ownerRepo: "owner/repo",
-      actionRunUrl: "https://github.com/owner/repo/actions/runs/1",
-      queueLabel: "queue",
-    },
-    log: (m) => logs.push(m),
-    dryRun: true,
-  });
-}
 
 const CTX = {
   serverUrl: "https://github.com",
@@ -772,14 +750,7 @@ describe("runProcess", () => {
       throw new Error("delete failed");
     };
 
-    await runProcess(
-      api,
-      git,
-      cfg,
-      (m) => logs.push(m),
-      undefined,
-      makeLoggingReporter(logs),
-    );
+    await runProcess(api, git, cfg, (m) => logs.push(m));
 
     expect(
       logs.some((l) => l.includes("Warning: failed to delete empty batch branch")),
@@ -851,14 +822,7 @@ describe("runProcess", () => {
       throw new Error("delete failed");
     };
 
-    await runProcess(
-      api,
-      git,
-      cfg,
-      (m) => logs.push(m),
-      undefined,
-      makeLoggingReporter(logs),
-    );
+    await runProcess(api, git, cfg, (m) => logs.push(m));
 
     expect(
       logs.some((l) =>
@@ -902,14 +866,7 @@ describe("runProcess", () => {
       throw new Error("delete failed");
     };
 
-    await runProcess(
-      api,
-      git,
-      cfg,
-      (m) => logs.push(m),
-      undefined,
-      makeLoggingReporter(logs),
-    );
+    await runProcess(api, git, cfg, (m) => logs.push(m));
 
     expect(
       logs.some((l) => l.includes("Warning: failed to delete batch branch")),
@@ -1313,7 +1270,7 @@ describe("runBisect", () => {
     };
 
     await expect(
-      runBisect(api, git, cfg, (m) => logs.push(m), makeLoggingReporter(logs)),
+      runBisect(api, git, cfg, (m) => logs.push(m)),
     ).rejects.toThrow("locating bisect CI run");
 
     expect(
@@ -1463,7 +1420,7 @@ describe("runBisect", () => {
       throw new Error("delete failed");
     };
 
-    await runBisect(api, git, cfg, (m) => logs.push(m), makeLoggingReporter(logs));
+    await runBisect(api, git, cfg, (m) => logs.push(m));
 
     expect(
       logs.some((l) =>
