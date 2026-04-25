@@ -121,7 +121,7 @@ the `merge-queue-action` step. The minimal change to an existing
    queue:
      runs-on: ubuntu-latest
      steps:
-+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
++      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 +        with:
 +          fetch-depth: 0
 +          token: ${{ secrets.MERGE_QUEUE_TOKEN }}
@@ -131,7 +131,7 @@ the `merge-queue-action` step. The minimal change to an existing
 +          git config user.email "merge-queue@users.noreply.github.com"
 +          git config user.name  "merge-queue-bot"
 +
-       - uses: jeduden/merge-queue-action@<sha> # v0.4.0
+       - uses: jeduden/merge-queue-action@fef14f3a0c1d10ad387b002cdfb322ee113b9723 # v0.4.0
          with:
            token: ${{ secrets.MERGE_QUEUE_TOKEN }}
            ci_workflow: .github/workflows/ci.yml
@@ -251,7 +251,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - run: npm test
 ```
 
@@ -354,7 +354,7 @@ jobs:
   queue:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
           token: ${{ secrets.MERGE_QUEUE_TOKEN }}
@@ -367,7 +367,7 @@ jobs:
       # Optional: register any custom merge drivers here, e.g.
       #   git config merge.lockfile.driver ".merge-drivers/lockfile.sh %O %A %B %L %P"
 
-      - uses: jeduden/merge-queue-action@<commit-sha-of-v0.4.0-release> # v0.4.0
+      - uses: jeduden/merge-queue-action@fef14f3a0c1d10ad387b002cdfb322ee113b9723 # v0.4.0
         with:
           token: ${{ secrets.MERGE_QUEUE_TOKEN }}
           ci_workflow: .github/workflows/ci.yml
@@ -376,11 +376,15 @@ jobs:
           batch_prs: ${{ github.event.inputs.batch_prs }}
 ```
 
-> **Replace `<commit-sha-of-v0.4.0-release>` before using.** Look up
-> the SHA on the v0.4.0 [release page](https://github.com/jeduden/merge-queue-action/releases/tag/v0.4.0)
+> **About the merge-queue-action SHA above.** The pin
+> `fef14f3a0c1d10ad387b002cdfb322ee113b9723` is the head of the
+> branch that ships v0.4.0 — it's the same code that the v0.4.0 tag
+> will point at once cut. Once the release is published, re-pin to
+> the SHA from the
+> [v0.4.0 release page](https://github.com/jeduden/merge-queue-action/releases/tag/v0.4.0)
 > or run `gh api repos/jeduden/merge-queue-action/git/ref/tags/v0.4.0`
-> and copy `.object.sha`. The placeholder is intentional so adopters
-> can't accidentally land on a stale v0.3.x SHA.
+> and copy `.object.sha` so the trailing `# v0.4.0` comment matches
+> a real published tag.
 
 The `actions/checkout` step is required — the action runs `git merge`
 locally so custom merge drivers can take effect. Use your
@@ -502,7 +506,7 @@ merge time, `git merge` has nothing to exec.
    set it after checkout and before any merge runs:
 
    ```yaml
-   - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+   - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
      with:
        fetch-depth: 0
        token: ${{ secrets.MERGE_QUEUE_TOKEN }}
