@@ -118,6 +118,7 @@ and a pushable token:
   with:
     fetch-depth: 0
     token: ${{ secrets.MERGE_QUEUE_TOKEN }}
+    persist-credentials: true  # required — action pushes batch branches via git
 
 - name: Configure git identity
   run: |
@@ -125,10 +126,15 @@ and a pushable token:
     git config user.name  "merge-queue-bot"
 ```
 
-`fetch-depth: 0` is required — the action refuses early on a shallow
-clone. The token on `actions/checkout` must match the one on the
-action step (`MERGE_QUEUE_TOKEN`) so the batch-branch push is
-authorized by the same actor that bypasses your ruleset.
+- **`fetch-depth: 0`** — the action refuses early on a shallow clone.
+- **`token`** — must match the action step token (`MERGE_QUEUE_TOKEN`) so
+  the batch-branch push is authorized by the same actor that bypasses
+  your ruleset.
+- **`persist-credentials: true`** — `actions/checkout` stores the token in
+  git's credential helper so subsequent `git push` calls in the same job
+  are authenticated. The default is `true`, but set it explicitly so a
+  future change to the `actions/checkout` default cannot silently break
+  authentication.
 
 ### Required repository / ruleset configuration
 
@@ -346,6 +352,7 @@ jobs:
         with:
           fetch-depth: 0
           token: ${{ secrets.MERGE_QUEUE_TOKEN }}
+          persist-credentials: true  # required — action pushes batch branches via git
 
       - name: Configure git identity
         run: |
@@ -378,6 +385,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false  # CI only reads; no push needed
       - run: npm test
 ```
 
