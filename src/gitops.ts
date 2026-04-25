@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import type * as github from "@actions/github";
 import type { GitOperator } from "./batch.js";
-import { errorMessage, noopReporter, type Reporter } from "./reporter.js";
+import { errorMessage, silentReporter, type Reporter } from "./reporter.js";
 
 type Octokit = ReturnType<typeof github.getOctokit>;
 
@@ -82,7 +82,7 @@ export class GitOps implements GitOperator {
     this.repo = repo;
     this.exec = opts?.exec ?? defaultExec();
     this.log = opts?.log ?? (() => {});
-    this.reporter = opts?.reporter ?? noopReporter;
+    this.reporter = opts?.reporter ?? silentReporter;
   }
 
   private async git(args: string[]): Promise<ExecResult> {

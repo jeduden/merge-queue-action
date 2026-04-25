@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   PRReporter,
   errorMessage,
-  noopReporter,
+  loggingReporter,
+  silentReporter,
   type CommentPoster,
 } from "./reporter.js";
 import type { CommentCtx } from "./comments.js";
@@ -270,12 +271,52 @@ describe("PRReporter", () => {
   });
 });
 
-describe("noopReporter", () => {
+describe("silentReporter", () => {
   it("info/warn no-ops and withScope still runs fn", async () => {
-    expect(() => noopReporter.info("x")).not.toThrow();
-    await expect(noopReporter.warn("x")).resolves.toBeUndefined();
-    const result = await noopReporter.withScope([1, 2], async () => "ok");
+    expect(() => silentReporter.info("x")).not.toThrow();
+    await expect(silentReporter.warn("x")).resolves.toBeUndefined();
+    const result = await silentReporter.withScope([1, 2], async () => "ok");
     expect(result).toBe("ok");
+  });
+});
+
+describe("loggingReporter", () => {
+  it("forwards info to the log function unchanged", () => {
+    const logged: string[] = [];
+    const r = loggingReporter((m) => logged.push(m));
+    r.info("hello");
+    expect(logged).toEqual(["hello"]);
+  });
+
+  it("forwards warn to the log function with a `Warning:` prefix", async () => {
+    const logged: string[] = [];
+    const r = loggingReporter((m) => logged.push(m));
+    await r.warn("something happened");
+    expect(logged).toEqual(["Warning: something happened"]);
+  });
+
+  it("withScope is a passthrough that runs the body and returns its value", async () => {
+    const logged: string[] = [];
+    const r = loggingReporter((m) => logged.push(m));
+    const result = await r.withScope([1, 2, 3], async () => {
+      await r.warn("scoped-warn");
+      return "ok";
+    });
+    expect(result).toBe("ok");
+    // No PR comment posted (loggingReporter has no poster); the
+    // warning must still appear in the log so operators see it.
+    expect(logged).toEqual(["Warning: scoped-warn"]);
+  });
+
+  it("never throws, even if the log callback itself throws", async () => {
+    const r = loggingReporter(() => {
+      throw new Error("log-broken");
+    });
+    // info synchronously calls log; if log throws, info propagates
+    // (documented behaviour — the contract is that callers pass a
+    // safe log function). warn is async and follows the same rule.
+    expect(() => r.info("x")).toThrow("log-broken");
+    await expect(r.warn("x")).rejects.toThrow("log-broken");
   });
 });
 

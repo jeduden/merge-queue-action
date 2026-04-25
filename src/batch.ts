@@ -1,4 +1,4 @@
-import { errorMessage, noopReporter, type Reporter } from "./reporter.js";
+import { errorMessage, silentReporter, type Reporter } from "./reporter.js";
 
 /** GitOperator defines the interface for git operations. */
 export interface GitOperator {
@@ -47,7 +47,7 @@ export class Batch {
     this.git = git;
     this.dryRun = dryRun;
     this.log = log ?? (() => {});
-    this.reporter = reporter ?? noopReporter;
+    this.reporter = reporter ?? silentReporter;
   }
 
   /**

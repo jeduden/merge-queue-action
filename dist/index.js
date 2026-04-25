@@ -30040,8 +30040,13 @@ async function handleCIFailure(api, cfg, ctx, q, gitOps, reporter, prs, result, 
         });
     }
 }
-async function runProcess(api, gitOps, cfg, log, actor, reporter = reporter_js_1.noopReporter) {
+async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
     const ctx = requireCtx(cfg);
+    // Default to a log-only reporter so warnings always reach the run
+    // log even when callers (typically tests) don't thread a Reporter.
+    // Production callers (main.ts) pass a PRReporter that also posts
+    // PR comments.
+    const reporter = reporterArg ?? (0, reporter_js_1.loggingReporter)(log);
     // Check actor permission
     if (actor) {
         const perm = await api.getActorPermission(actor);
@@ -30281,7 +30286,10 @@ async function handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prM
         await postComment(api, n, (0, comments_js_1.commentRequeued)(ctx, reason), log);
     }
 }
-async function runBisect(api, gitOps, cfg, log, reporter = reporter_js_1.noopReporter) {
+async function runBisect(api, gitOps, cfg, log, reporterArg) {
+    // Same default rationale as runProcess: warnings should reach the
+    // run log even without an explicit reporter.
+    const reporter = reporterArg ?? (0, reporter_js_1.loggingReporter)(log);
     const ctx = requireCtx(cfg);
     const prListStr = cfg.batchPrs;
     if (!prListStr) {
@@ -30540,7 +30548,7 @@ class Batch {
         this.git = git;
         this.dryRun = dryRun;
         this.log = log ?? (() => { });
-        this.reporter = reporter ?? reporter_js_1.noopReporter;
+        this.reporter = reporter ?? reporter_js_1.silentReporter;
     }
     /**
      * Creates a batch branch from main and merges each PR into it.
@@ -31108,7 +31116,7 @@ class GitOps {
         this.repo = repo;
         this.exec = opts?.exec ?? defaultExec();
         this.log = opts?.log ?? (() => { });
-        this.reporter = opts?.reporter ?? reporter_js_1.noopReporter;
+        this.reporter = opts?.reporter ?? reporter_js_1.silentReporter;
     }
     async git(args) {
         return this.exec(args);
@@ -31550,8 +31558,9 @@ exports.Queue = Queue;
 "use strict";
 
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.PRReporter = exports.noopReporter = void 0;
+exports.PRReporter = exports.silentReporter = void 0;
 exports.errorMessage = errorMessage;
+exports.loggingReporter = loggingReporter;
 const comments_js_1 = __nccwpck_require__(9333);
 /**
  * Extract a short, readable message from an arbitrary thrown value.
@@ -31595,12 +31604,36 @@ function errorMessage(err) {
         return "unknown error";
     }
 }
-/** Default no-op reporter — handy for tests and for the `dryRun` path. */
-exports.noopReporter = {
+/**
+ * `silentReporter` discards everything (no log, no comment). Use
+ * sparingly — it deliberately violates the "warn must log"
+ * convention because it exists for tests / internal helpers that
+ * don't care about side effects. Production call sites should pass
+ * a `PRReporter` (logs + comments) or `loggingReporter` (logs only)
+ * so warnings always reach the run log.
+ */
+exports.silentReporter = {
     info: () => { },
     warn: async () => { },
     withScope: async (_prs, fn) => fn(),
 };
+/**
+ * `loggingReporter(log)` returns a Reporter that forwards `info`
+ * and `warn` to the provided log function but never posts comments.
+ * Useful when a layer has a `log` callback handy but no
+ * `CommentPoster` / `CommentCtx` — for example tests asserting on
+ * "Warning: …" strings, or any internal default that should still
+ * surface warnings in the run log.
+ */
+function loggingReporter(log) {
+    return {
+        info: (msg) => log(msg),
+        warn: async (msg) => {
+            log(`Warning: ${msg}`);
+        },
+        withScope: async (_prs, fn) => fn(),
+    };
+}
 /**
  * PRReporter is the production Reporter. Warnings are logged and,
  * when PRs are in scope, posted once per PR with a

@@ -47,6 +47,11 @@ export interface Reporter {
      * scope is active, degrades to log-only. Never throws — comment
      * failures are logged and swallowed so a flaky API call can't
      * abort the merge-queue run.
+     *
+     * Implementations are expected to log every `warn` call (so
+     * operators see every warning at least in the run log). The
+     * exception is `silentReporter` below, whose explicit purpose is
+     * to swallow output for tests/internal call sites that don't care.
      */
     warn(msg: string): Promise<void>;
     /**
@@ -55,8 +60,24 @@ export interface Reporter {
      */
     withScope<T>(prs: number[], fn: () => Promise<T>): Promise<T>;
 }
-/** Default no-op reporter — handy for tests and for the `dryRun` path. */
-export declare const noopReporter: Reporter;
+/**
+ * `silentReporter` discards everything (no log, no comment). Use
+ * sparingly — it deliberately violates the "warn must log"
+ * convention because it exists for tests / internal helpers that
+ * don't care about side effects. Production call sites should pass
+ * a `PRReporter` (logs + comments) or `loggingReporter` (logs only)
+ * so warnings always reach the run log.
+ */
+export declare const silentReporter: Reporter;
+/**
+ * `loggingReporter(log)` returns a Reporter that forwards `info`
+ * and `warn` to the provided log function but never posts comments.
+ * Useful when a layer has a `log` callback handy but no
+ * `CommentPoster` / `CommentCtx` — for example tests asserting on
+ * "Warning: …" strings, or any internal default that should still
+ * surface warnings in the run log.
+ */
+export declare function loggingReporter(log: (msg: string) => void): Reporter;
 export interface PRReporterOpts {
     poster: CommentPoster;
     ctx: CommentCtx;

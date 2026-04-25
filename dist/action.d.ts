@@ -24,6 +24,6 @@ export declare function hasWritePermission(perm: string): boolean;
  * Reads MERGE_QUEUE_WORKFLOW_FILE if set, otherwise parses GITHUB_WORKFLOW_REF.
  */
 export declare function selfWorkflowFile(): string;
-export declare function runProcess(api: FullAPI, gitOps: GitOperator, cfg: Config, log: (msg: string) => void, actor?: string, reporter?: Reporter): Promise<void>;
-export declare function runBisect(api: FullAPI, gitOps: GitOperator, cfg: Config, log: (msg: string) => void, reporter?: Reporter): Promise<void>;
+export declare function runProcess(api: FullAPI, gitOps: GitOperator, cfg: Config, log: (msg: string) => void, actor?: string, reporterArg?: Reporter): Promise<void>;
+export declare function runBisect(api: FullAPI, gitOps: GitOperator, cfg: Config, log: (msg: string) => void, reporterArg?: Reporter): Promise<void>;
 export declare function runSetup(api: GitHubAPI, cfg: Config, log: (msg: string) => void): Promise<void>;

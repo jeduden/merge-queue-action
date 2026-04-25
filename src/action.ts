@@ -10,7 +10,11 @@ import {
 } from "./queue.js";
 import { Batch, type BatchPR, type MergeResult, type GitOperator } from "./batch.js";
 import { split } from "./bisect.js";
-import { errorMessage, noopReporter, type Reporter } from "./reporter.js";
+import {
+  errorMessage,
+  loggingReporter,
+  type Reporter,
+} from "./reporter.js";
 import {
   type CommentCtx,
   formatErrorForComment,
@@ -189,9 +193,14 @@ export async function runProcess(
   cfg: Config,
   log: (msg: string) => void,
   actor?: string,
-  reporter: Reporter = noopReporter,
+  reporterArg?: Reporter,
 ): Promise<void> {
   const ctx = requireCtx(cfg);
+  // Default to a log-only reporter so warnings always reach the run
+  // log even when callers (typically tests) don't thread a Reporter.
+  // Production callers (main.ts) pass a PRReporter that also posts
+  // PR comments.
+  const reporter: Reporter = reporterArg ?? loggingReporter(log);
 
   // Check actor permission
   if (actor) {
@@ -523,8 +532,11 @@ export async function runBisect(
   gitOps: GitOperator,
   cfg: Config,
   log: (msg: string) => void,
-  reporter: Reporter = noopReporter,
+  reporterArg?: Reporter,
 ): Promise<void> {
+  // Same default rationale as runProcess: warnings should reach the
+  // run log even without an explicit reporter.
+  const reporter: Reporter = reporterArg ?? loggingReporter(log);
   const ctx = requireCtx(cfg);
   const prListStr = cfg.batchPrs;
   if (!prListStr) {
