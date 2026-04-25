@@ -315,7 +315,9 @@ tested together in a single batch, reducing total CI runs.
 
 ## Quick start
 
-### 1. Create a merge-queue workflow
+### 1. Create the workflow files
+
+**`.github/workflows/merge-queue.yml`** — processes the queue:
 
 ```yaml
 # .github/workflows/merge-queue.yml
@@ -362,27 +364,30 @@ jobs:
           batch_prs: ${{ github.event.inputs.batch_prs }}
 ```
 
-The `actions/checkout` step is required — the action runs `git merge`
-locally so custom merge drivers can take effect. Use your
-`MERGE_QUEUE_TOKEN` on `actions/checkout` (not the default
-`GITHUB_TOKEN`) so the subsequent batch-branch push is authorized by
-the same actor that bypasses your ruleset.
+**`.github/workflows/ci.yml`** — your existing CI; just add `workflow_dispatch`:
 
-> **On action pinning**: the snippets in this README pin
-> `actions/checkout` and `jeduden/merge-queue-action` to full commit
-> SHAs (with a trailing `# v<n>` comment for readability) rather than
-> floating tags. Tags are mutable on GitHub and mutable refs in a CI
-> workflow are a supply-chain risk; pin to the SHA you've reviewed
-> and update it deliberately. Re-pin with
-> `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` (note the singular
-> `ref` — this is the documented "Get a reference" endpoint and
-> returns `.object.sha` directly) or the GitHub web UI's
-> "Browse at this version".
+```yaml
+# .github/workflows/ci.yml
+name: CI
+on:
+  pull_request:
+  workflow_dispatch:   # Required — merge-queue-action triggers CI on batch branches
 
-### 2. Set up your CI workflow and token
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - run: npm test
+```
 
-See [CI workflow requirements](#ci-workflow-requirements) and
-[Token requirements](#token-requirements) above.
+### 2. Create a token
+
+The default `GITHUB_TOKEN` cannot trigger `workflow_dispatch` on other
+workflows. Create a **fine-grained PAT** (or GitHub App token) with
+`contents:write`, `pull-requests:write`, `actions:write`,
+`issues:write` and store it as a repository secret named
+`MERGE_QUEUE_TOKEN`.
 
 ### 3. Configure branch protection
 
