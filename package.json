@@ -1,7 +1,8 @@
 {
   "name": "merge-queue-action",
-  "version": "0.4.0",
+  "version": "0.6.1",
   "private": true,
+  "type": "module",
   "description": "Bors-style merge queue with batching and bisection",
   "main": "dist/index.js",
   "scripts": {
@@ -12,8 +13,8 @@
     "lint": "biome lint --error-on-warnings src"
   },
   "dependencies": {
-    "@actions/core": "^1.11.1",
-    "@actions/github": "^6.0.0"
+    "@actions/core": "^3.0.1",
+    "@actions/github": "^9.1.1"
   },
   "devDependencies": {
     "@biomejs/biome": "2.4.12",
