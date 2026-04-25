@@ -107,42 +107,28 @@ Worst case: after the initial failed full-batch CI run, bisection needs
 
 ## Repository setup
 
-### Upgrading from 0.3.x
+### Workflow requirements
 
-`v0.4.0` moves per-PR merges from GitHub's server-side merge endpoint
-to a local `git merge` in the runner so committed `.gitattributes`
-and `merge.<name>.driver` configs take effect. **Workflows must now
-include an `actions/checkout` step** with a pushable token before
-the `merge-queue-action` step. The minimal change to an existing
-0.3.x workflow:
+The merge-queue workflow must include an `actions/checkout` step
+**before** the `merge-queue-action` step, with `fetch-depth: 0`
+and a pushable token:
 
-```diff
- jobs:
-   queue:
-     runs-on: ubuntu-latest
-     steps:
-+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-+        with:
-+          fetch-depth: 0
-+          token: ${{ secrets.MERGE_QUEUE_TOKEN }}
-+
-+      - name: Configure git identity
-+        run: |
-+          git config user.email "merge-queue@users.noreply.github.com"
-+          git config user.name  "merge-queue-bot"
-+
-       - uses: jeduden/merge-queue-action@fef14f3a0c1d10ad387b002cdfb322ee113b9723 # v0.4.0
-         with:
-           token: ${{ secrets.MERGE_QUEUE_TOKEN }}
-           ci_workflow: .github/workflows/ci.yml
+```yaml
+- uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+  with:
+    fetch-depth: 0
+    token: ${{ secrets.MERGE_QUEUE_TOKEN }}
+
+- name: Configure git identity
+  run: |
+    git config user.email "merge-queue@users.noreply.github.com"
+    git config user.name  "merge-queue-bot"
 ```
 
 `fetch-depth: 0` is required — the action refuses early on a shallow
-clone with a targeted error pointing here. The token on
-`actions/checkout` must match the one on the action step (typically
-`MERGE_QUEUE_TOKEN`) so the batch-branch push is authorized by the
-same actor that bypasses your ruleset. No other inputs changed; the
-default merge behaviour is otherwise identical.
+clone. The token on `actions/checkout` must match the one on the
+action step (`MERGE_QUEUE_TOKEN`) so the batch-branch push is
+authorized by the same actor that bypasses your ruleset.
 
 ### Required repository / ruleset configuration
 
@@ -367,7 +353,7 @@ jobs:
       # Optional: register any custom merge drivers here, e.g.
       #   git config merge.lockfile.driver ".merge-drivers/lockfile.sh %O %A %B %L %P"
 
-      - uses: jeduden/merge-queue-action@fef14f3a0c1d10ad387b002cdfb322ee113b9723 # v0.4.0
+      - uses: jeduden/merge-queue-action@5adb5a76e27e96f1da5efd36f097a2c5233e9ad3 # v0.6.0
         with:
           token: ${{ secrets.MERGE_QUEUE_TOKEN }}
           ci_workflow: .github/workflows/ci.yml
@@ -375,16 +361,6 @@ jobs:
           bisect: ${{ github.event.inputs.bisect }}
           batch_prs: ${{ github.event.inputs.batch_prs }}
 ```
-
-> **About the merge-queue-action SHA above.** The pin
-> `fef14f3a0c1d10ad387b002cdfb322ee113b9723` is the head of the
-> branch that ships v0.4.0 — it's the same code that the v0.4.0 tag
-> will point at once cut. Once the release is published, re-pin to
-> the SHA from the
-> [v0.4.0 release page](https://github.com/jeduden/merge-queue-action/releases/tag/v0.4.0)
-> or run `gh api repos/jeduden/merge-queue-action/git/ref/tags/v0.4.0`
-> and copy `.object.sha` so the trailing `# v0.4.0` comment matches
-> a real published tag.
 
 The `actions/checkout` step is required — the action runs `git merge`
 locally so custom merge drivers can take effect. Use your
