@@ -13,6 +13,112 @@ culprit in `ceil(log2(N)) + 1` CI runs.
 No external server. No GitHub native merge queue. Runs as a single
 Node.js-based GitHub Action — no compiled binary required.
 
+## Quick start
+
+### 1. Create the workflow files
+
+**`.github/workflows/merge-queue.yml`** — processes the queue:
+
+```yaml
+# .github/workflows/merge-queue.yml
+name: Merge Queue
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      batch_prs:
+        type: string
+        required: false
+      bisect:
+        type: boolean
+        default: false
+
+concurrency:
+  group: merge-queue
+  cancel-in-progress: false
+
+jobs:
+  queue:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.MERGE_QUEUE_TOKEN }}
+          persist-credentials: true  # required — action pushes batch branches via git
+
+      - name: Configure git identity
+        run: |
+          git config user.email "merge-queue@users.noreply.github.com"
+          git config user.name  "merge-queue-bot"
+
+      # Optional: register any custom merge drivers here, e.g.
+      #   git config merge.lockfile.driver ".merge-drivers/lockfile.sh %O %A %B %L %P"
+
+      - uses: jeduden/merge-queue-action@5adb5a76e27e96f1da5efd36f097a2c5233e9ad3 # v0.6.0
+        with:
+          token: ${{ secrets.MERGE_QUEUE_TOKEN }}
+          ci_workflow: .github/workflows/ci.yml
+          batch_size: "5"
+          bisect: ${{ github.event.inputs.bisect }}
+          batch_prs: ${{ github.event.inputs.batch_prs }}
+```
+
+**`.github/workflows/ci.yml`** — your existing CI; just add `workflow_dispatch`:
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+on:
+  pull_request:
+  workflow_dispatch:   # Required — merge-queue-action triggers CI on batch branches
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false  # CI only reads; no push needed
+      - run: npm test
+```
+
+### 2. Create a token
+
+The default `GITHUB_TOKEN` cannot trigger `workflow_dispatch` on other
+workflows. Create a **fine-grained PAT** (or GitHub App token) with
+`contents:write`, `pull-requests:write`, `actions:write`,
+`issues:write` and store it as a repository secret named
+`MERGE_QUEUE_TOKEN`.
+
+### 3. Configure branch protection
+
+The action fast-forwards `main` via the Git Refs API, so the merge-queue
+token's actor must be allowed to push. See
+[Required repository / ruleset configuration](#required-repository--ruleset-configuration)
+for detailed setup.
+
+### 4. Create the queue labels (one-time)
+
+The action uses three labels based on the `queue_label` input (default
+`queue`): `<base>`, `<base>:active`, and `<base>:failed`. Create them in
+your repository from the GitHub UI under **Issues → Labels** or with the
+GitHub CLI:
+
+```bash
+# Using the default queue_label ("queue"):
+gh label create queue --repo owner/repo
+gh label create queue:active --repo owner/repo
+gh label create queue:failed --repo owner/repo
+```
+
+### 5. Use it
+
+Add your queue label (default `queue`) to a PR. The merge-queue workflow
+triggers, batches it with any other queued PRs, runs CI, and merges on
+success.
+
 ## How it works
 
 1. PRs labelled `queue` are collected oldest-first.
@@ -107,42 +213,34 @@ Worst case: after the initial failed full-batch CI run, bisection needs
 
 ## Repository setup
 
-### Upgrading from 0.3.x
+### Workflow requirements
 
-`v0.4.0` moves per-PR merges from GitHub's server-side merge endpoint
-to a local `git merge` in the runner so committed `.gitattributes`
-and `merge.<name>.driver` configs take effect. **Workflows must now
-include an `actions/checkout` step** with a pushable token before
-the `merge-queue-action` step. The minimal change to an existing
-0.3.x workflow:
+The merge-queue workflow must include an `actions/checkout` step
+**before** the `merge-queue-action` step, with `fetch-depth: 0`
+and a pushable token:
 
-```diff
- jobs:
-   queue:
-     runs-on: ubuntu-latest
-     steps:
-+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-+        with:
-+          fetch-depth: 0
-+          token: ${{ secrets.MERGE_QUEUE_TOKEN }}
-+
-+      - name: Configure git identity
-+        run: |
-+          git config user.email "merge-queue@users.noreply.github.com"
-+          git config user.name  "merge-queue-bot"
-+
-       - uses: jeduden/merge-queue-action@fef14f3a0c1d10ad387b002cdfb322ee113b9723 # v0.4.0
-         with:
-           token: ${{ secrets.MERGE_QUEUE_TOKEN }}
-           ci_workflow: .github/workflows/ci.yml
+```yaml
+- uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+  with:
+    fetch-depth: 0
+    token: ${{ secrets.MERGE_QUEUE_TOKEN }}
+    persist-credentials: true  # required — action pushes batch branches via git
+
+- name: Configure git identity
+  run: |
+    git config user.email "merge-queue@users.noreply.github.com"
+    git config user.name  "merge-queue-bot"
 ```
 
-`fetch-depth: 0` is required — the action refuses early on a shallow
-clone with a targeted error pointing here. The token on
-`actions/checkout` must match the one on the action step (typically
-`MERGE_QUEUE_TOKEN`) so the batch-branch push is authorized by the
-same actor that bypasses your ruleset. No other inputs changed; the
-default merge behaviour is otherwise identical.
+- **`fetch-depth: 0`** — the action refuses early on a shallow clone.
+- **`token`** — must match the action step token (`MERGE_QUEUE_TOKEN`) so
+  the batch-branch push is authorized by the same actor that bypasses
+  your ruleset.
+- **`persist-credentials: true`** — `actions/checkout` stores the token in
+  git's credential helper so subsequent `git push` calls in the same job
+  are authenticated. The default is `true`, but set it explicitly so a
+  future change to the `actions/checkout` default cannot silently break
+  authentication.
 
 ### Required repository / ruleset configuration
 
@@ -326,114 +424,6 @@ tested together in a single batch, reducing total CI runs.
 > **What if `cancel-in-progress` is `true`?** Run A would be cancelled
 > when run B is triggered, leaving PR #1 stuck in `queue:active` with
 > no run to finish it. Always use `cancel-in-progress: false`.
-
-## Quick start
-
-### 1. Create a merge-queue workflow
-
-```yaml
-# .github/workflows/merge-queue.yml
-name: Merge Queue
-on:
-  pull_request:
-    types: [labeled]
-  workflow_dispatch:
-    inputs:
-      batch_prs:
-        type: string
-        required: false
-      bisect:
-        type: boolean
-        default: false
-
-concurrency:
-  group: merge-queue
-  cancel-in-progress: false
-
-jobs:
-  queue:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
-          token: ${{ secrets.MERGE_QUEUE_TOKEN }}
-
-      - name: Configure git identity
-        run: |
-          git config user.email "merge-queue@users.noreply.github.com"
-          git config user.name  "merge-queue-bot"
-
-      # Optional: register any custom merge drivers here, e.g.
-      #   git config merge.lockfile.driver ".merge-drivers/lockfile.sh %O %A %B %L %P"
-
-      - uses: jeduden/merge-queue-action@fef14f3a0c1d10ad387b002cdfb322ee113b9723 # v0.4.0
-        with:
-          token: ${{ secrets.MERGE_QUEUE_TOKEN }}
-          ci_workflow: .github/workflows/ci.yml
-          batch_size: "5"
-          bisect: ${{ github.event.inputs.bisect }}
-          batch_prs: ${{ github.event.inputs.batch_prs }}
-```
-
-> **About the merge-queue-action SHA above.** The pin
-> `fef14f3a0c1d10ad387b002cdfb322ee113b9723` is the head of the
-> branch that ships v0.4.0 — it's the same code that the v0.4.0 tag
-> will point at once cut. Once the release is published, re-pin to
-> the SHA from the
-> [v0.4.0 release page](https://github.com/jeduden/merge-queue-action/releases/tag/v0.4.0)
-> or run `gh api repos/jeduden/merge-queue-action/git/ref/tags/v0.4.0`
-> and copy `.object.sha` so the trailing `# v0.4.0` comment matches
-> a real published tag.
-
-The `actions/checkout` step is required — the action runs `git merge`
-locally so custom merge drivers can take effect. Use your
-`MERGE_QUEUE_TOKEN` on `actions/checkout` (not the default
-`GITHUB_TOKEN`) so the subsequent batch-branch push is authorized by
-the same actor that bypasses your ruleset.
-
-> **On action pinning**: the snippets in this README pin
-> `actions/checkout` and `jeduden/merge-queue-action` to full commit
-> SHAs (with a trailing `# v<n>` comment for readability) rather than
-> floating tags. Tags are mutable on GitHub and mutable refs in a CI
-> workflow are a supply-chain risk; pin to the SHA you've reviewed
-> and update it deliberately. Re-pin with
-> `gh api repos/<owner>/<repo>/git/ref/tags/<tag>` (note the singular
-> `ref` — this is the documented "Get a reference" endpoint and
-> returns `.object.sha` directly) or the GitHub web UI's
-> "Browse at this version".
-
-### 2. Set up your CI workflow and token
-
-See [CI workflow requirements](#ci-workflow-requirements) and
-[Token requirements](#token-requirements) above.
-
-### 3. Configure branch protection
-
-The action fast-forwards `main` via the Git Refs API, so the merge-queue
-token's actor must be allowed to push. See
-[Required repository / ruleset configuration](#required-repository--ruleset-configuration)
-for detailed setup.
-
-### 4. Create the queue labels (one-time)
-
-The action uses three labels based on the `queue_label` input (default
-`queue`): `<base>`, `<base>:active`, and `<base>:failed`. Create them in
-your repository from the GitHub UI under **Issues → Labels** or with the
-GitHub CLI:
-
-```bash
-# Using the default queue_label ("queue"):
-gh label create queue --repo owner/repo
-gh label create queue:active --repo owner/repo
-gh label create queue:failed --repo owner/repo
-```
-
-### 5. Use it
-
-Add your queue label (default `queue`) to a PR. The merge-queue workflow
-triggers, batches it with any other queued PRs, runs CI, and merges on
-success.
 
 ## Inputs
 
