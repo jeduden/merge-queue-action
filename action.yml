@@ -2,10 +2,10 @@ name: merge-queue
 description: >-
   Bors-style merge queue with batching and bisection. Merges PRs into
   the batch branch locally via `git merge` so custom merge drivers
-  (.gitattributes + merge.<name>.driver) take effect. Requires
-  `actions/checkout` with `fetch-depth: 0` and a push-capable token
-  to run before this action — see the README's "Upgrading from
-  0.3.x" section.
+  (.gitattributes + merge.<name>.driver) take effect. The action
+  configures git identity and rewrites `origin` to use the supplied
+  token, so the only workflow-side step required before it is
+  `actions/checkout` with `fetch-depth: 0`.
 
 inputs:
   token:
@@ -36,6 +36,16 @@ inputs:
     description: >-
       Run in bisect mode (set automatically via workflow_dispatch)
     default: "false"
+  git_user_email:
+    description: >-
+      Email used for the merge commit author/committer. Set on the
+      local repo via `git config user.email` before merging.
+    default: merge-queue@users.noreply.github.com
+  git_user_name:
+    description: >-
+      Name used for the merge commit author/committer. Set on the
+      local repo via `git config user.name` before merging.
+    default: merge-queue-bot
 
 runs:
   using: node24

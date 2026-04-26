@@ -14,6 +14,8 @@ interface EntryInputs {
   dryRun: boolean;
   batchPrs: string;
   bisect: boolean;
+  gitUserEmail: string;
+  gitUserName: string;
 }
 
 function loadInputs(): EntryInputs {
@@ -25,6 +27,10 @@ function loadInputs(): EntryInputs {
     dryRun: core.getInput("dry_run") === "true",
     batchPrs: core.getInput("batch_prs") || "",
     bisect: core.getInput("bisect") === "true",
+    gitUserEmail:
+      core.getInput("git_user_email") ||
+      "merge-queue@users.noreply.github.com",
+    gitUserName: core.getInput("git_user_name") || "merge-queue-bot",
   };
 }
 
@@ -72,6 +78,18 @@ async function run(): Promise<void> {
     batchPrs: inputs.batchPrs,
     commentCtx,
   };
+
+  // Configure git identity and rewrite the `origin` remote to embed
+  // the merge-queue token. Done here (not in the user's workflow) so
+  // consumers only need an `actions/checkout` step before this action.
+  // `dry_run` still configures git so subsequent local-only ops keep
+  // working — only the network steps are gated by `dryRun` later on.
+  await gitOps.configureGit({
+    token: inputs.token,
+    userEmail: inputs.gitUserEmail,
+    userName: inputs.gitUserName,
+    serverUrl: process.env.GITHUB_SERVER_URL,
+  });
 
   if (inputs.bisect) {
     await runBisect(client, gitOps, cfg, log, reporter);
