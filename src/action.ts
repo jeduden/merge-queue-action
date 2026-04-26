@@ -709,12 +709,12 @@ export async function runBisect(
     try {
       await api.triggerWorkflow(cfg.ciWorkflow, result.branch);
     } catch (err) {
-      try {
-        await gitOps.deleteBranch(result.branch);
-      } catch {
-        /* best effort */
-      }
       if (isHttpConfigError(err)) {
+        try {
+          await gitOps.deleteBranch(result.branch);
+        } catch {
+          /* best effort */
+        }
         const detail =
           `CI workflow \`${cfg.ciWorkflow}\` could not be triggered` +
           ` (${(err as { status: number }).status}): ${formatErrorForComment(err)}.` +
@@ -730,6 +730,22 @@ export async function runBisect(
           }
           await postComment(api, n, commentConfigError(ctx, detail), log);
         }
+      } else {
+        // Transient error — requeue all still-candidate PRs so they don't get stuck
+        // in queue:active with no path forward (same recovery as findWorkflowRun failures).
+        await handleBisectObservationFailure(
+          api,
+          ctx,
+          q,
+          gitOps,
+          reporter,
+          prMap,
+          prNumbers,
+          excluded,
+          result.branch,
+          `failed to trigger bisect CI: ${formatErrorForComment(err)}`,
+          log,
+        );
       }
       throw new Error(
         `triggering CI for bisect: ${formatErrorForComment(err)}`,

@@ -1238,7 +1238,7 @@ describe("runBisect", () => {
     expect(api.labels.get(3)).toContain("queue");
   });
 
-  it("cleans up and throws on CI trigger failure in bisect (transient)", async () => {
+  it("requeues PRs and throws on transient CI trigger failure in bisect", async () => {
     const api = newMockAPI();
     api.prs.set("queue:active", [makePR(1), makePR(2)]);
     const git = newMockGit();
@@ -1250,7 +1250,13 @@ describe("runBisect", () => {
     await expect(runBisect(api, git, cfg, nop)).rejects.toThrow(
       "triggering CI for bisect",
     );
+    // Transient error: branch cleaned up and PRs requeued (not stuck in queue:active)
     expect(git.deleted.length).toBeGreaterThan(0);
+    for (const n of [1, 2]) {
+      expect(api.labels.get(n)).toContain("queue");
+      const c = api.comments.get(n) ?? [];
+      expect(c.some((s) => s.includes("— requeued"))).toBe(true);
+    }
   });
 
   it("marks PRs failed when ConfigurationError thrown from bisect createAndMerge", async () => {
@@ -1473,24 +1479,33 @@ describe("runBisect", () => {
     );
   });
 
-  it("tolerates inner deleteBranch failure when CI trigger fails in bisect", async () => {
+  it("requeues PRs and warns when deleteBranch also fails on transient CI trigger failure in bisect", async () => {
     const api = newMockAPI();
     api.prs.set("queue:active", [makePR(1), makePR(2)]);
     const git = newMockGit();
     const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+    const logs: string[] = [];
 
-    // CI trigger throws
+    // CI trigger throws with a transient error
     api.triggerWorkflow = async () => {
       throw new Error("trigger failed");
     };
-    // deleteBranch also throws — the inner best-effort catch must swallow it
+    // deleteBranch also throws inside handleBisectObservationFailure
     git.deleteBranch = async () => {
       throw new Error("delete failed");
     };
 
-    await expect(runBisect(api, git, cfg, nop)).rejects.toThrow(
+    await expect(runBisect(api, git, cfg, (m) => logs.push(m))).rejects.toThrow(
       "triggering CI for bisect",
     );
+    // handleBisectObservationFailure logs a warning for the branch-delete failure
+    expect(
+      logs.some((l) => l.includes("Warning: failed to delete bisect branch")),
+    ).toBe(true);
+    // PRs must still be requeued (not stuck in queue:active)
+    for (const n of [1, 2]) {
+      expect(api.labels.get(n)).toContain("queue");
+    }
   });
 
   it("tolerates removeLabel failure when posting merged comments in bisect", async () => {

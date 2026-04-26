@@ -20,3 +20,10 @@ export declare function commentBisecting(ctx: CommentCtx, batchBranch: string, l
  */
 export declare function commentOperatorWarning(ctx: CommentCtx, msg: string): string;
 export declare function commentRequeued(ctx: CommentCtx, reason: string): string;
+/**
+ * Posted when the merge queue action cannot proceed because the workflow is
+ * misconfigured (e.g. missing `actions/checkout`, shallow clone, wrong CI
+ * workflow name).  Unlike `commentRequeued`, this error will NOT resolve by
+ * itself — the operator must fix the issue before the PR can be retried.
+ */
+export declare function commentConfigError(ctx: CommentCtx, detail: string): string;
