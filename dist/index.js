@@ -36890,9 +36890,11 @@ class GitOps {
         const authedUrl = server.replace(/^(https?:\/\/)/, (_m, scheme) => `${scheme}x-access-token:${encodedToken}@`);
         // `gitOrThrow` formats failures as `git <args>: <stderr>`, which
         // would embed the raw URL — and therefore the token — in the
-        // thrown message. Catch and rethrow with a redacted message so the
-        // secret cannot leak via `core.setFailed` or run logs even if a
-        // sink bypasses Actions' built-in masker.
+        // thrown message. Catch and rethrow with the underlying detail
+        // sanitized so the secret cannot leak via `core.setFailed` or run
+        // logs even if a sink bypasses Actions' built-in masker, while
+        // still preserving the cause (lock contention, invalid URL, etc.)
+        // for diagnosis.
         try {
             await this.gitOrThrow([
                 "remote",
@@ -36901,8 +36903,16 @@ class GitOps {
                 `${authedUrl}/${this.owner}/${this.repo}.git`,
             ]);
         }
-        catch {
-            throw new Error(`failed to set origin remote URL to ${displayUrl} with token authentication`);
+        catch (err) {
+            const detail = errorMessage(err)
+                .split(opts.token)
+                .join("[REDACTED]")
+                .split(encodedToken)
+                .join("[REDACTED]")
+                // Catch-all for any other `https://user:pass@host` shape that
+                // might surface from a future git error format.
+                .replace(/(https?:\/\/[^/\s:@]+:)[^@/\s]+@/g, "$1[REDACTED]@");
+            throw new Error(`failed to set origin remote URL to ${displayUrl} with token authentication: ${detail}`);
         }
     }
     /**
@@ -38053,9 +38063,16 @@ async function run() {
     // does not register secrets automatically — only inputs sourced
     // from `secrets.*` are pre-masked by the runner — so we set it
     // explicitly to defend against a workflow that passes the token
-    // via `env:` or similar.
-    if (inputs.token)
+    // via `env:` or similar. Also mask the URL-encoded form because
+    // `configureGit` embeds `encodeURIComponent(token)` in the remote
+    // URL, and a token with reserved characters would render in git
+    // stderr in its encoded form rather than its raw form.
+    if (inputs.token) {
         core_setSecret(inputs.token);
+        const encoded = encodeURIComponent(inputs.token);
+        if (encoded !== inputs.token)
+            core_setSecret(encoded);
+    }
     const { owner, repo } = github_context.repo;
     const log = info;
     const client = new GitHubClient(inputs.token, owner, repo, log);
@@ -38070,6 +38087,18 @@ async function run() {
     log(`Repository context: ${owner}/${repo} (GITHUB_REPOSITORY=${process.env.GITHUB_REPOSITORY ?? "unset"})`);
     log(`Queue label: "${inputs.queueLabel}" batchSize=${inputs.batchSize} dryRun=${inputs.dryRun} bisect=${inputs.bisect}`);
     const actor = process.env.GITHUB_ACTOR;
+    // Pre-flight actor permission check. `runProcess` re-checks this as
+    // defense in depth, but doing it here lets us short-circuit before
+    // mutating the worktree via `configureGit`. Skipped in `bisect`
+    // mode because the entry point for bisect is `workflow_dispatch`,
+    // which is already restricted by repo settings.
+    if (!inputs.bisect && actor) {
+        const perm = await client.getActorPermission(actor);
+        if (!hasWritePermission(perm)) {
+            log(`Actor ${actor} has "${perm}" permission, write or above required — skipping`);
+            return;
+        }
+    }
     const cfg = {
         ciWorkflow: inputs.ciWorkflow,
         batchSize: inputs.batchSize,
@@ -38081,14 +38110,19 @@ async function run() {
     // Configure git identity and rewrite the `origin` remote to embed
     // the merge-queue token. Done here (not in the user's workflow) so
     // consumers only need an `actions/checkout` step before this action.
-    // `dry_run` still configures git so subsequent local-only ops keep
-    // working — only the network steps are gated by `dryRun` later on.
-    await gitOps.configureGit({
-        token: inputs.token,
-        userEmail: inputs.gitUserEmail,
-        userName: inputs.gitUserName,
-        serverUrl: process.env.GITHUB_SERVER_URL,
-    });
+    // Skipped in `dry_run` so the contract "log intent without mutating"
+    // also holds for `.git/config`.
+    if (!inputs.dryRun) {
+        await gitOps.configureGit({
+            token: inputs.token,
+            userEmail: inputs.gitUserEmail,
+            userName: inputs.gitUserName,
+            serverUrl: process.env.GITHUB_SERVER_URL,
+        });
+    }
+    else {
+        log("dry_run enabled — skipping git identity/remote configuration");
+    }
     if (inputs.bisect) {
         await runBisect(client, gitOps, cfg, log, reporter);
     }

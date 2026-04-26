@@ -145,9 +145,11 @@ export class GitOps implements GitOperator {
     );
     // `gitOrThrow` formats failures as `git <args>: <stderr>`, which
     // would embed the raw URL — and therefore the token — in the
-    // thrown message. Catch and rethrow with a redacted message so the
-    // secret cannot leak via `core.setFailed` or run logs even if a
-    // sink bypasses Actions' built-in masker.
+    // thrown message. Catch and rethrow with the underlying detail
+    // sanitized so the secret cannot leak via `core.setFailed` or run
+    // logs even if a sink bypasses Actions' built-in masker, while
+    // still preserving the cause (lock contention, invalid URL, etc.)
+    // for diagnosis.
     try {
       await this.gitOrThrow([
         "remote",
@@ -155,9 +157,17 @@ export class GitOps implements GitOperator {
         "origin",
         `${authedUrl}/${this.owner}/${this.repo}.git`,
       ]);
-    } catch {
+    } catch (err) {
+      const detail = errorMessage(err)
+        .split(opts.token)
+        .join("[REDACTED]")
+        .split(encodedToken)
+        .join("[REDACTED]")
+        // Catch-all for any other `https://user:pass@host` shape that
+        // might surface from a future git error format.
+        .replace(/(https?:\/\/[^/\s:@]+:)[^@/\s]+@/g, "$1[REDACTED]@");
       throw new Error(
-        `failed to set origin remote URL to ${displayUrl} with token authentication`,
+        `failed to set origin remote URL to ${displayUrl} with token authentication: ${detail}`,
       );
     }
   }

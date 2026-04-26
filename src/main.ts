@@ -3,7 +3,12 @@ import * as github from "@actions/github";
 import { GitHubClient } from "./github.js";
 import { GitOps } from "./gitops.js";
 import { PRReporter } from "./reporter.js";
-import { runProcess, runBisect, type Config } from "./action.js";
+import {
+  hasWritePermission,
+  runProcess,
+  runBisect,
+  type Config,
+} from "./action.js";
 import type { CommentCtx } from "./comments.js";
 
 interface EntryInputs {
@@ -57,8 +62,15 @@ async function run(): Promise<void> {
   // does not register secrets automatically — only inputs sourced
   // from `secrets.*` are pre-masked by the runner — so we set it
   // explicitly to defend against a workflow that passes the token
-  // via `env:` or similar.
-  if (inputs.token) core.setSecret(inputs.token);
+  // via `env:` or similar. Also mask the URL-encoded form because
+  // `configureGit` embeds `encodeURIComponent(token)` in the remote
+  // URL, and a token with reserved characters would render in git
+  // stderr in its encoded form rather than its raw form.
+  if (inputs.token) {
+    core.setSecret(inputs.token);
+    const encoded = encodeURIComponent(inputs.token);
+    if (encoded !== inputs.token) core.setSecret(encoded);
+  }
   const { owner, repo } = github.context.repo;
   const log = core.info;
   const client = new GitHubClient(inputs.token, owner, repo, log);
@@ -78,6 +90,21 @@ async function run(): Promise<void> {
   );
   const actor = process.env.GITHUB_ACTOR;
 
+  // Pre-flight actor permission check. `runProcess` re-checks this as
+  // defense in depth, but doing it here lets us short-circuit before
+  // mutating the worktree via `configureGit`. Skipped in `bisect`
+  // mode because the entry point for bisect is `workflow_dispatch`,
+  // which is already restricted by repo settings.
+  if (!inputs.bisect && actor) {
+    const perm = await client.getActorPermission(actor);
+    if (!hasWritePermission(perm)) {
+      log(
+        `Actor ${actor} has "${perm}" permission, write or above required — skipping`,
+      );
+      return;
+    }
+  }
+
   const cfg: Config = {
     ciWorkflow: inputs.ciWorkflow,
     batchSize: inputs.batchSize,
@@ -90,14 +117,18 @@ async function run(): Promise<void> {
   // Configure git identity and rewrite the `origin` remote to embed
   // the merge-queue token. Done here (not in the user's workflow) so
   // consumers only need an `actions/checkout` step before this action.
-  // `dry_run` still configures git so subsequent local-only ops keep
-  // working — only the network steps are gated by `dryRun` later on.
-  await gitOps.configureGit({
-    token: inputs.token,
-    userEmail: inputs.gitUserEmail,
-    userName: inputs.gitUserName,
-    serverUrl: process.env.GITHUB_SERVER_URL,
-  });
+  // Skipped in `dry_run` so the contract "log intent without mutating"
+  // also holds for `.git/config`.
+  if (!inputs.dryRun) {
+    await gitOps.configureGit({
+      token: inputs.token,
+      userEmail: inputs.gitUserEmail,
+      userName: inputs.gitUserName,
+      serverUrl: process.env.GITHUB_SERVER_URL,
+    });
+  } else {
+    log("dry_run enabled — skipping git identity/remote configuration");
+  }
 
   if (inputs.bisect) {
     await runBisect(client, gitOps, cfg, log, reporter);

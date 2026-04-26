@@ -506,8 +506,15 @@ describe("GitOps with injected exec", () => {
       })
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(Error);
-    expect((err as Error).message).not.toContain(secret);
-    expect((err as Error).message).toContain("origin remote URL");
+    const msg = (err as Error).message;
+    // The secret must not appear anywhere — neither in the wrapper
+    // text nor in the underlying detail relayed from `gitOrThrow`.
+    expect(msg).not.toContain(secret);
+    // But the wrapper must include the underlying cause (with the
+    // token-bearing URL redacted) so failures stay diagnosable.
+    expect(msg).toContain("origin remote URL");
+    expect(msg).toContain("[REDACTED]");
+    expect(msg).toContain("fatal: bad URL");
   });
 
   it("deleteBranch deletes via refs API", async () => {
