@@ -514,9 +514,10 @@ merge time, `git merge` has nothing to exec.
    | `%P` | pathname of the file being merged |
 
 4. **Install every binary the driver invokes** as an earlier step in
-   the same job, before the merge-queue action runs. The runner is a
-   fresh ephemeral VM — only what your workflow installs is on `PATH`
-   when `git merge` execs the driver. This includes:
+   the same job, before the merge-queue action runs. When `git merge`
+   execs the driver, `PATH` resolves to the runner image's preinstalled
+   baseline plus whatever your workflow installs — nothing else. This
+   includes:
 
    - **Language runtimes** the driver script is written in (`node`,
      `python`, `ruby`, …) — the shebang only works if the interpreter
@@ -538,7 +539,7 @@ merge time, `git merge` has nothing to exec.
      with:
        fetch-depth: 0
 
-   - uses: actions/setup-node@<commit-sha> # v4 — pin to a full SHA, see note below
+   - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
      with:
        node-version: "20"
    - run: npm ci   # so `npm install` inside the driver is fast / offline-ish
@@ -588,7 +589,7 @@ binaries the driver needs, and one to register the driver:
 # package managers, CLIs). Skip whatever your driver doesn't use.
 # Pin every action to a 40-char commit SHA — tags like @v4 are
 # mutable and these steps run with MERGE_QUEUE_TOKEN in scope.
-- uses: actions/setup-node@<commit-sha> # v4
+- uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
   with:
     node-version: "20"
 
