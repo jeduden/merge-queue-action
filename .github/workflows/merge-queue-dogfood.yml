@@ -29,6 +29,11 @@ concurrency:
   group: merge-queue
   cancel-in-progress: false
 
+# GITHUB_TOKEN only needs to clone the repo; the action uses
+# `secrets.MERGE_QUEUE_TOKEN` for its own API calls.
+permissions:
+  contents: read
+
 jobs:
   queue:
     runs-on: ubuntu-latest
