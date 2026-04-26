@@ -1,0 +1,57 @@
+name: Merge Queue (dogfood)
+
+# Dogfoods this action against its own repository so changes to
+# the label/event/queue/API/git logic exercise the real GitHub
+# API path before reaching downstream consumers (e.g. mdsmith).
+# Mirrors the simplified consumer setup (PR jeduden/mdsmith#173)
+# verbatim — the only difference is `uses: ./`, which runs the
+# local source under test instead of a pinned published SHA.
+#
+# One-time setup required to enable:
+#   - Create a "queue" label in this repo (Issues → Labels).
+#   - Configure a `MERGE_QUEUE_TOKEN` secret with contents:write,
+#     pull-requests:write, actions:write, and issues:write
+#     permissions — same shape a real consumer must provision.
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      batch_prs:
+        type: string
+        required: false
+      bisect:
+        type: boolean
+        default: false
+
+concurrency:
+  group: merge-queue
+  cancel-in-progress: false
+
+# GITHUB_TOKEN only needs to clone the repo; the action uses
+# `secrets.MERGE_QUEUE_TOKEN` for its own API calls.
+permissions:
+  contents: read
+
+jobs:
+  queue:
+    # Skip fork PRs: `pull_request` doesn't expose secrets to forks,
+    # so MERGE_QUEUE_TOKEN would be empty and the action would fail
+    # immediately. workflow_dispatch is always allowed.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - uses: ./
+        with:
+          token: ${{ secrets.MERGE_QUEUE_TOKEN }}
+          ci_workflow: .github/workflows/ci.yml
+          batch_size: "5"
+          bisect: ${{ github.event.inputs.bisect }}
+          batch_prs: ${{ github.event.inputs.batch_prs }}

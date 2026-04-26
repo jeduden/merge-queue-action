@@ -6,6 +6,12 @@ export interface PR {
     title: string;
     state?: "open" | "closed";
     createdAt: number;
+    /**
+     * Current label names on the PR. Optional because the issues-list
+     * code path filters by label and so callers don't need them; populated
+     * by `getPR` so callers can re-validate label state on a single PR.
+     */
+    labels?: string[];
 }
 export type LabelState = "" | "active" | "failed";
 export declare const STATE_PENDING: LabelState;

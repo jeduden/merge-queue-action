@@ -4,6 +4,7 @@ import { GitHubClient } from "./github.js";
 import { GitOps } from "./gitops.js";
 import { PRReporter } from "./reporter.js";
 import {
+  eventTriggerLabeledPR,
   hasWritePermission,
   runProcess,
   runBisect,
@@ -105,6 +106,16 @@ async function run(): Promise<void> {
     }
   }
 
+  const triggerLabeledPR = eventTriggerLabeledPR(
+    github.context,
+    inputs.queueLabel,
+  );
+  if (triggerLabeledPR !== undefined) {
+    log(
+      `Event trigger: pull_request:labeled with "${inputs.queueLabel}" on PR #${triggerLabeledPR}`,
+    );
+  }
+
   const cfg: Config = {
     ciWorkflow: inputs.ciWorkflow,
     batchSize: inputs.batchSize,
@@ -112,6 +123,7 @@ async function run(): Promise<void> {
     dryRun: inputs.dryRun,
     batchPrs: inputs.batchPrs,
     commentCtx,
+    triggerLabeledPR,
   };
 
   // Configure git identity and rewrite the `origin` remote to embed
