@@ -306,7 +306,7 @@ export async function runProcess(
       }
     } catch (err) {
       log(
-        `Warning: failed to fetch event-labeled PR #${cfg.triggerLabeledPR}: ${err}`,
+        `Warning: failed to fetch event-labeled PR #${cfg.triggerLabeledPR}: ${errorMessage(err)}`,
       );
     }
   }

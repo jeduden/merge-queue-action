@@ -37524,7 +37524,7 @@ async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
             }
         }
         catch (err) {
-            log(`Warning: failed to fetch event-labeled PR #${cfg.triggerLabeledPR}: ${err}`);
+            log(`Warning: failed to fetch event-labeled PR #${cfg.triggerLabeledPR}: ${errorMessage(err)}`);
         }
     }
     if (prs.length === 0) {

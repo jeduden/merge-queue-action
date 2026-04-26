@@ -494,11 +494,36 @@ describe("runProcess", () => {
       (m) => logs.push(m),
     );
     expect(
-      logs.some((l) =>
-        l.includes("Warning: failed to fetch event-labeled PR #99"),
+      logs.some(
+        (l) =>
+          l.includes("Warning: failed to fetch event-labeled PR #99") &&
+          l.includes("boom"),
       ),
     ).toBe(true);
     expect(logs).toContain("No PRs in queue");
+  });
+
+  it("formats non-Error rejections via errorMessage in fetch-failure log", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", []);
+    // A plain object — `${err}` would render this as "[object Object]".
+    api.getPR = async () => {
+      // biome-ignore lint/suspicious/noExplicitAny: exercising non-Error throw
+      throw { message: "octokit boom" } as any;
+    };
+    const git = newMockGit();
+    const logs: string[] = [];
+
+    await runProcess(
+      api,
+      git,
+      baseCfg({ triggerLabeledPR: 99 }),
+      (m) => logs.push(m),
+    );
+    const warn = logs.find((l) => l.includes("failed to fetch event-labeled"));
+    expect(warn).toBeDefined();
+    expect(warn).not.toContain("[object Object]");
+    expect(warn).toContain("octokit boom");
   });
 
   it("respects batch size when adding event-labeled PR", async () => {
