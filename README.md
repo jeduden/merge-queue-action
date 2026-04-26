@@ -538,7 +538,7 @@ merge time, `git merge` has nothing to exec.
      with:
        fetch-depth: 0
 
-   - uses: actions/setup-node@v4
+   - uses: actions/setup-node@<commit-sha> # v4 — pin to a full SHA, see note below
      with:
        node-version: "20"
    - run: npm ci   # so `npm install` inside the driver is fast / offline-ish
@@ -552,6 +552,21 @@ merge time, `git merge` has nothing to exec.
        token: ${{ secrets.MERGE_QUEUE_TOKEN }}
        ci_workflow: .github/workflows/ci.yml
    ```
+
+   > **Pin every install step to a commit SHA, not a tag.** The
+   > merge-queue workflow runs with `MERGE_QUEUE_TOKEN` in scope and
+   > pushes to `main`, so any action that runs before `merge-queue-action`
+   > is part of its trust boundary. Tags like `@v4` are mutable —
+   > whoever owns the upstream repo can repoint them at malicious
+   > code, which would then exfiltrate the token or alter merges.
+   > Use the same `<owner>/<action>@<40-char-SHA> # <human version>`
+   > form this README uses for `actions/checkout` and
+   > `jeduden/merge-queue-action`. Apt/curl/script-based installs
+   > should pin too: pin apt packages to a version, verify
+   > downloaded binaries against a checksum, and avoid
+   > `curl … | bash` from unpinned URLs. Dependabot's
+   > `package-ecosystem: "github-actions"` keeps the SHAs current
+   > without giving up the pin.
 
    If a binary is missing, `git merge` reports the driver as failed
    and the PR is labelled `queue:failed` — the failure surfaces as a
@@ -571,7 +586,9 @@ binaries the driver needs, and one to register the driver:
 ```yaml
 # Install any binaries the driver script invokes (interpreters,
 # package managers, CLIs). Skip whatever your driver doesn't use.
-- uses: actions/setup-node@v4
+# Pin every action to a 40-char commit SHA — tags like @v4 are
+# mutable and these steps run with MERGE_QUEUE_TOKEN in scope.
+- uses: actions/setup-node@<commit-sha> # v4
   with:
     node-version: "20"
 
@@ -587,6 +604,12 @@ The action picks the driver up from `.git/config` the moment it runs
 driver shells out to must already be installed by an earlier step.
 Identity (`user.email`/`user.name`) is set by the action itself, so
 you don't need to add it to this step.
+
+Every `uses:` step in the merge-queue workflow runs in the same job
+as `merge-queue-action`, with access to `MERGE_QUEUE_TOKEN` and the
+ability to alter the working tree before the merge. **Pin every one
+of them to a full commit SHA**, not a floating tag — see the note
+under [Repository-side setup](#repository-side-setup) above.
 
 ## Development
 
