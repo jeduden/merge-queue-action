@@ -741,6 +741,30 @@ describe("runProcess", () => {
     ).toBe(true);
   });
 
+  it("skips excluded (conflicted) PRs in the CI trigger 404 handler in runProcess", async () => {
+    // PR#1 conflicts → excluded; PR#2 merges; CI trigger returns 404.
+    // Verifies that the `if (excluded.has(pr.number)) continue` branch is taken.
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1), makePR(2)]);
+    const git = newMockGit();
+    git.conflictOn = "sha-1"; // PR#1 conflicts → excluded before CI trigger
+    const cfg = baseCfg({ dryRun: false });
+
+    api.triggerWorkflow = async () => {
+      throw Object.assign(new Error("Not Found"), { status: 404 });
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow("triggering CI");
+    // PR#1 was excluded: gets queue:failed from the conflict, NOT a config-error comment
+    expect(api.labels.get(1)).toContain("queue:failed");
+    const c1 = api.comments.get(1) ?? [];
+    expect(c1.some((s) => s.includes("action misconfigured"))).toBe(false);
+    // PR#2: gets the config-error treatment
+    expect(api.labels.get(2)).toContain("queue:failed");
+    const c2 = api.comments.get(2) ?? [];
+    expect(c2.some((s) => s.includes("action misconfigured"))).toBe(true);
+  });
+
   it("marks PRs failed and posts config error when CI trigger returns 404", async () => {
     const api = newMockAPI();
     api.prs.set("queue", [makePR(1), makePR(2)]);
@@ -1404,6 +1428,42 @@ describe("runBisect", () => {
     expect(
       logs.some((l) => l.includes("Warning: failed to mark PR")),
     ).toBe(true);
+  });
+
+  it("skips conflicted (excluded) PRs in the CI trigger 404 handler in runBisect", async () => {
+    // PRs [1,2,3]: left=[1,2], right=[3]. PR#1 conflicts → excluded.
+    // CI trigger returns 404. n=1 hits the `excluded.has(n)` continue branch (line 723).
+    // PR#2 and PR#3 should be marked failed; PR#1 should not get a config-error comment.
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3)]);
+    const git = newMockGit();
+    git.conflictOn = "sha-1"; // PR#1 conflicts → excluded before CI trigger
+    const cfg = baseCfg({ batchPrs: "[1,2,3]", dryRun: false });
+
+    api.triggerWorkflow = async () => {
+      throw Object.assign(new Error("Not Found"), { status: 404 });
+    };
+
+    await expect(runBisect(api, git, cfg, nop)).rejects.toThrow(
+      "triggering CI for bisect",
+    );
+
+    // PR#1 was excluded due to conflict: should NOT get a config-error comment
+    const c1 = api.comments.get(1) ?? [];
+    expect(c1.some((s) => s.includes("action misconfigured"))).toBe(false);
+
+    // PR#2 and PR#3 should be marked failed with a config-error comment
+    for (const n of [2, 3]) {
+      expect(api.labels.get(n)).toContain("queue:failed");
+      const c = api.comments.get(n) ?? [];
+      expect(
+        c.some(
+          (s) =>
+            s.includes("Merge Queue** — action misconfigured") &&
+            s.includes("ci_workflow"),
+        ),
+      ).toBe(true);
+    }
   });
 
   it("marks PRs failed and posts config error when bisect CI trigger returns 404", async () => {
