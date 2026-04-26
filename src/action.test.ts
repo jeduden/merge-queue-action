@@ -644,6 +644,30 @@ describe("runProcess", () => {
     expect(api.labels.get(2)).toContain("queue");
   });
 
+  it("warns when markFailed throws during createAndMerge ConfigurationError handling in runProcess", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1), makePR(2)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    const logs: string[] = [];
+
+    git.createBranchFromRef = async () => {
+      throw new ConfigurationError("not in a git worktree");
+    };
+    const origAdd = api.addLabel.bind(api);
+    api.addLabel = async (n, label) => {
+      if (label === "queue:failed") throw new Error("addLabel failed");
+      return origAdd(n, label);
+    };
+
+    await expect(
+      runProcess(api, git, cfg, (m) => logs.push(m)),
+    ).rejects.toThrow();
+    expect(
+      logs.some((l) => l.includes("Warning: failed to mark PR")),
+    ).toBe(true);
+  });
+
   it("marks PRs failed and posts config error when createAndMerge throws ConfigurationError", async () => {
     const api = newMockAPI();
     api.prs.set("queue", [makePR(1), makePR(2)]);
@@ -691,6 +715,30 @@ describe("runProcess", () => {
     // Transient error → branch cleaned up, PR requeued
     expect(git.deleted.length).toBeGreaterThan(0);
     expect(api.labels.get(1)).toContain("queue");
+  });
+
+  it("warns when markFailed throws during CI trigger 404 handling in runProcess", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1), makePR(2)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    const logs: string[] = [];
+
+    api.triggerWorkflow = async () => {
+      throw Object.assign(new Error("Not Found"), { status: 404 });
+    };
+    const origAdd = api.addLabel.bind(api);
+    api.addLabel = async (n, label) => {
+      if (label === "queue:failed") throw new Error("addLabel failed");
+      return origAdd(n, label);
+    };
+
+    await expect(
+      runProcess(api, git, cfg, (m) => logs.push(m)),
+    ).rejects.toThrow("triggering CI");
+    expect(
+      logs.some((l) => l.includes("Warning: failed to mark PR")),
+    ).toBe(true);
   });
 
   it("marks PRs failed and posts config error when CI trigger returns 404", async () => {
@@ -1286,6 +1334,76 @@ describe("runBisect", () => {
         ),
       ).toBe(true);
     }
+  });
+
+  it("warns when markFailed throws during bisect createAndMerge ConfigurationError handling", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+    const logs: string[] = [];
+
+    git.createBranchFromRef = async () => {
+      throw new ConfigurationError("not in a git worktree");
+    };
+    const origAdd = api.addLabel.bind(api);
+    api.addLabel = async (n, label) => {
+      if (label === "queue:failed") throw new Error("addLabel failed");
+      return origAdd(n, label);
+    };
+
+    await expect(
+      runBisect(api, git, cfg, (m) => logs.push(m)),
+    ).rejects.toThrow();
+    expect(
+      logs.some((l) => l.includes("Warning: failed to mark PR")),
+    ).toBe(true);
+  });
+
+  it("tolerates deleteBranch failure inside bisect CI trigger 404 handler", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+
+    api.triggerWorkflow = async () => {
+      throw Object.assign(new Error("Not Found"), { status: 404 });
+    };
+    git.deleteBranch = async () => {
+      throw new Error("delete failed");
+    };
+
+    await expect(runBisect(api, git, cfg, nop)).rejects.toThrow(
+      "triggering CI for bisect",
+    );
+    // PRs should still be marked failed despite the branch-delete failure
+    for (const n of [1, 2]) {
+      expect(api.labels.get(n)).toContain("queue:failed");
+    }
+  });
+
+  it("warns when markFailed throws during bisect CI trigger 404 handling", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+    const logs: string[] = [];
+
+    api.triggerWorkflow = async () => {
+      throw Object.assign(new Error("Not Found"), { status: 404 });
+    };
+    const origAdd = api.addLabel.bind(api);
+    api.addLabel = async (n, label) => {
+      if (label === "queue:failed") throw new Error("addLabel failed");
+      return origAdd(n, label);
+    };
+
+    await expect(
+      runBisect(api, git, cfg, (m) => logs.push(m)),
+    ).rejects.toThrow("triggering CI for bisect");
+    expect(
+      logs.some((l) => l.includes("Warning: failed to mark PR")),
+    ).toBe(true);
   });
 
   it("marks PRs failed and posts config error when bisect CI trigger returns 404", async () => {
