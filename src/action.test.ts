@@ -1384,6 +1384,28 @@ describe("runBisect", () => {
     ).toBe(true);
   });
 
+  it("requeues all PRs when createAndMerge throws a transient error in runBisect", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+
+    git.createBranchFromRef = async () => {
+      throw new Error("network timeout");
+    };
+
+    await expect(runBisect(api, git, cfg, nop)).rejects.toThrow("network timeout");
+
+    // Transient error: PRs should be requeued (not marked failed)
+    for (const n of [1, 2]) {
+      expect(api.labels.get(n)).toContain("queue");
+      expect(api.labels.get(n)).not.toContain("queue:failed");
+      const c = api.comments.get(n) ?? [];
+      expect(c.some((s) => s.includes("— requeued"))).toBe(true);
+      expect(c.some((s) => s.includes("action misconfigured"))).toBe(false);
+    }
+  });
+
   it("tolerates deleteBranch failure inside bisect CI trigger 404 handler", async () => {
     const api = newMockAPI();
     api.prs.set("queue:active", [makePR(1), makePR(2)]);

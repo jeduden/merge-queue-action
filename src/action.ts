@@ -659,6 +659,22 @@ export async function runBisect(
           log,
         );
       }
+    } else if (!cfg.dryRun) {
+      // Transient error — requeue all candidates so they aren't stuck in queue:active
+      for (const [n, pr] of prMap) {
+        try {
+          await q.requeue(pr);
+        } catch (requeueErr) {
+          log(`Warning: failed to requeue PR #${n}: ${requeueErr}`);
+          continue;
+        }
+        await postComment(
+          api,
+          n,
+          commentRequeued(ctx, formatErrorForComment(err)),
+          log,
+        );
+      }
     }
     throw err;
   }
