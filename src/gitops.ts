@@ -101,6 +101,78 @@ export class GitOps implements GitOperator {
   }
 
   /**
+   * Configure local git so subsequent merges and pushes from this
+   * action work without any user-side wiring:
+   *
+   *   - sets `user.email` / `user.name` so `git merge --no-ff` can
+   *     create the merge commit (without identity, git refuses);
+   *   - rewrites `origin` to an `https://x-access-token:<token>@…` URL
+   *     so `git fetch`/`git push` authenticate with the merge-queue
+   *     token regardless of whether `actions/checkout` persisted any
+   *     credentials.
+   *
+   * Idempotent: every call writes the same values, so re-running is
+   * safe even if the action runs twice in a single job.
+   */
+  async configureGit(opts: {
+    token: string;
+    userEmail: string;
+    userName: string;
+    serverUrl?: string;
+  }): Promise<void> {
+    await this.assertWorktreeReady();
+
+    this.log(
+      `Configuring git identity as "${opts.userName} <${opts.userEmail}>"`,
+    );
+    await this.gitOrThrow(["config", "user.email", opts.userEmail]);
+    await this.gitOrThrow(["config", "user.name", opts.userName]);
+
+    const server = (opts.serverUrl ?? "https://github.com").replace(/\/$/, "");
+    const displayUrl = `${server}/${this.owner}/${this.repo}.git`;
+    // Actions already masks the secret in logs, but keep the token
+    // out of the human-readable log line below so it isn't echoed
+    // verbatim if a downstream log sink ever bypasses the masker.
+    this.log(`Setting origin remote URL to ${displayUrl} (with token auth)`);
+    // URL-encode the token defensively. GitHub-issued tokens never
+    // contain `@`, `:` or `/` today, but a custom GHES setup or a
+    // future format change could break URL parsing if we interpolated
+    // raw bytes.
+    const encodedToken = encodeURIComponent(opts.token);
+    const authedUrl = server.replace(
+      /^(https?:\/\/)/,
+      (_m, scheme) => `${scheme}x-access-token:${encodedToken}@`,
+    );
+    // `gitOrThrow` formats failures as `git <args>: <stderr>`, which
+    // would embed the raw URL — and therefore the token — in the
+    // thrown message. Catch and rethrow with the underlying detail
+    // sanitized so the secret cannot leak via `core.setFailed` or run
+    // logs even if a sink bypasses Actions' built-in masker, while
+    // still preserving the cause (lock contention, invalid URL, etc.)
+    // for diagnosis.
+    try {
+      await this.gitOrThrow([
+        "remote",
+        "set-url",
+        "origin",
+        `${authedUrl}/${this.owner}/${this.repo}.git`,
+      ]);
+    } catch (err) {
+      const detail = errorMessage(err)
+        .split(opts.token)
+        .join("[REDACTED]")
+        .split(encodedToken)
+        .join("[REDACTED]")
+        // Catch-all for any other `https://user:pass@host` shape that
+        // might surface from a future git error format.
+        .replace(/(https?:\/\/[^/\s:@]+:)[^@/\s]+@/g, "$1[REDACTED]@");
+      throw new Error(
+        `failed to set origin remote URL to ${displayUrl} with token authentication: ${detail}`,
+      );
+    }
+  }
+
+  /**
    * Verify the runner is actually inside a git working tree with an
    * `origin` remote before we issue any `git` command. Without this
    * check, callers who forgot `actions/checkout` (or ran the action in
@@ -112,13 +184,13 @@ export class GitOps implements GitOperator {
     const inside = await this.git(["rev-parse", "--is-inside-work-tree"]);
     if (inside.code !== 0 || inside.stdout.trim() !== "true") {
       throw new ConfigurationError(
-        "merge-queue-action must run in a checked-out git working tree — add an `actions/checkout` step with `fetch-depth: 0` and a pushable token before this action.",
+        "merge-queue-action must run in a checked-out git working tree — add an `actions/checkout` step with `fetch-depth: 0` before this action.",
       );
     }
     const remote = await this.git(["remote", "get-url", "origin"]);
     if (remote.code !== 0) {
       throw new ConfigurationError(
-        "merge-queue-action could not find an `origin` remote in the working tree — make sure `actions/checkout` ran in the same job with the merge-queue token.",
+        "merge-queue-action could not find an `origin` remote in the working tree — make sure `actions/checkout` ran in the same job before this action.",
       );
     }
     // `actions/checkout` defaults to `fetch-depth: 1`, which produces a

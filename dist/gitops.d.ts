@@ -38,6 +38,26 @@ export declare class GitOps implements GitOperator {
     private git;
     private gitOrThrow;
     /**
+     * Configure local git so subsequent merges and pushes from this
+     * action work without any user-side wiring:
+     *
+     *   - sets `user.email` / `user.name` so `git merge --no-ff` can
+     *     create the merge commit (without identity, git refuses);
+     *   - rewrites `origin` to an `https://x-access-token:<token>@…` URL
+     *     so `git fetch`/`git push` authenticate with the merge-queue
+     *     token regardless of whether `actions/checkout` persisted any
+     *     credentials.
+     *
+     * Idempotent: every call writes the same values, so re-running is
+     * safe even if the action runs twice in a single job.
+     */
+    configureGit(opts: {
+        token: string;
+        userEmail: string;
+        userName: string;
+        serverUrl?: string;
+    }): Promise<void>;
+    /**
      * Verify the runner is actually inside a git working tree with an
      * `origin` remote before we issue any `git` command. Without this
      * check, callers who forgot `actions/checkout` (or ran the action in

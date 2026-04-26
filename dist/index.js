@@ -31699,7 +31699,7 @@ function exportVariable(name, val) {
  * ```
  */
 function core_setSecret(secret) {
-    issueCommand('add-mask', {}, secret);
+    command_issueCommand('add-mask', {}, secret);
 }
 /**
  * Prepends inputPath to the PATH (for this action and future actions)
@@ -36858,6 +36858,64 @@ class GitOps {
         return res.stdout;
     }
     /**
+     * Configure local git so subsequent merges and pushes from this
+     * action work without any user-side wiring:
+     *
+     *   - sets `user.email` / `user.name` so `git merge --no-ff` can
+     *     create the merge commit (without identity, git refuses);
+     *   - rewrites `origin` to an `https://x-access-token:<token>@…` URL
+     *     so `git fetch`/`git push` authenticate with the merge-queue
+     *     token regardless of whether `actions/checkout` persisted any
+     *     credentials.
+     *
+     * Idempotent: every call writes the same values, so re-running is
+     * safe even if the action runs twice in a single job.
+     */
+    async configureGit(opts) {
+        await this.assertWorktreeReady();
+        this.log(`Configuring git identity as "${opts.userName} <${opts.userEmail}>"`);
+        await this.gitOrThrow(["config", "user.email", opts.userEmail]);
+        await this.gitOrThrow(["config", "user.name", opts.userName]);
+        const server = (opts.serverUrl ?? "https://github.com").replace(/\/$/, "");
+        const displayUrl = `${server}/${this.owner}/${this.repo}.git`;
+        // Actions already masks the secret in logs, but keep the token
+        // out of the human-readable log line below so it isn't echoed
+        // verbatim if a downstream log sink ever bypasses the masker.
+        this.log(`Setting origin remote URL to ${displayUrl} (with token auth)`);
+        // URL-encode the token defensively. GitHub-issued tokens never
+        // contain `@`, `:` or `/` today, but a custom GHES setup or a
+        // future format change could break URL parsing if we interpolated
+        // raw bytes.
+        const encodedToken = encodeURIComponent(opts.token);
+        const authedUrl = server.replace(/^(https?:\/\/)/, (_m, scheme) => `${scheme}x-access-token:${encodedToken}@`);
+        // `gitOrThrow` formats failures as `git <args>: <stderr>`, which
+        // would embed the raw URL — and therefore the token — in the
+        // thrown message. Catch and rethrow with the underlying detail
+        // sanitized so the secret cannot leak via `core.setFailed` or run
+        // logs even if a sink bypasses Actions' built-in masker, while
+        // still preserving the cause (lock contention, invalid URL, etc.)
+        // for diagnosis.
+        try {
+            await this.gitOrThrow([
+                "remote",
+                "set-url",
+                "origin",
+                `${authedUrl}/${this.owner}/${this.repo}.git`,
+            ]);
+        }
+        catch (err) {
+            const detail = errorMessage(err)
+                .split(opts.token)
+                .join("[REDACTED]")
+                .split(encodedToken)
+                .join("[REDACTED]")
+                // Catch-all for any other `https://user:pass@host` shape that
+                // might surface from a future git error format.
+                .replace(/(https?:\/\/[^/\s:@]+:)[^@/\s]+@/g, "$1[REDACTED]@");
+            throw new Error(`failed to set origin remote URL to ${displayUrl} with token authentication: ${detail}`);
+        }
+    }
+    /**
      * Verify the runner is actually inside a git working tree with an
      * `origin` remote before we issue any `git` command. Without this
      * check, callers who forgot `actions/checkout` (or ran the action in
@@ -36868,11 +36926,11 @@ class GitOps {
     async assertWorktreeReady() {
         const inside = await this.git(["rev-parse", "--is-inside-work-tree"]);
         if (inside.code !== 0 || inside.stdout.trim() !== "true") {
-            throw new ConfigurationError("merge-queue-action must run in a checked-out git working tree — add an `actions/checkout` step with `fetch-depth: 0` and a pushable token before this action.");
+            throw new ConfigurationError("merge-queue-action must run in a checked-out git working tree — add an `actions/checkout` step with `fetch-depth: 0` before this action.");
         }
         const remote = await this.git(["remote", "get-url", "origin"]);
         if (remote.code !== 0) {
-            throw new ConfigurationError("merge-queue-action could not find an `origin` remote in the working tree — make sure `actions/checkout` ran in the same job with the merge-queue token.");
+            throw new ConfigurationError("merge-queue-action could not find an `origin` remote in the working tree — make sure `actions/checkout` ran in the same job before this action.");
         }
         // `actions/checkout` defaults to `fetch-depth: 1`, which produces a
         // shallow clone. Local merges of PR head SHAs — especially across
@@ -37983,6 +38041,9 @@ function loadInputs() {
         dryRun: getInput("dry_run") === "true",
         batchPrs: getInput("batch_prs") || "",
         bisect: getInput("bisect") === "true",
+        gitUserEmail: getInput("git_user_email") ||
+            "merge-queue@users.noreply.github.com",
+        gitUserName: getInput("git_user_name") || "merge-queue-bot",
     };
 }
 function buildCommentCtx(owner, repo, queueLabel) {
@@ -37996,6 +38057,22 @@ function buildCommentCtx(owner, repo, queueLabel) {
 }
 async function run() {
     const inputs = loadInputs();
+    // Register the merge-queue token as a secret immediately so it is
+    // masked in any subsequent log line, error message, or failure
+    // emitted by downstream code (git, octokit, reporter). `getInput`
+    // does not register secrets automatically — only inputs sourced
+    // from `secrets.*` are pre-masked by the runner — so we set it
+    // explicitly to defend against a workflow that passes the token
+    // via `env:` or similar. Also mask the URL-encoded form because
+    // `configureGit` embeds `encodeURIComponent(token)` in the remote
+    // URL, and a token with reserved characters would render in git
+    // stderr in its encoded form rather than its raw form.
+    if (inputs.token) {
+        core_setSecret(inputs.token);
+        const encoded = encodeURIComponent(inputs.token);
+        if (encoded !== inputs.token)
+            core_setSecret(encoded);
+    }
     const { owner, repo } = github_context.repo;
     const log = info;
     const client = new GitHubClient(inputs.token, owner, repo, log);
@@ -38010,6 +38087,18 @@ async function run() {
     log(`Repository context: ${owner}/${repo} (GITHUB_REPOSITORY=${process.env.GITHUB_REPOSITORY ?? "unset"})`);
     log(`Queue label: "${inputs.queueLabel}" batchSize=${inputs.batchSize} dryRun=${inputs.dryRun} bisect=${inputs.bisect}`);
     const actor = process.env.GITHUB_ACTOR;
+    // Pre-flight actor permission check. `runProcess` re-checks this as
+    // defense in depth, but doing it here lets us short-circuit before
+    // mutating the worktree via `configureGit`. Skipped in `bisect`
+    // mode because the entry point for bisect is `workflow_dispatch`,
+    // which is already restricted by repo settings.
+    if (!inputs.bisect && actor) {
+        const perm = await client.getActorPermission(actor);
+        if (!hasWritePermission(perm)) {
+            log(`Actor ${actor} has "${perm}" permission, write or above required — skipping`);
+            return;
+        }
+    }
     const cfg = {
         ciWorkflow: inputs.ciWorkflow,
         batchSize: inputs.batchSize,
@@ -38018,6 +38107,22 @@ async function run() {
         batchPrs: inputs.batchPrs,
         commentCtx,
     };
+    // Configure git identity and rewrite the `origin` remote to embed
+    // the merge-queue token. Done here (not in the user's workflow) so
+    // consumers only need an `actions/checkout` step before this action.
+    // Skipped in `dry_run` so the contract "log intent without mutating"
+    // also holds for `.git/config`.
+    if (!inputs.dryRun) {
+        await gitOps.configureGit({
+            token: inputs.token,
+            userEmail: inputs.gitUserEmail,
+            userName: inputs.gitUserName,
+            serverUrl: process.env.GITHUB_SERVER_URL,
+        });
+    }
+    else {
+        log("dry_run enabled — skipping git identity/remote configuration");
+    }
     if (inputs.bisect) {
         await runBisect(client, gitOps, cfg, log, reporter);
     }

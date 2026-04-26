@@ -45,13 +45,6 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           fetch-depth: 0
-          token: ${{ secrets.MERGE_QUEUE_TOKEN }}
-          persist-credentials: true  # required — action pushes batch branches via git
-
-      - name: Configure git identity
-        run: |
-          git config user.email "merge-queue@users.noreply.github.com"
-          git config user.name  "merge-queue-bot"
 
       # Optional: register any custom merge drivers here, e.g.
       #   git config merge.lockfile.driver ".merge-drivers/lockfile.sh %O %A %B %L %P"
@@ -64,6 +57,12 @@ jobs:
           bisect: ${{ github.event.inputs.bisect }}
           batch_prs: ${{ github.event.inputs.batch_prs }}
 ```
+
+The action configures `user.email`, `user.name`, and rewrites `origin`
+to embed the merge-queue token before any merge runs, so `actions/checkout`
+is the only setup step you need. You do not need to pass the merge-queue
+token (the action's `token` input) to `actions/checkout`, because the
+action rewrites the remote URL itself.
 
 **`.github/workflows/ci.yml`** — your existing CI; just add `workflow_dispatch`:
 
@@ -216,31 +215,26 @@ Worst case: after the initial failed full-batch CI run, bisection needs
 ### Workflow requirements
 
 The merge-queue workflow must include an `actions/checkout` step
-**before** the `merge-queue-action` step, with `fetch-depth: 0`
-and a pushable token:
+**before** the `merge-queue-action` step, with `fetch-depth: 0`:
 
 ```yaml
 - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
   with:
     fetch-depth: 0
-    token: ${{ secrets.MERGE_QUEUE_TOKEN }}
-    persist-credentials: true  # required — action pushes batch branches via git
-
-- name: Configure git identity
-  run: |
-    git config user.email "merge-queue@users.noreply.github.com"
-    git config user.name  "merge-queue-bot"
 ```
 
-- **`fetch-depth: 0`** — the action refuses early on a shallow clone.
-- **`token`** — must match the action step token (`MERGE_QUEUE_TOKEN`) so
-  the batch-branch push is authorized by the same actor that bypasses
-  your ruleset.
-- **`persist-credentials: true`** — `actions/checkout` stores the token in
-  git's credential helper so subsequent `git push` calls in the same job
-  are authenticated. The default is `true`, but set it explicitly so a
-  future change to the `actions/checkout` default cannot silently break
-  authentication.
+- **`fetch-depth: 0`** — the action refuses early on a shallow clone;
+  local merges of PR head SHAs need full history.
+
+That's the entire workflow-side setup. The action itself runs
+`git config user.email/.name` and `git remote set-url origin
+https://x-access-token:<token>@…` against the checked-out worktree,
+so you don't need to pass `token:` to `actions/checkout` or add a
+separate "Configure git" step. The token used is whatever you pass
+as the `token` input (typically `secrets.MERGE_QUEUE_TOKEN`).
+
+Override the identity via the `git_user_email` / `git_user_name`
+inputs if you need a different author on the merge commits.
 
 ### Required repository / ruleset configuration
 
@@ -434,6 +428,8 @@ tested together in a single batch, reducing total CI runs.
 | `batch_size` | no | `5` | Max PRs per batch |
 | `queue_label` | no | `queue` | Label that enqueues a PR |
 | `dry_run` | no | `false` | Log intent without mutating |
+| `git_user_email` | no | `merge-queue@users.noreply.github.com` | `user.email` set on the local repo before merging |
+| `git_user_name` | no | `merge-queue-bot` | `user.name` set on the local repo before merging |
 
 ## Custom merge drivers
 
@@ -493,13 +489,12 @@ merge time, `git merge` has nothing to exec.
 
 3. **Register the driver at runtime.** `merge.<name>.driver` lives in
    `.git/config`, which is not tracked. The merge-queue workflow must
-   set it after checkout and before any merge runs:
+   set it after checkout and before the merge-queue action runs:
 
    ```yaml
    - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
      with:
        fetch-depth: 0
-       token: ${{ secrets.MERGE_QUEUE_TOKEN }}
 
    - name: Register custom merge drivers
      run: |
@@ -527,21 +522,20 @@ merge time, `git merge` has nothing to exec.
 
 ### Wiring it into the workflow
 
-Extend the [Quick start](#quick-start) workflow by registering the
-driver in the step that already sets the git identity:
+Extend the [Quick start](#quick-start) workflow with a step that
+registers the driver between `actions/checkout` and `merge-queue-action`:
 
 ```yaml
-- name: Configure git identity and merge drivers
+- name: Register merge drivers
   run: |
-    git config user.email "merge-queue@users.noreply.github.com"
-    git config user.name  "merge-queue-bot"
     git config merge.lockfile.name   "Auto-merge lockfiles"
     git config merge.lockfile.driver ".merge-drivers/lockfile-merge.sh %O %A %B %L %P"
     git config merge.lockfile.recursive binary
 ```
 
-Nothing else needs to change — the action picks the driver up from
-`.git/config` the moment it runs `git merge`.
+The action picks the driver up from `.git/config` the moment it runs
+`git merge`. Identity (`user.email`/`user.name`) is set by the action
+itself, so you don't need to add it to this step.
 
 ## Development
 
