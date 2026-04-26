@@ -48,8 +48,8 @@ export declare class GitOps implements GitOperator {
      *     token regardless of whether `actions/checkout` persisted any
      *     credentials.
      *
-     * Idempotent: re-running with the same values is a no-op for the
-     * remote URL and a fast `config` write for the identity.
+     * Idempotent: every call writes the same values, so re-running is
+     * safe even if the action runs twice in a single job.
      */
     configureGit(opts: {
         token: string;

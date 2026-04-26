@@ -51,6 +51,14 @@ function buildCommentCtx(
 
 async function run(): Promise<void> {
   const inputs = loadInputs();
+  // Register the merge-queue token as a secret immediately so it is
+  // masked in any subsequent log line, error message, or failure
+  // emitted by downstream code (git, octokit, reporter). `getInput`
+  // does not register secrets automatically — only inputs sourced
+  // from `secrets.*` are pre-masked by the runner — so we set it
+  // explicitly to defend against a workflow that passes the token
+  // via `env:` or similar.
+  if (inputs.token) core.setSecret(inputs.token);
   const { owner, repo } = github.context.repo;
   const log = core.info;
   const client = new GitHubClient(inputs.token, owner, repo, log);

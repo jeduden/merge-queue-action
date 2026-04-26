@@ -31699,7 +31699,7 @@ function exportVariable(name, val) {
  * ```
  */
 function core_setSecret(secret) {
-    issueCommand('add-mask', {}, secret);
+    command_issueCommand('add-mask', {}, secret);
 }
 /**
  * Prepends inputPath to the PATH (for this action and future actions)
@@ -36868,8 +36868,8 @@ class GitOps {
      *     token regardless of whether `actions/checkout` persisted any
      *     credentials.
      *
-     * Idempotent: re-running with the same values is a no-op for the
-     * remote URL and a fast `config` write for the identity.
+     * Idempotent: every call writes the same values, so re-running is
+     * safe even if the action runs twice in a single job.
      */
     async configureGit(opts) {
         await this.assertWorktreeReady();
@@ -36882,13 +36882,28 @@ class GitOps {
         // out of the human-readable log line below so it isn't echoed
         // verbatim if a downstream log sink ever bypasses the masker.
         this.log(`Setting origin remote URL to ${displayUrl} (with token auth)`);
-        const authedUrl = server.replace(/^(https?:\/\/)/, (_m, scheme) => `${scheme}x-access-token:${opts.token}@`);
-        await this.gitOrThrow([
-            "remote",
-            "set-url",
-            "origin",
-            `${authedUrl}/${this.owner}/${this.repo}.git`,
-        ]);
+        // URL-encode the token defensively. GitHub-issued tokens never
+        // contain `@`, `:` or `/` today, but a custom GHES setup or a
+        // future format change could break URL parsing if we interpolated
+        // raw bytes.
+        const encodedToken = encodeURIComponent(opts.token);
+        const authedUrl = server.replace(/^(https?:\/\/)/, (_m, scheme) => `${scheme}x-access-token:${encodedToken}@`);
+        // `gitOrThrow` formats failures as `git <args>: <stderr>`, which
+        // would embed the raw URL — and therefore the token — in the
+        // thrown message. Catch and rethrow with a redacted message so the
+        // secret cannot leak via `core.setFailed` or run logs even if a
+        // sink bypasses Actions' built-in masker.
+        try {
+            await this.gitOrThrow([
+                "remote",
+                "set-url",
+                "origin",
+                `${authedUrl}/${this.owner}/${this.repo}.git`,
+            ]);
+        }
+        catch {
+            throw new Error(`failed to set origin remote URL to ${displayUrl} with token authentication`);
+        }
     }
     /**
      * Verify the runner is actually inside a git working tree with an
@@ -38032,6 +38047,15 @@ function buildCommentCtx(owner, repo, queueLabel) {
 }
 async function run() {
     const inputs = loadInputs();
+    // Register the merge-queue token as a secret immediately so it is
+    // masked in any subsequent log line, error message, or failure
+    // emitted by downstream code (git, octokit, reporter). `getInput`
+    // does not register secrets automatically — only inputs sourced
+    // from `secrets.*` are pre-masked by the runner — so we set it
+    // explicitly to defend against a workflow that passes the token
+    // via `env:` or similar.
+    if (inputs.token)
+        core_setSecret(inputs.token);
     const { owner, repo } = github_context.repo;
     const log = info;
     const client = new GitHubClient(inputs.token, owner, repo, log);

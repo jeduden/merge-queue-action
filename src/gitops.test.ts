@@ -438,6 +438,78 @@ describe("GitOps with injected exec", () => {
     ]);
   });
 
+  it("configureGit URL-encodes tokens that contain reserved characters", async () => {
+    const { octokit } = makeFakeOctokit();
+    const execCalls: string[][] = [];
+    const exec: Exec = async (args) => {
+      execCalls.push(args);
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
+        return { code: 0, stdout: "true\n", stderr: "" };
+      }
+      if (args[0] === "remote" && args[1] === "get-url") {
+        return { code: 0, stdout: "origin\n", stderr: "" };
+      }
+      if (args[0] === "rev-parse" && args[1] === "--is-shallow-repository") {
+        return { code: 0, stdout: "false\n", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    await ops.configureGit({
+      token: "tok:with@reserved/chars",
+      userEmail: "a@b",
+      userName: "n",
+    });
+    const setUrlCall = execCalls.find(
+      (c) => c[0] === "remote" && c[1] === "set-url",
+    );
+    // The URL must contain the encoded form, not the raw bytes —
+    // otherwise the `:` and `@` would corrupt the userinfo segment.
+    expect(setUrlCall?.[3]).toBe(
+      "https://x-access-token:tok%3Awith%40reserved%2Fchars@github.com/o/r.git",
+    );
+  });
+
+  it("configureGit redacts the token if `git remote set-url` fails", async () => {
+    // Regression guard: `gitOrThrow`'s default error message embeds the
+    // command args, which include the token-bearing remote URL. The
+    // redaction wrapper in configureGit must rethrow without it.
+    const { octokit } = makeFakeOctokit();
+    const secret = "ghs_supersecret_value_42";
+    const exec: Exec = async (args) => {
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") {
+        return { code: 0, stdout: "true\n", stderr: "" };
+      }
+      if (args[0] === "remote" && args[1] === "get-url") {
+        return { code: 0, stdout: "origin\n", stderr: "" };
+      }
+      if (args[0] === "rev-parse" && args[1] === "--is-shallow-repository") {
+        return { code: 0, stdout: "false\n", stderr: "" };
+      }
+      if (args[0] === "remote" && args[1] === "set-url") {
+        return {
+          code: 128,
+          stdout: "",
+          stderr: `fatal: bad URL ${args[3]}`,
+        };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    const err = await ops
+      .configureGit({
+        token: secret,
+        userEmail: "a@b",
+        userName: "n",
+      })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).not.toContain(secret);
+    expect((err as Error).message).toContain("origin remote URL");
+  });
+
   it("deleteBranch deletes via refs API", async () => {
     const { octokit, calls } = makeFakeOctokit([
       { ref: "heads/batch", sha: "abc" },

@@ -60,8 +60,9 @@ jobs:
 
 The action configures `user.email`, `user.name`, and rewrites `origin`
 to embed the merge-queue token before any merge runs, so `actions/checkout`
-is the only setup step you need. The default token isn't passed to
-checkout because the action overwrites the remote URL itself.
+is the only setup step you need. You do not need to pass the merge-queue
+token (the action's `token` input) to `actions/checkout`, because the
+action rewrites the remote URL itself.
 
 **`.github/workflows/ci.yml`** — your existing CI; just add `workflow_dispatch`:
 

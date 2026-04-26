@@ -111,8 +111,8 @@ export class GitOps implements GitOperator {
    *     token regardless of whether `actions/checkout` persisted any
    *     credentials.
    *
-   * Idempotent: re-running with the same values is a no-op for the
-   * remote URL and a fast `config` write for the identity.
+   * Idempotent: every call writes the same values, so re-running is
+   * safe even if the action runs twice in a single job.
    */
   async configureGit(opts: {
     token: string;
@@ -134,17 +134,32 @@ export class GitOps implements GitOperator {
     // out of the human-readable log line below so it isn't echoed
     // verbatim if a downstream log sink ever bypasses the masker.
     this.log(`Setting origin remote URL to ${displayUrl} (with token auth)`);
+    // URL-encode the token defensively. GitHub-issued tokens never
+    // contain `@`, `:` or `/` today, but a custom GHES setup or a
+    // future format change could break URL parsing if we interpolated
+    // raw bytes.
+    const encodedToken = encodeURIComponent(opts.token);
     const authedUrl = server.replace(
       /^(https?:\/\/)/,
-      (_m, scheme) =>
-        `${scheme}x-access-token:${opts.token}@`,
+      (_m, scheme) => `${scheme}x-access-token:${encodedToken}@`,
     );
-    await this.gitOrThrow([
-      "remote",
-      "set-url",
-      "origin",
-      `${authedUrl}/${this.owner}/${this.repo}.git`,
-    ]);
+    // `gitOrThrow` formats failures as `git <args>: <stderr>`, which
+    // would embed the raw URL — and therefore the token — in the
+    // thrown message. Catch and rethrow with a redacted message so the
+    // secret cannot leak via `core.setFailed` or run logs even if a
+    // sink bypasses Actions' built-in masker.
+    try {
+      await this.gitOrThrow([
+        "remote",
+        "set-url",
+        "origin",
+        `${authedUrl}/${this.owner}/${this.repo}.git`,
+      ]);
+    } catch {
+      throw new Error(
+        `failed to set origin remote URL to ${displayUrl} with token authentication`,
+      );
+    }
   }
 
   /**
