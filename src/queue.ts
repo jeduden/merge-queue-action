@@ -126,6 +126,18 @@ export class Queue {
       } catch (err) {
         if (!isNotFoundError(err)) throw err;
       }
+      // Clear any lingering queue:failed label — a PR re-entering the queue
+      // after a failure has the base label re-added by the author, but
+      // activate() must clean up the old failed state so it doesn't persist
+      // after a subsequent successful merge.
+      try {
+        await this.api.removeLabel(
+          pr.number,
+          queueLabel(this.label, STATE_FAILED),
+        );
+      } catch (err) {
+        if (!isNotFoundError(err)) throw err;
+      }
     }
   }
 
