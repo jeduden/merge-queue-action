@@ -513,19 +513,86 @@ merge time, `git merge` has nothing to exec.
    | `%L` | conflict-marker size |
    | `%P` | pathname of the file being merged |
 
-4. **Install any interpreters or tooling the driver needs** (Node,
-   Python, a specific CLI) as earlier steps in the same job, before the
-   merge-queue action runs.
+4. **Install every binary the driver invokes** as an earlier step in
+   the same job, before the merge-queue action runs. When `git merge`
+   execs the driver, `PATH` resolves to the runner image's preinstalled
+   baseline plus whatever your workflow installs — nothing else. This
+   includes:
+
+   - **Language runtimes** the driver script is written in (`node`,
+     `python`, `ruby`, …) — the shebang only works if the interpreter
+     is installed.
+   - **Package managers** the driver shells out to (`npm`, `pnpm`,
+     `yarn`, `cargo`, `pip`, `bundle`, …) — e.g. a `package-lock.json`
+     driver typically runs `npm install` to regenerate the lockfile.
+   - **Domain-specific CLIs** the driver depends on (`jq`, `yq`,
+     `git-lfs`, custom binaries built from source, …).
+
+   `ubuntu-latest` ships with a baseline (`bash`, `git`, `python3`,
+   `jq`, etc.) but does **not** pin versions and does not include
+   project-specific tooling. If the driver needs a specific version,
+   install it explicitly — don't rely on the runner image. Example
+   for a Node-based lockfile driver:
+
+   ```yaml
+   - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+     with:
+       fetch-depth: 0
+
+   - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+     with:
+       node-version: "20"
+   - run: npm ci   # so `npm install` inside the driver is fast / offline-ish
+
+   - name: Register merge drivers
+     run: |
+       git config merge.lockfile.driver ".merge-drivers/lockfile-merge.sh %O %A %B %L %P"
+
+   - uses: jeduden/merge-queue-action@5adb5a76e27e96f1da5efd36f097a2c5233e9ad3 # v0.6.0
+     with:
+       token: ${{ secrets.MERGE_QUEUE_TOKEN }}
+       ci_workflow: .github/workflows/ci.yml
+   ```
+
+   > **Pin every install step to a commit SHA, not a tag.** The
+   > merge-queue workflow runs with `MERGE_QUEUE_TOKEN` in scope and
+   > pushes to `main`, so any action that runs before `merge-queue-action`
+   > is part of its trust boundary. Tags like `@v4` are mutable —
+   > whoever owns the upstream repo can repoint them at malicious
+   > code, which would then exfiltrate the token or alter merges.
+   > Use the same `<owner>/<action>@<40-char-SHA> # <human version>`
+   > form this README uses for `actions/checkout` and
+   > `jeduden/merge-queue-action`. Apt/curl/script-based installs
+   > should pin too: pin apt packages to a version, verify
+   > downloaded binaries against a checksum, and avoid
+   > `curl … | bash` from unpinned URLs. Dependabot's
+   > `package-ecosystem: "github-actions"` keeps the SHAs current
+   > without giving up the pin.
+
+   If a binary is missing, `git merge` reports the driver as failed
+   and the PR is labelled `queue:failed` — the failure surfaces as a
+   merge conflict, not as a clear "command not found", so missing
+   tooling is easy to misdiagnose. Run the driver locally first to
+   enumerate exactly what it depends on.
 
 5. **Do not rely on `~/.gitconfig`** or user-scoped config — Actions
    runners are ephemeral and the config must be set on every run.
 
 ### Wiring it into the workflow
 
-Extend the [Quick start](#quick-start) workflow with a step that
-registers the driver between `actions/checkout` and `merge-queue-action`:
+Extend the [Quick start](#quick-start) workflow with two steps between
+`actions/checkout` and `merge-queue-action`: one to install whatever
+binaries the driver needs, and one to register the driver:
 
 ```yaml
+# Install any binaries the driver script invokes (interpreters,
+# package managers, CLIs). Skip whatever your driver doesn't use.
+# Pin every action to a 40-char commit SHA — tags like @v4 are
+# mutable and these steps run with MERGE_QUEUE_TOKEN in scope.
+- uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+  with:
+    node-version: "20"
+
 - name: Register merge drivers
   run: |
     git config merge.lockfile.name   "Auto-merge lockfiles"
@@ -534,8 +601,16 @@ registers the driver between `actions/checkout` and `merge-queue-action`:
 ```
 
 The action picks the driver up from `.git/config` the moment it runs
-`git merge`. Identity (`user.email`/`user.name`) is set by the action
-itself, so you don't need to add it to this step.
+`git merge`, and execs it in the runner's `PATH` — so any binary the
+driver shells out to must already be installed by an earlier step.
+Identity (`user.email`/`user.name`) is set by the action itself, so
+you don't need to add it to this step.
+
+Every `uses:` step in the merge-queue workflow runs in the same job
+as `merge-queue-action`, with access to `MERGE_QUEUE_TOKEN` and the
+ability to alter the working tree before the merge. **Pin every one
+of them to a full commit SHA**, not a floating tag — see the note
+under [Repository-side setup](#repository-side-setup) above.
 
 ## Development
 
