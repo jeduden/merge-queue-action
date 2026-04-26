@@ -176,6 +176,21 @@ describe("Activate", () => {
       ]),
     ).rejects.toThrow();
   });
+
+  it("removes queue:failed label if present when activating", async () => {
+    const api = newMockAPI();
+    // Simulate a PR that was previously failed and had the base label re-added
+    api.labels.set(1, ["queue", "queue:failed"]);
+
+    const q = new Queue(api, "queue", false, nop);
+    await q.activate([
+      { number: 1, headRef: "", headSHA: "", title: "", createdAt: 0 },
+    ]);
+
+    expect(api.labels.get(1)).toContain("queue:active");
+    expect(api.labels.get(1)).not.toContain("queue:failed");
+    expect(api.labels.get(1)).not.toContain("queue");
+  });
 });
 
 describe("MarkFailed", () => {

@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import type * as github from "@actions/github";
 import type { GitOperator } from "./batch.js";
 import { errorMessage, silentReporter, type Reporter } from "./reporter.js";
+import { ConfigurationError } from "./errors.js";
 
 type Octokit = ReturnType<typeof github.getOctokit>;
 
@@ -110,13 +111,13 @@ export class GitOps implements GitOperator {
   private async assertWorktreeReady(): Promise<void> {
     const inside = await this.git(["rev-parse", "--is-inside-work-tree"]);
     if (inside.code !== 0 || inside.stdout.trim() !== "true") {
-      throw new Error(
+      throw new ConfigurationError(
         "merge-queue-action must run in a checked-out git working tree — add an `actions/checkout` step with `fetch-depth: 0` and a pushable token before this action.",
       );
     }
     const remote = await this.git(["remote", "get-url", "origin"]);
     if (remote.code !== 0) {
-      throw new Error(
+      throw new ConfigurationError(
         "merge-queue-action could not find an `origin` remote in the working tree — make sure `actions/checkout` ran in the same job with the merge-queue token.",
       );
     }
@@ -127,7 +128,7 @@ export class GitOps implements GitOperator {
     // with a confusing "fatal: refusing to merge unrelated histories".
     const shallow = await this.git(["rev-parse", "--is-shallow-repository"]);
     if (shallow.code === 0 && shallow.stdout.trim() === "true") {
-      throw new Error(
+      throw new ConfigurationError(
         "merge-queue-action requires a full-history clone, but the working tree is a shallow repository. Set `fetch-depth: 0` on the `actions/checkout` step (or run `git fetch --unshallow` before invoking this action).",
       );
     }

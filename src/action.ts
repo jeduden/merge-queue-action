@@ -25,7 +25,9 @@ import {
   commentMergeConflict,
   commentBisecting,
   commentRequeued,
+  commentConfigError,
 } from "./comments.js";
+import { ConfigurationError } from "./errors.js";
 
 export interface Config {
   ciWorkflow: string;
@@ -48,6 +50,20 @@ function requireCtx(cfg: Config): CommentCtx {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Returns true for GitHub API errors that indicate a permanent configuration
+ * problem: 404 means the resource (e.g. a workflow file) doesn't exist, and
+ * 422 means the request is structurally invalid (e.g. the workflow has no
+ * `workflow_dispatch` trigger).  Both require an operator fix and must not
+ * trigger a requeue.
+ */
+function isHttpConfigError(err: unknown): boolean {
+  if (typeof err !== "object" || err === null || !("status" in err))
+    return false;
+  const status = (err as { status: number }).status;
+  return status === 404 || status === 422;
 }
 
 export type { CommentCtx };
@@ -286,7 +302,25 @@ export async function runProcess(
   try {
     result = await b.createAndMerge(batchID, batchPRs);
   } catch (err) {
-    await requeueAll(`batch creation failed: ${formatErrorForComment(err)}`);
+    if (err instanceof ConfigurationError && !cfg.dryRun) {
+      // Permanent misconfiguration — mark all PRs failed so the queue
+      // stops looping, and post an actionable comment.
+      for (const pr of prs) {
+        try {
+          await q.markFailed(pr, "action misconfigured");
+        } catch (markErr) {
+          log(`Warning: failed to mark PR #${pr.number} as failed: ${markErr}`);
+        }
+        await postComment(
+          api,
+          pr.number,
+          commentConfigError(ctx, err.message),
+          log,
+        );
+      }
+    } else {
+      await requeueAll(`batch creation failed: ${formatErrorForComment(err)}`);
+    }
     throw err;
   }
 
@@ -338,9 +372,28 @@ export async function runProcess(
       await api.triggerWorkflow(cfg.ciWorkflow, result.branch);
     } catch (err) {
       await cleanupBranch(result.branch);
-      await requeueAll(
-        `failed to trigger CI: ${formatErrorForComment(err)}`,
-      );
+      if (isHttpConfigError(err)) {
+        // Workflow file not found (404) or not dispatchable (422) — this
+        // will not resolve without a config fix, so mark PRs failed instead
+        // of requeueing them indefinitely.
+        const detail =
+          `CI workflow \`${cfg.ciWorkflow}\` could not be triggered` +
+          ` (${(err as { status: number }).status}): ${formatErrorForComment(err)}.` +
+          ` Check that the \`ci_workflow\` input names a workflow with a \`workflow_dispatch\` trigger.`;
+        for (const pr of prs) {
+          if (excluded.has(pr.number)) continue;
+          try {
+            await q.markFailed(pr, "CI workflow misconfigured");
+          } catch (markErr) {
+            log(
+              `Warning: failed to mark PR #${pr.number} as failed: ${markErr}`,
+            );
+          }
+          await postComment(api, pr.number, commentConfigError(ctx, detail), log);
+        }
+      } else {
+        await requeueAll(`failed to trigger CI: ${formatErrorForComment(err)}`);
+      }
       throw new Error(`triggering CI: ${formatErrorForComment(err)}`);
     }
 
@@ -588,7 +641,43 @@ export async function runBisect(
   });
 
   const batchID = `bisect-${left[0]}-${Math.floor(Date.now() / 1000)}`;
-  const result = await b.createAndMerge(batchID, leftPRs);
+  let result: MergeResult;
+  try {
+    result = await b.createAndMerge(batchID, leftPRs);
+  } catch (err) {
+    if (err instanceof ConfigurationError && !cfg.dryRun) {
+      for (const [n, pr] of prMap) {
+        try {
+          await q.markFailed(pr, "action misconfigured");
+        } catch (markErr) {
+          log(`Warning: failed to mark PR #${n} as failed: ${markErr}`);
+        }
+        await postComment(
+          api,
+          n,
+          commentConfigError(ctx, err.message),
+          log,
+        );
+      }
+    } else if (!cfg.dryRun) {
+      // Transient error — requeue all candidates so they aren't stuck in queue:active
+      for (const [n, pr] of prMap) {
+        try {
+          await q.requeue(pr);
+        } catch (requeueErr) {
+          log(`Warning: failed to requeue PR #${n}: ${requeueErr}`);
+          continue;
+        }
+        await postComment(
+          api,
+          n,
+          commentRequeued(ctx, formatErrorForComment(err)),
+          log,
+        );
+      }
+    }
+    throw err;
+  }
 
   // Handle conflicts immediately — track so we never requeue them
   const excluded = new Set<number>();
@@ -636,10 +725,43 @@ export async function runBisect(
     try {
       await api.triggerWorkflow(cfg.ciWorkflow, result.branch);
     } catch (err) {
-      try {
-        await gitOps.deleteBranch(result.branch);
-      } catch {
-        /* best effort */
+      if (isHttpConfigError(err)) {
+        try {
+          await gitOps.deleteBranch(result.branch);
+        } catch {
+          /* best effort */
+        }
+        const detail =
+          `CI workflow \`${cfg.ciWorkflow}\` could not be triggered` +
+          ` (${(err as { status: number }).status}): ${formatErrorForComment(err)}.` +
+          ` Check that the \`ci_workflow\` input names a workflow with a \`workflow_dispatch\` trigger.`;
+        for (const n of prNumbers) {
+          if (excluded.has(n)) continue;
+          const pr = prMap.get(n);
+          if (!pr) continue;
+          try {
+            await q.markFailed(pr, "CI workflow misconfigured");
+          } catch (markErr) {
+            log(`Warning: failed to mark PR #${n} as failed: ${markErr}`);
+          }
+          await postComment(api, n, commentConfigError(ctx, detail), log);
+        }
+      } else {
+        // Transient error — requeue all still-candidate PRs so they don't get stuck
+        // in queue:active with no path forward (same recovery as findWorkflowRun failures).
+        await handleBisectObservationFailure(
+          api,
+          ctx,
+          q,
+          gitOps,
+          reporter,
+          prMap,
+          prNumbers,
+          excluded,
+          result.branch,
+          `failed to trigger bisect CI: ${formatErrorForComment(err)}`,
+          log,
+        );
       }
       throw new Error(
         `triggering CI for bisect: ${formatErrorForComment(err)}`,
