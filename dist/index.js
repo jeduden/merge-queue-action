@@ -37359,6 +37359,29 @@ function hasWritePermission(perm) {
     return perm === "write" || perm === "maintain" || perm === "admin";
 }
 /**
+ * If the workflow was triggered by a `pull_request: labeled` event whose
+ * label matches `queueLabel`, return that PR's number. Otherwise undefined.
+ *
+ * The webhook payload is the authoritative signal for the just-added
+ * label and is delivered before the issues-list endpoint is guaranteed to
+ * reflect it. Surfacing the PR number here lets `runProcess` fetch the PR
+ * directly when the label-filtered list omits it (indexing lag, label-name
+ * encoding mismatch, replication moment).
+ *
+ * Pure-functional shape so the caller (main.ts) injects `github.context`
+ * and unit tests can hand in a synthetic context.
+ */
+function eventTriggerLabeledPR(ctx, queueLabel) {
+    if (ctx.eventName !== "pull_request")
+        return undefined;
+    const payload = ctx.payload;
+    if (payload?.action !== "labeled")
+        return undefined;
+    if (payload.label?.name !== queueLabel)
+        return undefined;
+    return payload.pull_request?.number;
+}
+/**
  * Returns the repo-relative workflow path for dispatch.
  * Reads MERGE_QUEUE_WORKFLOW_FILE if set, otherwise parses GITHUB_WORKFLOW_REF.
  */
@@ -37468,6 +37491,26 @@ async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
     const b = new Batch(gitOps, cfg.dryRun, log, reporter);
     // 1. Collect queued PRs
     const prs = await q.collect(cfg.batchSize);
+    if (cfg.triggerLabeledPR !== undefined &&
+        !prs.some((p) => p.number === cfg.triggerLabeledPR)) {
+        log(`PR #${cfg.triggerLabeledPR} (event-labeled with "${cfg.queueLabel}") missing from issues-list result; fetching directly`);
+        try {
+            const eventPR = await api.getPR(cfg.triggerLabeledPR);
+            if (eventPR.state === "open") {
+                prs.push(eventPR);
+                prs.sort((a, b) => a.createdAt - b.createdAt);
+                if (cfg.batchSize > 0 && prs.length > cfg.batchSize) {
+                    prs.length = cfg.batchSize;
+                }
+            }
+            else {
+                log(`PR #${cfg.triggerLabeledPR} is ${eventPR.state}; not adding to batch`);
+            }
+        }
+        catch (err) {
+            log(`Warning: failed to fetch event-labeled PR #${cfg.triggerLabeledPR}: ${err}`);
+        }
+    }
     if (prs.length === 0) {
         log("No PRs in queue");
         return;
@@ -38099,6 +38142,10 @@ async function run() {
             return;
         }
     }
+    const triggerLabeledPR = eventTriggerLabeledPR(github_context, inputs.queueLabel);
+    if (triggerLabeledPR !== undefined) {
+        log(`Event trigger: pull_request:labeled with "${inputs.queueLabel}" on PR #${triggerLabeledPR}`);
+    }
     const cfg = {
         ciWorkflow: inputs.ciWorkflow,
         batchSize: inputs.batchSize,
@@ -38106,6 +38153,7 @@ async function run() {
         dryRun: inputs.dryRun,
         batchPrs: inputs.batchPrs,
         commentCtx,
+        triggerLabeledPR,
     };
     // Configure git identity and rewrite the `origin` remote to embed
     // the merge-queue token. Done here (not in the user's workflow) so

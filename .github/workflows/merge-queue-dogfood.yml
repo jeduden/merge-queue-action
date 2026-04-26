@@ -1,0 +1,57 @@
+name: Merge Queue (dogfood)
+
+# Dogfoods this action against its own repository so changes to
+# the label/event/queue/API logic exercise the real GitHub API
+# path before reaching downstream consumers (e.g. mdsmith). Runs
+# in dry_run mode — the action logs intent without mutating any
+# labels, branches, or comments — so it is safe to leave on for
+# every PR.
+#
+# To exercise the real listPRsWithLabel + event-trigger fallback:
+#   1. One-time setup: create a label named "queue" in this repo
+#      (Issues → Labels), or push a PR labelled "queue" once and
+#      let GitHub auto-create it via your manual add.
+#   2. Open a PR against main and add the "queue" label.
+#   3. Inspect this workflow's run log: it should report which
+#      PRs were collected, and the new event-trigger fallback
+#      should ensure the just-labelled PR is in the batch even
+#      if the issues-list endpoint hasn't propagated the label.
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+
+concurrency:
+  group: merge-queue-dogfood
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  dogfood:
+    # Same gate as a real consumer would use: only run on the
+    # queue label being added to a same-repo PR targeting main.
+    # workflow_dispatch path is unconditional so the action can
+    # be exercised manually against the existing queue.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.label.name == 'queue' &&
+       github.event.pull_request.base.ref == 'main' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: ./
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          ci_workflow: .github/workflows/ci.yml
+          dry_run: "true"

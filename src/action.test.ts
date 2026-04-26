@@ -1,5 +1,6 @@
 import { describe, expect, it, afterEach } from "vitest";
 import {
+  eventTriggerLabeledPR,
   hasWritePermission,
   selfWorkflowFile,
   runProcess,
@@ -203,6 +204,76 @@ describe("hasWritePermission", () => {
   });
 });
 
+describe("eventTriggerLabeledPR", () => {
+  it("returns the PR number when label matches", () => {
+    const ctx = {
+      eventName: "pull_request",
+      payload: {
+        action: "labeled",
+        label: { name: "queue" },
+        pull_request: { number: 173 },
+      },
+    };
+    expect(eventTriggerLabeledPR(ctx, "queue")).toBe(173);
+  });
+
+  it("returns undefined for non-pull_request events", () => {
+    const ctx = {
+      eventName: "push",
+      payload: { action: "labeled", label: { name: "queue" } },
+    };
+    expect(eventTriggerLabeledPR(ctx, "queue")).toBeUndefined();
+  });
+
+  it("returns undefined when the action is not 'labeled'", () => {
+    const ctx = {
+      eventName: "pull_request",
+      payload: {
+        action: "opened",
+        label: { name: "queue" },
+        pull_request: { number: 1 },
+      },
+    };
+    expect(eventTriggerLabeledPR(ctx, "queue")).toBeUndefined();
+  });
+
+  it("returns undefined when the label does not match", () => {
+    const ctx = {
+      eventName: "pull_request",
+      payload: {
+        action: "labeled",
+        label: { name: "wip" },
+        pull_request: { number: 1 },
+      },
+    };
+    expect(eventTriggerLabeledPR(ctx, "queue")).toBeUndefined();
+  });
+
+  it("matches case-sensitively (queue vs Queue)", () => {
+    const ctx = {
+      eventName: "pull_request",
+      payload: {
+        action: "labeled",
+        label: { name: "Queue" },
+        pull_request: { number: 1 },
+      },
+    };
+    expect(eventTriggerLabeledPR(ctx, "queue")).toBeUndefined();
+  });
+
+  it("returns undefined when payload is missing fields", () => {
+    expect(
+      eventTriggerLabeledPR({ eventName: "pull_request", payload: {} }, "queue"),
+    ).toBeUndefined();
+    expect(
+      eventTriggerLabeledPR(
+        { eventName: "pull_request", payload: { action: "labeled" } },
+        "queue",
+      ),
+    ).toBeUndefined();
+  });
+});
+
 describe("selfWorkflowFile", () => {
   const orig = { ...process.env };
   afterEach(() => {
@@ -254,6 +325,114 @@ describe("runProcess", () => {
 
     await runProcess(api, git, baseCfg(), (m) => logs.push(m), "user");
     expect(logs).toContain("No PRs in queue");
+  });
+
+  it("falls back to event-labeled PR when issues-list misses it", async () => {
+    const api = newMockAPI();
+    // Issues-list returns nothing (e.g. label-name discrepancy or
+    // brief indexing lag after the labeled webhook fires).
+    api.prs.set("queue", []);
+    const eventPR = makePR(173);
+    // getPR can find it directly even though listPRsWithLabel can't.
+    api.getPR = async (n: number) => {
+      if (n !== 173) throw new Error("not found");
+      return eventPR;
+    };
+    const git = newMockGit();
+    const logs: string[] = [];
+
+    await runProcess(
+      api,
+      git,
+      baseCfg({ triggerLabeledPR: 173 }),
+      (m) => logs.push(m),
+    );
+    expect(logs.some((l) => l.includes("PR #173 (event-labeled"))).toBe(true);
+    expect(logs.some((l) => l.includes("Processing 1 PRs"))).toBe(true);
+  });
+
+  it("does not double-include the event-labeled PR when issues-list already has it", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(173)]);
+    let getPRCalls = 0;
+    api.getPR = async (n: number) => {
+      getPRCalls++;
+      return makePR(n);
+    };
+    const git = newMockGit();
+    const logs: string[] = [];
+
+    await runProcess(
+      api,
+      git,
+      baseCfg({ triggerLabeledPR: 173 }),
+      (m) => logs.push(m),
+    );
+    // Should not log the fallback message and should not call getPR for fallback.
+    expect(logs.some((l) => l.includes("missing from issues-list"))).toBe(false);
+    expect(getPRCalls).toBe(0);
+    expect(logs.some((l) => l.includes("Processing 1 PRs"))).toBe(true);
+  });
+
+  it("skips event-labeled PR fallback when the PR is closed", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", []);
+    api.getPR = async (n: number) => makePR(n, `branch-${n}`, "closed");
+    const git = newMockGit();
+    const logs: string[] = [];
+
+    await runProcess(
+      api,
+      git,
+      baseCfg({ triggerLabeledPR: 99 }),
+      (m) => logs.push(m),
+    );
+    expect(logs.some((l) => l.includes("PR #99 is closed"))).toBe(true);
+    expect(logs).toContain("No PRs in queue");
+  });
+
+  it("logs and continues when fetching event-labeled PR fails", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", []);
+    api.getPR = async () => {
+      throw new Error("boom");
+    };
+    const git = newMockGit();
+    const logs: string[] = [];
+
+    await runProcess(
+      api,
+      git,
+      baseCfg({ triggerLabeledPR: 99 }),
+      (m) => logs.push(m),
+    );
+    expect(
+      logs.some((l) =>
+        l.includes("Warning: failed to fetch event-labeled PR #99"),
+      ),
+    ).toBe(true);
+    expect(logs).toContain("No PRs in queue");
+  });
+
+  it("respects batch size when adding event-labeled PR", async () => {
+    const api = newMockAPI();
+    // Five PRs already in queue, batch size 5, plus a 6th from the event payload.
+    api.prs.set(
+      "queue",
+      [10, 20, 30, 40, 50].map((n) => makePR(n)),
+    );
+    api.getPR = async (n: number) => makePR(n); // PR #5 has earlier createdAt
+    const git = newMockGit();
+    const logs: string[] = [];
+
+    await runProcess(
+      api,
+      git,
+      baseCfg({ triggerLabeledPR: 5, batchSize: 5 }),
+      (m) => logs.push(m),
+    );
+    // Event PR #5 sorts earliest (createdAt = 500); the latest (#50) drops out.
+    expect(logs.some((l) => l.includes("Processing 5 PRs"))).toBe(true);
   });
 
   it("processes PRs in dry-run mode", async () => {

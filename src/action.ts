@@ -37,6 +37,15 @@ export interface Config {
   batchPrs: string;
   /** Required by runProcess/runBisect; unused by runSetup. */
   commentCtx?: CommentCtx;
+  /**
+   * PR number from a `pull_request:labeled` event whose label matches
+   * `queueLabel`. When set, runProcess fetches that PR directly if the
+   * issues-list endpoint didn't return it — defends against the brief
+   * window where the label has been added on the PR but isn't yet
+   * reflected in the labels filter, and against subtle label-name
+   * encoding mismatches.
+   */
+  triggerLabeledPR?: number;
 }
 
 function requireCtx(cfg: Config): CommentCtx {
@@ -77,6 +86,34 @@ export interface FullAPI extends GitHubAPI, WorkflowAPI {
 
 export function hasWritePermission(perm: string): boolean {
   return perm === "write" || perm === "maintain" || perm === "admin";
+}
+
+/**
+ * If the workflow was triggered by a `pull_request: labeled` event whose
+ * label matches `queueLabel`, return that PR's number. Otherwise undefined.
+ *
+ * The webhook payload is the authoritative signal for the just-added
+ * label and is delivered before the issues-list endpoint is guaranteed to
+ * reflect it. Surfacing the PR number here lets `runProcess` fetch the PR
+ * directly when the label-filtered list omits it (indexing lag, label-name
+ * encoding mismatch, replication moment).
+ *
+ * Pure-functional shape so the caller (main.ts) injects `github.context`
+ * and unit tests can hand in a synthetic context.
+ */
+export function eventTriggerLabeledPR(
+  ctx: { eventName: string; payload: unknown },
+  queueLabel: string,
+): number | undefined {
+  if (ctx.eventName !== "pull_request") return undefined;
+  const payload = ctx.payload as {
+    action?: string;
+    label?: { name?: string };
+    pull_request?: { number?: number };
+  };
+  if (payload?.action !== "labeled") return undefined;
+  if (payload.label?.name !== queueLabel) return undefined;
+  return payload.pull_request?.number;
 }
 
 /**
@@ -235,6 +272,32 @@ export async function runProcess(
 
   // 1. Collect queued PRs
   const prs = await q.collect(cfg.batchSize);
+  if (
+    cfg.triggerLabeledPR !== undefined &&
+    !prs.some((p) => p.number === cfg.triggerLabeledPR)
+  ) {
+    log(
+      `PR #${cfg.triggerLabeledPR} (event-labeled with "${cfg.queueLabel}") missing from issues-list result; fetching directly`,
+    );
+    try {
+      const eventPR = await api.getPR(cfg.triggerLabeledPR);
+      if (eventPR.state === "open") {
+        prs.push(eventPR);
+        prs.sort((a, b) => a.createdAt - b.createdAt);
+        if (cfg.batchSize > 0 && prs.length > cfg.batchSize) {
+          prs.length = cfg.batchSize;
+        }
+      } else {
+        log(
+          `PR #${cfg.triggerLabeledPR} is ${eventPR.state}; not adding to batch`,
+        );
+      }
+    } catch (err) {
+      log(
+        `Warning: failed to fetch event-labeled PR #${cfg.triggerLabeledPR}: ${err}`,
+      );
+    }
+  }
   if (prs.length === 0) {
     log("No PRs in queue");
     return;
