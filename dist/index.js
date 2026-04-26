@@ -36424,6 +36424,9 @@ class GitHubClient {
             pull_number: prNumber,
         });
         const headRef = pr.head.label || pr.head.ref;
+        const labels = (pr.labels ?? [])
+            .map((l) => typeof l === "string" ? l : l.name ?? "")
+            .filter((n) => n !== "");
         return {
             number: pr.number,
             headRef,
@@ -36431,6 +36434,7 @@ class GitHubClient {
             title: pr.title,
             state: pr.state,
             createdAt: Math.floor(new Date(pr.created_at).getTime() / 1000),
+            labels,
         };
     }
     async getActorPermission(username) {
@@ -37375,11 +37379,18 @@ function eventTriggerLabeledPR(ctx, queueLabel) {
     if (ctx.eventName !== "pull_request")
         return undefined;
     const payload = ctx.payload;
-    if (payload?.action !== "labeled")
+    if (typeof payload !== "object" || payload === null)
         return undefined;
-    if (payload.label?.name !== queueLabel)
+    const p = payload;
+    if (p.action !== "labeled")
         return undefined;
-    return payload.pull_request?.number;
+    if (p.label?.name !== queueLabel)
+        return undefined;
+    const num = p.pull_request?.number;
+    if (typeof num !== "number" || !Number.isInteger(num) || num <= 0) {
+        return undefined;
+    }
+    return num;
 }
 /**
  * Returns the repo-relative workflow path for dispatch.
@@ -37496,15 +37507,20 @@ async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
         log(`PR #${cfg.triggerLabeledPR} (event-labeled with "${cfg.queueLabel}") missing from issues-list result; fetching directly`);
         try {
             const eventPR = await api.getPR(cfg.triggerLabeledPR);
-            if (eventPR.state === "open") {
+            if (eventPR.state !== "open") {
+                log(`PR #${cfg.triggerLabeledPR} is ${eventPR.state}; not adding to batch`);
+            }
+            else if (!eventPR.labels?.includes(cfg.queueLabel)) {
+                // Label was removed between webhook firing and our run — don't
+                // requeue a PR that the author has explicitly de-queued.
+                log(`PR #${cfg.triggerLabeledPR} no longer has "${cfg.queueLabel}" label; not adding to batch`);
+            }
+            else {
                 prs.push(eventPR);
                 prs.sort((a, b) => a.createdAt - b.createdAt);
                 if (cfg.batchSize > 0 && prs.length > cfg.batchSize) {
                     prs.length = cfg.batchSize;
                 }
-            }
-            else {
-                log(`PR #${cfg.triggerLabeledPR} is ${eventPR.state}; not adding to batch`);
             }
         }
         catch (err) {

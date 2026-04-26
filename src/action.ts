@@ -106,14 +106,20 @@ export function eventTriggerLabeledPR(
   queueLabel: string,
 ): number | undefined {
   if (ctx.eventName !== "pull_request") return undefined;
-  const payload = ctx.payload as {
-    action?: string;
-    label?: { name?: string };
-    pull_request?: { number?: number };
+  const payload = ctx.payload;
+  if (typeof payload !== "object" || payload === null) return undefined;
+  const p = payload as {
+    action?: unknown;
+    label?: { name?: unknown } | null;
+    pull_request?: { number?: unknown } | null;
   };
-  if (payload?.action !== "labeled") return undefined;
-  if (payload.label?.name !== queueLabel) return undefined;
-  return payload.pull_request?.number;
+  if (p.action !== "labeled") return undefined;
+  if (p.label?.name !== queueLabel) return undefined;
+  const num = p.pull_request?.number;
+  if (typeof num !== "number" || !Number.isInteger(num) || num <= 0) {
+    return undefined;
+  }
+  return num;
 }
 
 /**
@@ -281,16 +287,22 @@ export async function runProcess(
     );
     try {
       const eventPR = await api.getPR(cfg.triggerLabeledPR);
-      if (eventPR.state === "open") {
+      if (eventPR.state !== "open") {
+        log(
+          `PR #${cfg.triggerLabeledPR} is ${eventPR.state}; not adding to batch`,
+        );
+      } else if (!eventPR.labels?.includes(cfg.queueLabel)) {
+        // Label was removed between webhook firing and our run — don't
+        // requeue a PR that the author has explicitly de-queued.
+        log(
+          `PR #${cfg.triggerLabeledPR} no longer has "${cfg.queueLabel}" label; not adding to batch`,
+        );
+      } else {
         prs.push(eventPR);
         prs.sort((a, b) => a.createdAt - b.createdAt);
         if (cfg.batchSize > 0 && prs.length > cfg.batchSize) {
           prs.length = cfg.batchSize;
         }
-      } else {
-        log(
-          `PR #${cfg.triggerLabeledPR} is ${eventPR.state}; not adding to batch`,
-        );
       }
     } catch (err) {
       log(

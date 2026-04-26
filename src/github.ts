@@ -229,6 +229,11 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
       pull_number: prNumber,
     });
     const headRef = pr.head.label || pr.head.ref;
+    const labels = (pr.labels ?? [])
+      .map((l: string | { name?: string }) =>
+        typeof l === "string" ? l : (l as { name?: string }).name ?? "",
+      )
+      .filter((n: string) => n !== "");
     return {
       number: pr.number,
       headRef,
@@ -236,6 +241,7 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
       title: pr.title,
       state: pr.state,
       createdAt: Math.floor(new Date(pr.created_at).getTime() / 1000),
+      labels,
     };
   }
 

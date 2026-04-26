@@ -272,6 +272,48 @@ describe("eventTriggerLabeledPR", () => {
       ),
     ).toBeUndefined();
   });
+
+  it("returns undefined for non-object payloads (null / string / number)", () => {
+    expect(
+      eventTriggerLabeledPR(
+        { eventName: "pull_request", payload: null },
+        "queue",
+      ),
+    ).toBeUndefined();
+    expect(
+      eventTriggerLabeledPR(
+        { eventName: "pull_request", payload: "labeled" },
+        "queue",
+      ),
+    ).toBeUndefined();
+    expect(
+      eventTriggerLabeledPR(
+        { eventName: "pull_request", payload: 42 },
+        "queue",
+      ),
+    ).toBeUndefined();
+  });
+
+  it("returns undefined when pull_request.number is not a positive integer", () => {
+    const mk = (number: unknown) =>
+      eventTriggerLabeledPR(
+        {
+          eventName: "pull_request",
+          payload: {
+            action: "labeled",
+            label: { name: "queue" },
+            pull_request: { number },
+          },
+        },
+        "queue",
+      );
+    expect(mk("173")).toBeUndefined();
+    expect(mk(0)).toBeUndefined();
+    expect(mk(-1)).toBeUndefined();
+    expect(mk(1.5)).toBeUndefined();
+    expect(mk(Number.NaN)).toBeUndefined();
+    expect(mk(null)).toBeUndefined();
+  });
 });
 
 describe("selfWorkflowFile", () => {
@@ -332,7 +374,7 @@ describe("runProcess", () => {
     // Issues-list returns nothing (e.g. label-name discrepancy or
     // brief indexing lag after the labeled webhook fires).
     api.prs.set("queue", []);
-    const eventPR = makePR(173);
+    const eventPR = { ...makePR(173), labels: ["queue"] };
     // getPR can find it directly even though listPRsWithLabel can't.
     api.getPR = async (n: number) => {
       if (n !== 173) throw new Error("not found");
@@ -357,7 +399,7 @@ describe("runProcess", () => {
     let getPRCalls = 0;
     api.getPR = async (n: number) => {
       getPRCalls++;
-      return makePR(n);
+      return { ...makePR(n), labels: ["queue"] };
     };
     const git = newMockGit();
     const logs: string[] = [];
@@ -377,7 +419,10 @@ describe("runProcess", () => {
   it("skips event-labeled PR fallback when the PR is closed", async () => {
     const api = newMockAPI();
     api.prs.set("queue", []);
-    api.getPR = async (n: number) => makePR(n, `branch-${n}`, "closed");
+    api.getPR = async (n: number) => ({
+      ...makePR(n, `branch-${n}`, "closed"),
+      labels: ["queue"],
+    });
     const git = newMockGit();
     const logs: string[] = [];
 
@@ -388,6 +433,48 @@ describe("runProcess", () => {
       (m) => logs.push(m),
     );
     expect(logs.some((l) => l.includes("PR #99 is closed"))).toBe(true);
+    expect(logs).toContain("No PRs in queue");
+  });
+
+  it("skips event-labeled PR fallback when the queue label was removed before runProcess", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", []);
+    // Label was added (firing the webhook) and then removed before this run.
+    api.getPR = async (n: number) => ({ ...makePR(n), labels: ["other"] });
+    const git = newMockGit();
+    const logs: string[] = [];
+
+    await runProcess(
+      api,
+      git,
+      baseCfg({ triggerLabeledPR: 99 }),
+      (m) => logs.push(m),
+    );
+    expect(
+      logs.some((l) =>
+        l.includes(`PR #99 no longer has "queue" label`),
+      ),
+    ).toBe(true);
+    expect(logs).toContain("No PRs in queue");
+  });
+
+  it("treats a PR with empty labels (legacy mock) as not queue-labeled", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", []);
+    // No labels field — defensive: should not be processed.
+    api.getPR = async (n: number) => makePR(n);
+    const git = newMockGit();
+    const logs: string[] = [];
+
+    await runProcess(
+      api,
+      git,
+      baseCfg({ triggerLabeledPR: 99 }),
+      (m) => logs.push(m),
+    );
+    expect(
+      logs.some((l) => l.includes(`PR #99 no longer has "queue" label`)),
+    ).toBe(true);
     expect(logs).toContain("No PRs in queue");
   });
 
@@ -421,7 +508,7 @@ describe("runProcess", () => {
       "queue",
       [10, 20, 30, 40, 50].map((n) => makePR(n)),
     );
-    api.getPR = async (n: number) => makePR(n); // PR #5 has earlier createdAt
+    api.getPR = async (n: number) => ({ ...makePR(n), labels: ["queue"] });
     const git = newMockGit();
     const logs: string[] = [];
 
