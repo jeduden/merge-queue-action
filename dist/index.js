@@ -37010,6 +37010,13 @@ class GitOps {
         // `refs/pull/<N>/head` — fetchable without knowing the ref name.
         // If you "optimise" this to fetch a branch, fork PRs will break.
         await this.gitOrThrow(["fetch", "--no-tags", "origin", sourceRef]);
+        // Use `--no-commit` so git completes the merge but doesn't commit
+        // yet. This allows pre-merge-commit hooks to run (they fire when
+        // `git commit` is invoked, not during `git merge`). Without this,
+        // passing `-m` directly to `git merge` would bypass the hook
+        // entirely, breaking repos that rely on merge drivers with hooks
+        // (e.g. mdsmith's merge-driver that fixes generated sections).
+        //
         // `-c commit.gpgsign=false` / `-c tag.gpgsign=false`: `git merge
         // --no-ff` creates a merge commit and would otherwise inherit any
         // global signing config (common on self-hosted runners). If the
@@ -37023,34 +37030,76 @@ class GitOps {
             "tag.gpgsign=false",
             "merge",
             "--no-ff",
-            "-m",
-            commitMsg,
+            "--no-commit",
             sourceRef,
         ]);
-        if (merge.code === 0)
-            return true;
-        // git merge returns 1 on a real merge conflict; any other non-zero
-        // exit is a real error (missing user.email, unknown revision,
-        // failed hook, etc.) and must surface as a throw rather than being
-        // mis-labelled `queue:failed`.
-        if (merge.code !== 1) {
+        // git merge --no-commit returns 0 on success (merge staged, ready
+        // to commit), 1 on conflict, or other non-zero on errors.
+        if (merge.code !== 0 && merge.code !== 1) {
             throw new Error(`git merge failed (exit ${merge.code}): ${merge.stderr.trim() || merge.stdout.trim()}`);
         }
-        this.log(`git merge reported a conflict (exit 1); aborting. stderr: ${merge.stderr.trim()}`);
-        const abort = await this.git(["merge", "--abort"]);
-        if (abort.code !== 0) {
-            // Leave the working tree tidy even if --abort is a no-op (merge
-            // may have failed before touching the index).
-            const reset = await this.git(["reset", "--hard", "HEAD"]);
-            if (reset.code !== 0) {
-                // Both cleanup paths failed — the working tree may be dirty,
-                // which would silently corrupt the next PR's merge if we kept
-                // going. Throw so the batch stops and the failure surfaces
-                // with enough detail to diagnose.
-                throw new Error(`failed to clean up conflicted merge: both \`git merge --abort\` and \`git reset --hard HEAD\` failed; worktree is in an unknown state. abort stderr: ${abort.stderr.trim()}; reset stderr: ${reset.stderr.trim()}`);
+        if (merge.code === 1) {
+            this.log(`git merge reported a conflict (exit 1); aborting. stderr: ${merge.stderr.trim()}`);
+            const abort = await this.git(["merge", "--abort"]);
+            if (abort.code !== 0) {
+                // Leave the working tree tidy even if --abort is a no-op (merge
+                // may have failed before touching the index).
+                const reset = await this.git(["reset", "--hard", "HEAD"]);
+                if (reset.code !== 0) {
+                    // Both cleanup paths failed — the working tree may be dirty,
+                    // which would silently corrupt the next PR's merge if we kept
+                    // going. Throw so the batch stops and the failure surfaces
+                    // with enough detail to diagnose.
+                    throw new Error(`failed to clean up conflicted merge: both \`git merge --abort\` and \`git reset --hard HEAD\` failed; worktree is in an unknown state. abort stderr: ${abort.stderr.trim()}; reset stderr: ${reset.stderr.trim()}`);
+                }
             }
+            return false;
         }
-        return false;
+        // Detect no-op merges: `git merge --no-commit` exits 0 with "Already
+        // up to date." but does NOT create MERGE_HEAD, so the subsequent
+        // `git commit` would fail with "nothing to commit". Check for
+        // MERGE_HEAD before attempting the commit step.
+        const mergeHeadCheck = await this.git([
+            "rev-parse",
+            "--verify",
+            "MERGE_HEAD",
+        ]);
+        if (mergeHeadCheck.code !== 0) {
+            // No merge in progress — source was already reachable from HEAD.
+            return true;
+        }
+        // Merge succeeded and is staged; now commit it. This is where
+        // pre-merge-commit hooks run. The `-c` overrides apply to both
+        // the merge and commit steps.
+        const commit = await this.git([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "commit",
+            "-m",
+            commitMsg,
+        ]);
+        if (commit.code !== 0) {
+            // Hook failure, empty commit, or other commit-time error. Unlike
+            // a merge conflict (exit 1 from merge), this is unexpected and
+            // indicates misconfiguration or a broken hook. Best-effort clean
+            // up any in-progress merge state before surfacing the error so
+            // later steps do not inherit a dirty worktree.
+            const abort = await this.git(["merge", "--abort"]);
+            let cleanupDetail = "";
+            if (abort.code !== 0) {
+                const reset = await this.git(["reset", "--hard", "HEAD"]);
+                if (reset.code !== 0) {
+                    cleanupDetail = ` Cleanup failed: git merge --abort (exit ${abort.code}): ${abort.stderr.trim() || abort.stdout.trim()}; git reset --hard HEAD (exit ${reset.code}): ${reset.stderr.trim() || reset.stdout.trim()}`;
+                }
+                else {
+                    cleanupDetail = ` Cleanup fallback succeeded after git merge --abort failed (exit ${abort.code}): ${abort.stderr.trim() || abort.stdout.trim()}`;
+                }
+            }
+            throw new Error(`git commit after successful merge failed (exit ${commit.code}): ${commit.stderr.trim() || commit.stdout.trim()}${cleanupDetail}`);
+        }
+        return true;
     }
     async pushBranch(branch) {
         this.log(`Pushing ${branch} to origin`);

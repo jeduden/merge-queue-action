@@ -157,6 +157,104 @@ describe("GitOps with injected exec", () => {
     expect(ok).toBe(true);
   });
 
+  it("mergeBranch returns true without running git commit when already up to date (no MERGE_HEAD)", async () => {
+    const { octokit } = makeFakeOctokit();
+    const commitCalls: string[][] = [];
+    const exec: Exec = async (args) => {
+      // merge --no-commit exits 0 ("Already up to date.")
+      const mergeIdx = args.indexOf("merge");
+      if (mergeIdx >= 0 && args.includes("--no-commit")) {
+        return { code: 0, stdout: "Already up to date.\n", stderr: "" };
+      }
+      // MERGE_HEAD does not exist (no merge in progress)
+      if (args[0] === "rev-parse" && args.includes("MERGE_HEAD")) {
+        return {
+          code: 128,
+          stdout: "",
+          stderr: "fatal: not a valid object name MERGE_HEAD",
+        };
+      }
+      if (args.includes("commit")) {
+        commitCalls.push(args);
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    const ok = await ops.mergeBranch("batch", "sha-1", "msg");
+    expect(ok).toBe(true);
+    // git commit must NOT have been called — nothing to commit.
+    expect(commitCalls).toHaveLength(0);
+  });
+
+  it("mergeBranch throws and runs git merge --abort when git commit fails", async () => {
+    const { octokit } = makeFakeOctokit();
+    const execCalls: string[][] = [];
+    const exec: Exec = async (args) => {
+      execCalls.push(args);
+      // merge --no-commit exits 0 (merge staged successfully)
+      const mergeIdx = args.indexOf("merge");
+      if (mergeIdx >= 0 && args.includes("--no-commit")) {
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      // MERGE_HEAD exists — merge is in progress
+      if (args[0] === "rev-parse" && args.includes("MERGE_HEAD")) {
+        return { code: 0, stdout: "abc1234\n", stderr: "" };
+      }
+      // commit step fails (e.g. pre-merge-commit hook rejects)
+      if (args.includes("commit")) {
+        return { code: 1, stdout: "", stderr: "pre-merge-commit hook failed" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    await expect(ops.mergeBranch("batch", "sha-1", "msg")).rejects.toThrow(
+      "git commit after successful merge failed",
+    );
+    // merge --abort must be attempted to clean up the staged merge state.
+    const abortCall = execCalls.find(
+      (c) => c[0] === "merge" && c[1] === "--abort",
+    );
+    expect(abortCall).toBeDefined();
+  });
+
+  it("mergeBranch falls back to git reset --hard HEAD when git merge --abort also fails after commit failure", async () => {
+    const { octokit } = makeFakeOctokit();
+    const execCalls: string[][] = [];
+    const exec: Exec = async (args) => {
+      execCalls.push(args);
+      // merge --no-commit exits 0 (merge staged successfully)
+      const mergeIdx = args.indexOf("merge");
+      if (mergeIdx >= 0 && args.includes("--no-commit")) {
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      // MERGE_HEAD exists — merge is in progress
+      if (args[0] === "rev-parse" && args.includes("MERGE_HEAD")) {
+        return { code: 0, stdout: "abc1234\n", stderr: "" };
+      }
+      // commit step fails
+      if (args.includes("commit")) {
+        return { code: 1, stdout: "", stderr: "pre-merge-commit hook failed" };
+      }
+      // merge --abort also fails
+      if (mergeIdx >= 0 && args[mergeIdx + 1] === "--abort") {
+        return { code: 128, stdout: "", stderr: "fatal: no merge in progress" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    await expect(ops.mergeBranch("batch", "sha-1", "msg")).rejects.toThrow(
+      "git commit after successful merge failed",
+    );
+    // git reset --hard HEAD must be the fallback cleanup.
+    const resetCall = execCalls.find(
+      (c) => c[0] === "reset" && c[1] === "--hard" && c[2] === "HEAD",
+    );
+    expect(resetCall).toBeDefined();
+  });
+
   it("mergeBranch throws (not conflict) when git merge exits with a non-1 error", async () => {
     const { octokit } = makeFakeOctokit();
     const exec: Exec = async (args) => {
@@ -762,4 +860,17 @@ describe("GitOps against a real git repo (integration)", () => {
     expect(merged).toContain("a");
     expect(merged).toContain("b");
   });
+
+  // NOTE: We do not directly test pre-merge-commit hook execution here.
+  // This integration suite exercises the two-step merge flow in a real git
+  // repo, and the custom merge driver test above verifies that the merge
+  // driver still works correctly with `git merge --no-commit` followed by
+  // `git commit`. That split is what allows commit-time hooks such as
+  // pre-merge-commit to run, whereas `git merge -m "msg"` could bypass that
+  // path.
+  //
+  // Hook behavior is validated out-of-band / in real-world usage. For
+  // example, jeduden/mdsmith uses a pre-merge-commit hook together with its
+  // merge driver to fix generated catalog sections after merging, and that
+  // setup works with the two-step merge process implemented here.
 });

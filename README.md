@@ -688,6 +688,82 @@ ability to alter the working tree before the merge. **Pin every one
 of them to a full commit SHA**, not a floating tag — see the note
 under [Repository-side setup](#repository-side-setup) above.
 
+### Using pre-merge-commit hooks with merge drivers
+
+Git's `pre-merge-commit` hook runs after all files are merged but before
+the merge commit is created, making it ideal for fixing up generated
+content that depends on the final merged state of multiple files. This
+is particularly useful when a merge driver handles per-file conflicts,
+but you need a post-processing step to update derived content (catalogs,
+indexes, lock files, etc.) based on the complete merge result.
+
+The action's two-step merge process (`git merge --no-commit` followed by
+`git commit`) ensures `pre-merge-commit` hooks execute correctly. (In
+earlier versions, using `git merge -m "message"` bypassed the hook
+entirely.)
+
+#### Example: mdsmith merge-driver + pre-merge-commit hook
+
+The [mdsmith](https://github.com/jeduden/mdsmith) Markdown linter uses
+this pattern to maintain a generated catalog in `PLAN.md`:
+
+1. **Merge driver** resolves per-file conflicts in `plan/*.md` files using
+   a custom 3-way merge strategy.
+2. **pre-merge-commit hook** runs after all `plan/*.md` files are merged,
+   regenerates the catalog section in `PLAN.md` based on the final merged
+   state, and stages the update.
+
+**Setup:**
+
+1. **Install the tool** in your merge-queue workflow before the action runs:
+
+   ```yaml
+   - name: Install mdsmith
+     run: |
+       mkdir -p "$HOME/.local/bin"
+       curl -fsSL "https://github.com/jeduden/mdsmith/releases/download/v0.7.1/mdsmith-linux-amd64" \
+         -o "$HOME/.local/bin/mdsmith"
+       chmod +x "$HOME/.local/bin/mdsmith"
+       echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+   ```
+
+2. **Register the merge driver and install the hook** (the tool handles
+   hook creation):
+
+   ```yaml
+   - name: Configure mdsmith merge driver
+     run: |
+       mdsmith merge-driver install
+   ```
+
+   This registers `merge.mdsmith.driver` in `.git/config` and creates a
+   `pre-merge-commit` hook at `.git/hooks/pre-merge-commit` that runs
+   `mdsmith fix` on generated files after each merge.
+
+3. **Commit `.gitattributes`** mapping Markdown files to the driver:
+
+   ```gitattributes
+   *.md merge=mdsmith
+   ```
+
+When the action merges PRs, the driver resolves conflicts in individual
+Markdown files, then the `pre-merge-commit` hook regenerates any derived
+content before the merge commit is finalized.
+
+> **Binary path stability:** The tool binary must be installed to a stable
+> path that persists for the hook to find it. Avoid installing to
+> `$RUNNER_TEMP` or other ephemeral locations — use `$HOME/.local/bin` or
+> a committed script in the repository itself. The hook embeds the absolute
+> path to the binary when it's created, so the binary must still exist at
+> that path when `git commit` invokes the hook.
+
+> **Security note:** Like merge drivers, pre-merge-commit hooks execute
+> arbitrary code during the merge with access to `MERGE_QUEUE_TOKEN`.
+> Treat `.git/hooks/` creation (or any `*-merge install` command that
+> writes hooks) as a trusted operation — ensure the binary and any
+> config it writes are from a verified source, and consider pinning
+> the installation step to a specific version/checksum.
+
 ## Development
 
 ### Prerequisites
