@@ -157,6 +157,61 @@ describe("GitOps with injected exec", () => {
     expect(ok).toBe(true);
   });
 
+  it("mergeBranch returns true without running git commit when already up to date (no MERGE_HEAD)", async () => {
+    const { octokit } = makeFakeOctokit();
+    const commitCalls: string[][] = [];
+    const exec: Exec = async (args) => {
+      // merge --no-commit exits 0 ("Already up to date.")
+      const mergeIdx = args.indexOf("merge");
+      if (mergeIdx >= 0 && args.includes("--no-commit")) {
+        return { code: 0, stdout: "Already up to date.\n", stderr: "" };
+      }
+      // MERGE_HEAD does not exist (no merge in progress)
+      if (args[0] === "rev-parse" && args.includes("MERGE_HEAD")) {
+        return {
+          code: 128,
+          stdout: "",
+          stderr: "fatal: not a valid object name MERGE_HEAD",
+        };
+      }
+      if (args.includes("commit")) {
+        commitCalls.push(args);
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    const ok = await ops.mergeBranch("batch", "sha-1", "msg");
+    expect(ok).toBe(true);
+    // git commit must NOT have been called — nothing to commit.
+    expect(commitCalls).toHaveLength(0);
+  });
+
+  it("mergeBranch throws when git commit fails after a successful merge (e.g. hook error)", async () => {
+    const { octokit } = makeFakeOctokit();
+    const exec: Exec = async (args) => {
+      // merge --no-commit exits 0 (merge staged successfully)
+      const mergeIdx = args.indexOf("merge");
+      if (mergeIdx >= 0 && args.includes("--no-commit")) {
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      // MERGE_HEAD exists — merge is in progress
+      if (args[0] === "rev-parse" && args.includes("MERGE_HEAD")) {
+        return { code: 0, stdout: "abc1234\n", stderr: "" };
+      }
+      // commit step fails (e.g. pre-merge-commit hook rejects)
+      if (args.includes("commit")) {
+        return { code: 1, stdout: "", stderr: "pre-merge-commit hook failed" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    await expect(ops.mergeBranch("batch", "sha-1", "msg")).rejects.toThrow(
+      "git commit after successful merge failed",
+    );
+  });
+
   it("mergeBranch throws (not conflict) when git merge exits with a non-1 error", async () => {
     const { octokit } = makeFakeOctokit();
     const exec: Exec = async (args) => {
@@ -763,14 +818,16 @@ describe("GitOps against a real git repo (integration)", () => {
     expect(merged).toContain("b");
   });
 
-  // NOTE: Testing pre-merge-commit hooks directly is challenging in a unit
-  // test environment. The existing custom merge driver test above validates
-  // that hooks CAN run during our two-step merge process (`git merge
-  // --no-commit` + `git commit`). The split allows hooks like
-  // pre-merge-commit to execute during the `git commit` step, which was
-  // previously bypassed when using `git merge -m "msg"` directly.
+  // NOTE: We do not directly test pre-merge-commit hook execution here.
+  // This integration suite exercises the two-step merge flow in a real git
+  // repo, and the custom merge driver test above verifies that the merge
+  // driver still works correctly with `git merge --no-commit` followed by
+  // `git commit`. That split is what allows commit-time hooks such as
+  // pre-merge-commit to run, whereas `git merge -m "msg"` could bypass that
+  // path.
   //
-  // Real-world validation: jeduden/mdsmith uses a pre-merge-commit hook
-  // with its merge-driver to fix generated catalog sections after merging.
-  // This works correctly with the two-step merge process implemented here.
+  // Hook behavior is validated out-of-band / in real-world usage. For
+  // example, jeduden/mdsmith uses a pre-merge-commit hook together with its
+  // merge driver to fix generated catalog sections after merging, and that
+  // setup works with the two-step merge process implemented here.
 });

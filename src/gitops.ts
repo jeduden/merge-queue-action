@@ -337,6 +337,20 @@ export class GitOps implements GitOperator {
       return false;
     }
 
+    // Detect no-op merges: `git merge --no-commit` exits 0 with "Already
+    // up to date." but does NOT create MERGE_HEAD, so the subsequent
+    // `git commit` would fail with "nothing to commit". Check for
+    // MERGE_HEAD before attempting the commit step.
+    const mergeHeadCheck = await this.git([
+      "rev-parse",
+      "--verify",
+      "MERGE_HEAD",
+    ]);
+    if (mergeHeadCheck.code !== 0) {
+      // No merge in progress — source was already reachable from HEAD.
+      return true;
+    }
+
     // Merge succeeded and is staged; now commit it. This is where
     // pre-merge-commit hooks run. The `-c` overrides apply to both
     // the merge and commit steps.

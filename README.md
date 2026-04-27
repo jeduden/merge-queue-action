@@ -698,8 +698,9 @@ but you need a post-processing step to update derived content (catalogs,
 indexes, lock files, etc.) based on the complete merge result.
 
 The action's two-step merge process (`git merge --no-commit` followed by
-`git commit`) ensures `pre-merge-commit` hooks execute correctly. (Prior
-to v0.7.1, using `git merge -m "message"` bypassed the hook entirely.)
+`git commit`) ensures `pre-merge-commit` hooks execute correctly. (In
+earlier versions, using `git merge -m "message"` bypassed the hook
+entirely.)
 
 #### Example: mdsmith merge-driver + pre-merge-commit hook
 
