@@ -37083,9 +37083,21 @@ class GitOps {
         if (commit.code !== 0) {
             // Hook failure, empty commit, or other commit-time error. Unlike
             // a merge conflict (exit 1 from merge), this is unexpected and
-            // indicates misconfiguration or a broken hook. Surface as throw
-            // rather than returning false (which signals conflict).
-            throw new Error(`git commit after successful merge failed (exit ${commit.code}): ${commit.stderr.trim() || commit.stdout.trim()}`);
+            // indicates misconfiguration or a broken hook. Best-effort clean
+            // up any in-progress merge state before surfacing the error so
+            // later steps do not inherit a dirty worktree.
+            const abort = await this.git(["merge", "--abort"]);
+            let cleanupDetail = "";
+            if (abort.code !== 0) {
+                const reset = await this.git(["reset", "--hard", "HEAD"]);
+                if (reset.code !== 0) {
+                    cleanupDetail = ` Cleanup failed: git merge --abort (exit ${abort.code}): ${abort.stderr.trim() || abort.stdout.trim()}; git reset --hard HEAD (exit ${reset.code}): ${reset.stderr.trim() || reset.stdout.trim()}`;
+                }
+                else {
+                    cleanupDetail = ` Cleanup fallback succeeded after git merge --abort failed (exit ${abort.code}): ${abort.stderr.trim() || abort.stdout.trim()}`;
+                }
+            }
+            throw new Error(`git commit after successful merge failed (exit ${commit.code}): ${commit.stderr.trim() || commit.stdout.trim()}${cleanupDetail}`);
         }
         return true;
     }
