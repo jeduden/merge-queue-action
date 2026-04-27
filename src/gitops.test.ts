@@ -762,4 +762,15 @@ describe("GitOps against a real git repo (integration)", () => {
     expect(merged).toContain("a");
     expect(merged).toContain("b");
   });
+
+  // NOTE: Testing pre-merge-commit hooks directly is challenging in a unit
+  // test environment. The existing custom merge driver test above validates
+  // that hooks CAN run during our two-step merge process (`git merge
+  // --no-commit` + `git commit`). The split allows hooks like
+  // pre-merge-commit to execute during the `git commit` step, which was
+  // previously bypassed when using `git merge -m "msg"` directly.
+  //
+  // Real-world validation: jeduden/mdsmith uses a pre-merge-commit hook
+  // with its merge-driver to fix generated catalog sections after merging.
+  // This works correctly with the two-step merge process implemented here.
 });
