@@ -29,8 +29,13 @@ inputs:
     default: "false"
   batch_prs:
     description: >-
-      JSON array of PR numbers for bisection (set automatically
-      via workflow_dispatch, not intended for manual use)
+      PR numbers to process explicitly. Accepts a JSON array of integers
+      (e.g. "[187]" or "[181,187]") or a single integer string (e.g. "187").
+      When provided in normal (non-bisect) mode via workflow_dispatch, those
+      PRs are fetched directly by number and processed without requiring them
+      to have the queue label — useful as a fallback for conflicted PRs whose
+      pull_request:labeled event did not trigger a workflow run.
+      In bisect mode this field is set automatically by the action itself.
     default: ""
   bisect:
     description: >-

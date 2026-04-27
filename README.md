@@ -118,6 +118,11 @@ Add your queue label (default `queue`) to a PR. The merge-queue workflow
 triggers, batches it with any other queued PRs, runs CI, and merges on
 success.
 
+If the PR already has merge conflicts with the base branch, GitHub may not
+start workflows triggered by `pull_request: labeled`. In that case, use
+`workflow_dispatch` with the PR number in `batch_prs` — see
+[Conflicted PRs and label triggers](#conflicted-prs-and-label-triggers).
+
 ## How it works
 
 1. PRs labelled `queue` are collected oldest-first.
@@ -321,6 +326,76 @@ one of:
 
 Store the token as a repository secret (e.g. `MERGE_QUEUE_TOKEN`).
 
+### Conflicted PRs and label triggers
+
+The quick-start merge-queue workflow uses:
+
+```yaml
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+```
+
+This is the safest default because the workflow uses a write-capable merge
+queue token. However, GitHub does not run workflows triggered by
+`pull_request` activity when the pull request has merge conflicts with the
+base branch. That means adding the `queue` label to a conflicted PR may not
+start the merge-queue workflow at all.
+
+#### Recommended fallback: `workflow_dispatch` with `batch_prs`
+
+When a PR is conflicted (or for any reason the `pull_request: labeled` event
+did not start a run), you can manually dispatch the workflow from the Actions
+tab and provide the PR number in the `batch_prs` input:
+
+1. Go to **Actions → Merge Queue → Run workflow**.
+2. In the **batch_prs** field enter the PR number, e.g. `187` or `[187]`.
+3. Click **Run workflow**.
+
+The action will fetch that PR directly by number and process it **without
+requiring the PR to have the queue label**. This is the recommended operator
+fallback for conflicted PRs.
+
+You can also provide multiple PRs at once: `[181,187]`.
+
+> **What happens to a conflicted PR?** The action will attempt to merge it
+> into a batch branch. If the PR still conflicts with `main` at that point,
+> it is labelled `queue:failed` with a comment explaining the conflict.
+> Resolve the conflict on the PR branch, re-run the dispatch, and the action
+> will try again.
+
+#### Alternative: `schedule` trigger
+
+Add a `schedule` trigger so queued PRs are processed periodically even when
+the original label event did not start a run:
+
+```yaml
+on:
+  pull_request:
+    types: [labeled]
+  schedule:
+    - cron: "*/15 * * * *"   # every 15 minutes
+  workflow_dispatch:
+    inputs:
+      batch_prs:
+        type: string
+        required: false
+      bisect:
+        type: boolean
+        default: false
+```
+
+This provides automatic recovery for any label events that were skipped.
+
+#### Why not switch to `pull_request_target`?
+
+`pull_request_target` runs in the context of the base repository and can
+access secrets — including `MERGE_QUEUE_TOKEN`. If the workflow checks out
+or executes untrusted PR code before using that token, a malicious PR could
+alter the merge or exfiltrate secrets. Stick with `pull_request: labeled`
+and use `workflow_dispatch` or `schedule` as the safe fallback.
+
 ### CI workflow requirements
 
 Your CI workflow (`ci_workflow` input) must:
@@ -428,6 +503,7 @@ tested together in a single batch, reducing total CI runs.
 | `batch_size` | no | `5` | Max PRs per batch |
 | `queue_label` | no | `queue` | Label that enqueues a PR |
 | `dry_run` | no | `false` | Log intent without mutating |
+| `batch_prs` | no | `""` | PR numbers to process explicitly. Accepts a JSON array (`[187]` or `[181,187]`) or a single integer string (`187`). When provided via `workflow_dispatch` in normal mode, those PRs are fetched directly without requiring the queue label — the recommended fallback for conflicted PRs. In bisect mode the action sets this automatically. |
 | `git_user_email` | no | `merge-queue@users.noreply.github.com` | `user.email` set on the local repo before merging |
 | `git_user_name` | no | `merge-queue-bot` | `user.name` set on the local repo before merging |
 

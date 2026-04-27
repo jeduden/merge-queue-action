@@ -3,6 +3,7 @@ import {
   eventTriggerLabeledPR,
   hasWritePermission,
   selfWorkflowFile,
+  parseBatchPrs,
   runProcess,
   runBisect,
   runSetup,
@@ -1370,6 +1371,229 @@ describe("runProcess", () => {
   });
 });
 
+describe("parseBatchPrs", () => {
+  it("returns empty array for empty string", () => {
+    expect(parseBatchPrs("")).toEqual([]);
+  });
+
+  it("returns empty array for whitespace-only string", () => {
+    expect(parseBatchPrs("  ")).toEqual([]);
+  });
+
+  it("parses a JSON array of integers", () => {
+    expect(parseBatchPrs("[187]")).toEqual([187]);
+    expect(parseBatchPrs("[181,187]")).toEqual([181, 187]);
+    expect(parseBatchPrs("[]")).toEqual([]);
+  });
+
+  it("parses a single integer string as a convenience form", () => {
+    expect(parseBatchPrs("187")).toEqual([187]);
+    expect(parseBatchPrs("1")).toEqual([1]);
+  });
+
+  it("throws on invalid JSON that is not a plain integer", () => {
+    expect(() => parseBatchPrs("not json")).toThrow("invalid batch_prs JSON");
+  });
+
+  it("throws on a JSON non-array (object)", () => {
+    expect(() => parseBatchPrs('{"a":1}')).toThrow(
+      "batch_prs must be a JSON array of positive integers",
+    );
+  });
+
+  it("throws on a JSON array containing non-integers", () => {
+    expect(() => parseBatchPrs("[1, 2.5]")).toThrow(
+      "batch_prs must be a JSON array of positive integers",
+    );
+    expect(() => parseBatchPrs('["abc"]')).toThrow(
+      "batch_prs must be a JSON array of positive integers",
+    );
+  });
+
+  it("throws on a JSON array containing zero or negative integers", () => {
+    expect(() => parseBatchPrs("[0]")).toThrow(
+      "batch_prs must be a JSON array of positive integers",
+    );
+    expect(() => parseBatchPrs("[-1]")).toThrow(
+      "batch_prs must be a JSON array of positive integers",
+    );
+    expect(() => parseBatchPrs("[1, -5]")).toThrow(
+      "batch_prs must be a JSON array of positive integers",
+    );
+  });
+
+  it("de-duplicates entries, preserving first-occurrence order", () => {
+    expect(parseBatchPrs("[1, 2, 1, 3, 2]")).toEqual([1, 2, 3]);
+    expect(parseBatchPrs("[5, 5]")).toEqual([5]);
+  });
+});
+
+describe("runProcess — explicit batchPrs (manual dispatch)", () => {
+  it("processes an explicit PR by number without requiring the queue label", async () => {
+    const api = newMockAPI();
+    // PR #187 has no queue label — the test uses getPR directly
+    const pr187 = makePR(187);
+    api.getPR = async (n: number) => {
+      if (n !== 187) throw new Error("not found");
+      return pr187;
+    };
+    const git = newMockGit();
+    const logs: string[] = [];
+
+    await runProcess(
+      api,
+      git,
+      baseCfg({ batchPrs: "[187]" }),
+      (m) => logs.push(m),
+    );
+    expect(
+      logs.some((l) => l.includes("explicit PRs") && l.includes("187")),
+    ).toBe(true);
+    expect(logs.some((l) => l.includes("Processing 1 PRs"))).toBe(true);
+  });
+
+  it("processes an explicit PR given as a bare integer string (convenience form)", async () => {
+    const api = newMockAPI();
+    const pr5 = makePR(5);
+    api.getPR = async (n: number) => {
+      if (n !== 5) throw new Error("not found");
+      return pr5;
+    };
+    const git = newMockGit();
+    const logs: string[] = [];
+
+    await runProcess(
+      api,
+      git,
+      baseCfg({ batchPrs: "5" }),
+      (m) => logs.push(m),
+    );
+    expect(logs.some((l) => l.includes("Processing 1 PRs"))).toBe(true);
+  });
+
+  it("skips closed PRs in explicit batchPrs", async () => {
+    const api = newMockAPI();
+    api.getPR = async (n: number) => makePR(n, `branch-${n}`, "closed");
+    const git = newMockGit();
+    const logs: string[] = [];
+
+    await runProcess(
+      api,
+      git,
+      baseCfg({ batchPrs: "[99]" }),
+      (m) => logs.push(m),
+    );
+    expect(logs.some((l) => l.includes("PR #99 is closed"))).toBe(true);
+    expect(logs).toContain("No PRs in queue");
+  });
+
+  it("skips not-found PRs in explicit batchPrs and logs a warning", async () => {
+    const api = newMockAPI();
+    // getPR throws for any PR (simulates 404)
+    api.getPR = async () => {
+      throw new Error("Not Found");
+    };
+    const git = newMockGit();
+    const logs: string[] = [];
+
+    await runProcess(
+      api,
+      git,
+      baseCfg({ batchPrs: "[999]" }),
+      (m) => logs.push(m),
+    );
+    expect(
+      logs.some(
+        (l) =>
+          l.includes("Warning: PR #999 not found") &&
+          l.includes("Not Found"),
+      ),
+    ).toBe(true);
+    expect(logs).toContain("No PRs in queue");
+  });
+
+  it("respects batchSize when explicit batchPrs has more PRs than allowed", async () => {
+    const api = newMockAPI();
+    api.getPR = async (n: number) => makePR(n);
+    const git = newMockGit();
+    const logs: string[] = [];
+
+    await runProcess(
+      api,
+      git,
+      baseCfg({ batchPrs: "[1,2,3,4,5,6]", batchSize: 3 }),
+      (m) => logs.push(m),
+    );
+    expect(logs.some((l) => l.includes("Trimming explicit PR list"))).toBe(
+      true,
+    );
+    expect(logs.some((l) => l.includes("Processing 3 PRs"))).toBe(true);
+  });
+
+  it("does not call listPRsWithLabel when explicit batchPrs is provided", async () => {
+    const api = newMockAPI();
+    let listCalled = false;
+    api.listPRsWithLabel = async (_label, _limit) => {
+      listCalled = true;
+      return [];
+    };
+    api.getPR = async (n: number) => makePR(n);
+    const git = newMockGit();
+
+    await runProcess(
+      api,
+      git,
+      baseCfg({ batchPrs: "[1]" }),
+      nop,
+    );
+    expect(listCalled).toBe(false);
+  });
+
+  it("processes multiple explicit PRs and triggers CI in non-dry-run mode", async () => {
+    const api = newMockAPI();
+    api.getPR = async (n: number) => makePR(n);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+
+    await runProcess(api, git, cfg, nop);
+    expect(api.workflows).toHaveLength(1);
+    expect(git.ffRef).toContain("merge-queue/batch-");
+  });
+
+  it("does not use triggerLabeledPR fallback when explicit batchPrs is provided", async () => {
+    const api = newMockAPI();
+    let getPRCallCount = 0;
+    api.getPR = async (n: number) => {
+      getPRCallCount++;
+      return makePR(n);
+    };
+    const git = newMockGit();
+    const logs: string[] = [];
+
+    // Both batchPrs and triggerLabeledPR are set; triggerLabeledPR should be ignored
+    await runProcess(
+      api,
+      git,
+      baseCfg({ batchPrs: "[1]", triggerLabeledPR: 99 }),
+      (m) => logs.push(m),
+    );
+    // getPR should only be called for PR #1 (from batchPrs), not PR #99
+    expect(getPRCallCount).toBe(1);
+    expect(logs.some((l) => l.includes("event-labeled"))).toBe(false);
+  });
+
+  it("throws on invalid batchPrs JSON in runProcess", async () => {
+    const api = newMockAPI();
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "not valid json" });
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow(
+      "invalid batch_prs JSON",
+    );
+  });
+});
+
 describe("runBisect", () => {
   it("throws when batch_prs is empty string", async () => {
     const api = newMockAPI();
@@ -1397,7 +1621,7 @@ describe("runBisect", () => {
     const cfg = baseCfg({ batchPrs: '{"a":1}' });
 
     await expect(runBisect(api, git, cfg, nop)).rejects.toThrow(
-      "batch_prs must be a JSON array of integers",
+      "batch_prs must be a JSON array of positive integers",
     );
   });
 
