@@ -389,7 +389,7 @@ export class GitOps implements GitOperator {
   }
 
   async getHeadSHA(ref: string): Promise<string> {
-    const result = await this.git(["rev-parse", ref]);
+    const result = await this.git(["rev-parse", "--verify", `${ref}^{commit}`]);
     if (result.code !== 0) {
       throw new Error(
         `failed to get SHA for ${ref}: ${result.stderr.trim() || result.stdout.trim()}`,

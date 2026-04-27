@@ -37119,7 +37119,7 @@ class GitOps {
         return true;
     }
     async getHeadSHA(ref) {
-        const result = await this.git(["rev-parse", ref]);
+        const result = await this.git(["rev-parse", "--verify", `${ref}^{commit}`]);
         if (result.code !== 0) {
             throw new Error(`failed to get SHA for ${ref}: ${result.stderr.trim() || result.stdout.trim()}`);
         }
@@ -37375,8 +37375,16 @@ class Batch {
             if (result.merged.length > 0 && !this.dryRun) {
                 this.log(`Pushing batch branch ${branch}`);
                 await this.git.pushBranch(branch);
-                // Capture the head SHA for reliable workflow run lookup
-                result.headSHA = await this.git.getHeadSHA(branch);
+                // Capture the head SHA for reliable workflow run lookup.
+                // This is best-effort: the batch branch has already been
+                // pushed successfully, so a SHA lookup failure should not
+                // fail the whole batch creation.
+                try {
+                    result.headSHA = await this.git.getHeadSHA(branch);
+                }
+                catch (err) {
+                    await this.reporter.warn(`failed to capture head SHA for batch branch \`${branch}\`: ${errorMessage(err)}`);
+                }
             }
             return result;
         });
