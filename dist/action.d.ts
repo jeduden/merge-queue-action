@@ -20,6 +20,15 @@ export interface Config {
      */
     triggerLabeledPR?: number;
 }
+/**
+ * Parses the batch_prs input string into an array of PR numbers.
+ * Accepts:
+ *   - A JSON array of positive integers: "[187]" or "[181,187]"
+ *   - A single positive integer string: "187" (operator convenience)
+ * Returns an empty array for an empty/whitespace-only string.
+ * Throws a descriptive error for any other input.
+ */
+export declare function parseBatchPrs(input: string): number[];
 export type { CommentCtx };
 /** FullAPI combines all GitHub API interfaces needed by the orchestration. */
 export interface FullAPI extends GitHubAPI, WorkflowAPI {

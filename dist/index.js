@@ -37343,6 +37343,37 @@ function requireCtx(cfg) {
     }
     return cfg.commentCtx;
 }
+/**
+ * Parses the batch_prs input string into an array of PR numbers.
+ * Accepts:
+ *   - A JSON array of positive integers: "[187]" or "[181,187]"
+ *   - A single positive integer string: "187" (operator convenience)
+ * Returns an empty array for an empty/whitespace-only string.
+ * Throws a descriptive error for any other input.
+ */
+function parseBatchPrs(input) {
+    const trimmed = input.trim();
+    if (!trimmed)
+        return [];
+    // Convenience form: single integer string "187"
+    if (/^\d+$/.test(trimmed)) {
+        const n = Number(trimmed);
+        if (Number.isInteger(n) && n > 0)
+            return [n];
+    }
+    let parsed;
+    try {
+        parsed = JSON.parse(trimmed);
+    }
+    catch {
+        throw new Error(`invalid batch_prs JSON: ${input}`);
+    }
+    if (!Array.isArray(parsed) ||
+        !parsed.every((n) => typeof n === "number" && Number.isInteger(n))) {
+        throw new Error(`batch_prs must be a JSON array of integers: ${input}`);
+    }
+    return parsed;
+}
 function action_sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -37501,30 +37532,60 @@ async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
     const q = new queue_Queue(api, cfg.queueLabel, cfg.dryRun, log);
     const b = new Batch(gitOps, cfg.dryRun, log, reporter);
     // 1. Collect queued PRs
-    const prs = await q.collect(cfg.batchSize);
-    if (cfg.triggerLabeledPR !== undefined &&
-        !prs.some((p) => p.number === cfg.triggerLabeledPR)) {
-        log(`PR #${cfg.triggerLabeledPR} (event-labeled with "${cfg.queueLabel}") missing from issues-list result; fetching directly`);
-        try {
-            const eventPR = await api.getPR(cfg.triggerLabeledPR);
-            if (eventPR.state !== "open") {
-                log(`PR #${cfg.triggerLabeledPR} is ${eventPR.state}; not adding to batch`);
-            }
-            else if (!eventPR.labels?.includes(cfg.queueLabel)) {
-                // Label was removed between webhook firing and our run — don't
-                // requeue a PR that the author has explicitly de-queued.
-                log(`PR #${cfg.triggerLabeledPR} no longer has "${cfg.queueLabel}" label; not adding to batch`);
-            }
-            else {
-                prs.push(eventPR);
-                prs.sort((a, b) => a.createdAt - b.createdAt);
-                if (cfg.batchSize > 0 && prs.length > cfg.batchSize) {
-                    prs.length = cfg.batchSize;
+    let prs;
+    if (cfg.batchPrs) {
+        // Manual dispatch with explicit PR numbers — fetch directly without
+        // requiring the queue label. This is the recommended fallback for
+        // conflicted PRs whose `pull_request: labeled` event did not fire.
+        const prNumbers = parseBatchPrs(cfg.batchPrs);
+        log(`Manual dispatch: processing explicit PRs ${JSON.stringify(prNumbers)}`);
+        const fetched = [];
+        for (const n of prNumbers) {
+            try {
+                const pr = await api.getPR(n);
+                if (pr.state !== "open") {
+                    log(`PR #${n} is ${pr.state}; skipping`);
+                    continue;
                 }
+                fetched.push(pr);
+            }
+            catch (err) {
+                log(`Warning: PR #${n} not found or inaccessible; skipping: ${errorMessage(err)}`);
             }
         }
-        catch (err) {
-            log(`Warning: failed to fetch event-labeled PR #${cfg.triggerLabeledPR}: ${errorMessage(err)}`);
+        fetched.sort((a, b) => a.createdAt - b.createdAt);
+        if (cfg.batchSize > 0 && fetched.length > cfg.batchSize) {
+            log(`Trimming explicit PR list from ${fetched.length} to batch size ${cfg.batchSize}`);
+            fetched.length = cfg.batchSize;
+        }
+        prs = fetched;
+    }
+    else {
+        prs = await q.collect(cfg.batchSize);
+        if (cfg.triggerLabeledPR !== undefined &&
+            !prs.some((p) => p.number === cfg.triggerLabeledPR)) {
+            log(`PR #${cfg.triggerLabeledPR} (event-labeled with "${cfg.queueLabel}") missing from issues-list result; fetching directly`);
+            try {
+                const eventPR = await api.getPR(cfg.triggerLabeledPR);
+                if (eventPR.state !== "open") {
+                    log(`PR #${cfg.triggerLabeledPR} is ${eventPR.state}; not adding to batch`);
+                }
+                else if (!eventPR.labels?.includes(cfg.queueLabel)) {
+                    // Label was removed between webhook firing and our run — don't
+                    // requeue a PR that the author has explicitly de-queued.
+                    log(`PR #${cfg.triggerLabeledPR} no longer has "${cfg.queueLabel}" label; not adding to batch`);
+                }
+                else {
+                    prs.push(eventPR);
+                    prs.sort((a, b) => a.createdAt - b.createdAt);
+                    if (cfg.batchSize > 0 && prs.length > cfg.batchSize) {
+                        prs.length = cfg.batchSize;
+                    }
+                }
+            }
+            catch (err) {
+                log(`Warning: failed to fetch event-labeled PR #${cfg.triggerLabeledPR}: ${errorMessage(err)}`);
+            }
         }
     }
     if (prs.length === 0) {
@@ -37798,17 +37859,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
     if (!prListStr) {
         throw new Error("batch_prs input is required for bisect mode");
     }
-    let prNumbers;
-    try {
-        prNumbers = JSON.parse(prListStr);
-    }
-    catch {
-        throw new Error(`invalid batch_prs JSON: ${prListStr}`);
-    }
-    if (!Array.isArray(prNumbers) ||
-        !prNumbers.every((n) => typeof n === "number" && Number.isInteger(n))) {
-        throw new Error(`batch_prs must be a JSON array of integers: ${prListStr}`);
-    }
+    const prNumbers = parseBatchPrs(prListStr);
     if (prNumbers.length === 0) {
         log("No PRs to bisect");
         return;
