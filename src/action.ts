@@ -84,12 +84,16 @@ export function parseBatchPrs(input: string): number[] {
 
   if (
     !Array.isArray(parsed) ||
-    !parsed.every((n) => typeof n === "number" && Number.isInteger(n))
+    !parsed.every(
+      (n) => typeof n === "number" && Number.isInteger(n) && n > 0,
+    )
   ) {
-    throw new Error(`batch_prs must be a JSON array of integers: ${input}`);
+    throw new Error(
+      `batch_prs must be a JSON array of positive integers: ${input}`,
+    );
   }
 
-  return parsed as number[];
+  return [...new Set(parsed as number[])];
 }
 
 function sleep(ms: number): Promise<void> {

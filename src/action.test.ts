@@ -1397,17 +1397,34 @@ describe("parseBatchPrs", () => {
 
   it("throws on a JSON non-array (object)", () => {
     expect(() => parseBatchPrs('{"a":1}')).toThrow(
-      "batch_prs must be a JSON array of integers",
+      "batch_prs must be a JSON array of positive integers",
     );
   });
 
   it("throws on a JSON array containing non-integers", () => {
     expect(() => parseBatchPrs("[1, 2.5]")).toThrow(
-      "batch_prs must be a JSON array of integers",
+      "batch_prs must be a JSON array of positive integers",
     );
     expect(() => parseBatchPrs('["abc"]')).toThrow(
-      "batch_prs must be a JSON array of integers",
+      "batch_prs must be a JSON array of positive integers",
     );
+  });
+
+  it("throws on a JSON array containing zero or negative integers", () => {
+    expect(() => parseBatchPrs("[0]")).toThrow(
+      "batch_prs must be a JSON array of positive integers",
+    );
+    expect(() => parseBatchPrs("[-1]")).toThrow(
+      "batch_prs must be a JSON array of positive integers",
+    );
+    expect(() => parseBatchPrs("[1, -5]")).toThrow(
+      "batch_prs must be a JSON array of positive integers",
+    );
+  });
+
+  it("de-duplicates entries, preserving first-occurrence order", () => {
+    expect(parseBatchPrs("[1, 2, 1, 3, 2]")).toEqual([1, 2, 3]);
+    expect(parseBatchPrs("[5, 5]")).toEqual([5]);
   });
 });
 
@@ -1604,7 +1621,7 @@ describe("runBisect", () => {
     const cfg = baseCfg({ batchPrs: '{"a":1}' });
 
     await expect(runBisect(api, git, cfg, nop)).rejects.toThrow(
-      "batch_prs must be a JSON array of integers",
+      "batch_prs must be a JSON array of positive integers",
     );
   });
 

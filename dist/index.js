@@ -37369,10 +37369,10 @@ function parseBatchPrs(input) {
         throw new Error(`invalid batch_prs JSON: ${input}`);
     }
     if (!Array.isArray(parsed) ||
-        !parsed.every((n) => typeof n === "number" && Number.isInteger(n))) {
-        throw new Error(`batch_prs must be a JSON array of integers: ${input}`);
+        !parsed.every((n) => typeof n === "number" && Number.isInteger(n) && n > 0)) {
+        throw new Error(`batch_prs must be a JSON array of positive integers: ${input}`);
     }
-    return parsed;
+    return [...new Set(parsed)];
 }
 function action_sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
