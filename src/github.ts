@@ -164,44 +164,79 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
     const createdAfter = new Date(dispatchedAt.getTime() - 5000);
     const maxAttempts = 60;
 
+    // Log search parameters for debugging
+    console.log(
+      `[findWorkflowRun] Searching for workflow run: workflow=${workflowFile}, ref=${ref}, headSha=${headSha || "undefined"}, createdAfter=${createdAfter.toISOString()}`,
+    );
+
     // Poll up to ~10 min for the run to appear. Check immediately first,
     // then sleep between attempts so we can post the "CI running" comment
     // the moment GitHub registers the dispatched run.
     for (let i = 0; i < maxAttempts; i++) {
       // Try querying by head_sha first if available (more reliable, no indexing delay)
       if (headSha) {
+        try {
+          const { data: runs } =
+            await this.octokit.rest.actions.listWorkflowRuns({
+              owner: this.owner,
+              repo: this.repo,
+              workflow_id: workflowFile,
+              head_sha: headSha,
+              event: "workflow_dispatch",
+              created: `>=${createdAfter.toISOString()}`,
+              per_page: 1,
+            });
+
+          if (i === 0 || i === 5 || i % 30 === 0) {
+            console.log(
+              `[findWorkflowRun] Attempt ${i + 1}/${maxAttempts}: head_sha query returned ${runs.workflow_runs.length} runs`,
+            );
+          }
+
+          if (runs.workflow_runs.length > 0) {
+            const run = runs.workflow_runs[0];
+            console.log(
+              `[findWorkflowRun] Found run via head_sha query: id=${run.id}, status=${run.status}, conclusion=${run.conclusion}`,
+            );
+            return { runId: run.id, htmlUrl: run.html_url };
+          }
+        } catch (err) {
+          console.log(
+            `[findWorkflowRun] head_sha query failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+
+      // Fallback to branch-based query (may have indexing delays)
+      try {
         const { data: runs } =
           await this.octokit.rest.actions.listWorkflowRuns({
             owner: this.owner,
             repo: this.repo,
             workflow_id: workflowFile,
-            head_sha: headSha,
+            branch: ref,
             event: "workflow_dispatch",
             created: `>=${createdAfter.toISOString()}`,
             per_page: 1,
           });
 
+        if (i === 0 || i === 5 || i % 30 === 0) {
+          console.log(
+            `[findWorkflowRun] Attempt ${i + 1}/${maxAttempts}: branch query returned ${runs.workflow_runs.length} runs`,
+          );
+        }
+
         if (runs.workflow_runs.length > 0) {
           const run = runs.workflow_runs[0];
+          console.log(
+            `[findWorkflowRun] Found run via branch query: id=${run.id}, status=${run.status}, conclusion=${run.conclusion}`,
+          );
           return { runId: run.id, htmlUrl: run.html_url };
         }
-      }
-
-      // Fallback to branch-based query (may have indexing delays)
-      const { data: runs } =
-        await this.octokit.rest.actions.listWorkflowRuns({
-          owner: this.owner,
-          repo: this.repo,
-          workflow_id: workflowFile,
-          branch: ref,
-          event: "workflow_dispatch",
-          created: `>=${createdAfter.toISOString()}`,
-          per_page: 1,
-        });
-
-      if (runs.workflow_runs.length > 0) {
-        const run = runs.workflow_runs[0];
-        return { runId: run.id, htmlUrl: run.html_url };
+      } catch (err) {
+        console.log(
+          `[findWorkflowRun] branch query failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
 
       if (i < maxAttempts - 1) await sleep(10_000);
