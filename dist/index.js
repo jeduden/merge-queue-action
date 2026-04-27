@@ -36364,13 +36364,30 @@ class GitHubClient {
             inputs,
         });
     }
-    async findWorkflowRun(workflowFile, ref, dispatchedAt) {
+    async findWorkflowRun(workflowFile, ref, dispatchedAt, headSha) {
         const createdAfter = new Date(dispatchedAt.getTime() - 5000);
         const maxAttempts = 60;
         // Poll up to ~10 min for the run to appear. Check immediately first,
         // then sleep between attempts so we can post the "CI running" comment
         // the moment GitHub registers the dispatched run.
         for (let i = 0; i < maxAttempts; i++) {
+            // Try querying by head_sha first if available (more reliable, no indexing delay)
+            if (headSha) {
+                const { data: runs } = await this.octokit.rest.actions.listWorkflowRuns({
+                    owner: this.owner,
+                    repo: this.repo,
+                    workflow_id: workflowFile,
+                    head_sha: headSha,
+                    event: "workflow_dispatch",
+                    created: `>=${createdAfter.toISOString()}`,
+                    per_page: 1,
+                });
+                if (runs.workflow_runs.length > 0) {
+                    const run = runs.workflow_runs[0];
+                    return { runId: run.id, htmlUrl: run.html_url };
+                }
+            }
+            // Fallback to branch-based query (may have indexing delays)
             const { data: runs } = await this.octokit.rest.actions.listWorkflowRuns({
                 owner: this.owner,
                 repo: this.repo,
@@ -37101,6 +37118,13 @@ class GitOps {
         }
         return true;
     }
+    async getHeadSHA(ref) {
+        const result = await this.git(["rev-parse", "--verify", `${ref}^{commit}`]);
+        if (result.code !== 0) {
+            throw new Error(`failed to get SHA for ${ref}: ${result.stderr.trim() || result.stdout.trim()}`);
+        }
+        return result.stdout.trim();
+    }
     async pushBranch(branch) {
         this.log(`Pushing ${branch} to origin`);
         // No `--force-with-lease` / `--force`: batch branches are
@@ -37351,6 +37375,16 @@ class Batch {
             if (result.merged.length > 0 && !this.dryRun) {
                 this.log(`Pushing batch branch ${branch}`);
                 await this.git.pushBranch(branch);
+                // Capture the head SHA for reliable workflow run lookup.
+                // This is best-effort: the batch branch has already been
+                // pushed successfully, so a SHA lookup failure should not
+                // fail the whole batch creation.
+                try {
+                    result.headSHA = await this.git.getHeadSHA(branch);
+                }
+                catch (err) {
+                    await this.reporter.warn(`failed to capture head SHA for batch branch \`${branch}\`: ${errorMessage(err)}`);
+                }
             }
             return result;
         });
@@ -37776,7 +37810,7 @@ async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
         }
         let runHandle;
         try {
-            runHandle = await api.findWorkflowRun(cfg.ciWorkflow, result.branch, dispatchedAt);
+            runHandle = await api.findWorkflowRun(cfg.ciWorkflow, result.branch, dispatchedAt, result.headSHA);
         }
         catch (err) {
             await cleanupBranch(result.branch);
@@ -38044,7 +38078,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
         }
         const runHandle = await (async () => {
             try {
-                return await api.findWorkflowRun(cfg.ciWorkflow, result.branch, dispatchedAt);
+                return await api.findWorkflowRun(cfg.ciWorkflow, result.branch, dispatchedAt, result.headSHA);
             }
             catch (err) {
                 await handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prMap, prNumbers, excluded, result.branch, `failed to locate bisect CI run: ${formatErrorForComment(err)}`, log);

@@ -59,6 +59,7 @@ export interface WorkflowAPI {
     workflowFile: string,
     ref: string,
     dispatchedAt: Date,
+    headSha?: string,
   ): Promise<WorkflowRunHandle>;
   /** Polls an already-located run until it completes. */
   waitForWorkflowRun(runId: number): Promise<WorkflowRunResult>;

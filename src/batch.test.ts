@@ -41,6 +41,11 @@ function newMockGit(): GitOperator & {
       mock.pushed.push(branch);
     },
 
+    async getHeadSHA(ref: string) {
+      if (mock.failOn === "getHeadSHA") throw new Error("mock error");
+      return `mock-sha-${ref}`;
+    },
+
     async fastForwardMain(ref: string) {
       if (mock.failOn === "fastForwardMain") throw new Error("mock error");
       mock.ffRef = ref;
@@ -84,6 +89,45 @@ describe("CreateAndMerge", () => {
     expect(git.branches).toEqual(["merge-queue/batch-test-1"]);
     expect(git.merges).toHaveLength(2);
     expect(git.pushed).toHaveLength(1);
+    expect(result.headSHA).toBe("mock-sha-merge-queue/batch-test-1");
+  });
+
+  it("sets headSHA after a successful push", async () => {
+    const git = newMockGit();
+    const b = new Batch(git, false, nop);
+    const prs: BatchPR[] = [
+      { number: 1, headRef: "feature-a", headSHA: "sha-a", title: "A" },
+    ];
+
+    const result = await b.createAndMerge("sha-test", prs);
+
+    expect(result.headSHA).toBe("mock-sha-merge-queue/batch-sha-test");
+  });
+
+  it("leaves headSHA undefined and warns when getHeadSHA fails after push", async () => {
+    const git = newMockGit();
+    git.failOn = "getHeadSHA";
+    const warned: string[] = [];
+    const reporter = {
+      info: () => {},
+      async warn(msg: string) {
+        warned.push(msg);
+      },
+      async withScope<T>(_prs: number[], fn: () => Promise<T>) {
+        return fn();
+      },
+    };
+    const b = new Batch(git, false, nop, reporter);
+    const prs: BatchPR[] = [
+      { number: 1, headRef: "feature-a", headSHA: "sha-a", title: "A" },
+    ];
+
+    const result = await b.createAndMerge("sha-fail", prs);
+
+    expect(result.headSHA).toBeUndefined();
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toContain("failed to capture head SHA");
+    expect(warned[0]).toContain("merge-queue/batch-sha-fail");
   });
 
   it("records conflicting PRs", async () => {

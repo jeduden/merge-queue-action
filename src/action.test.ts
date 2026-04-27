@@ -162,6 +162,10 @@ function newMockGit(): GitOperator & {
       if (mock.failOn === "pushBranch") throw new Error("mock error");
       mock.pushed.push(branch);
     },
+    async getHeadSHA(ref: string) {
+      if (mock.failOn === "getHeadSHA") throw new Error("mock error");
+      return `mock-sha-${ref}`;
+    },
     async fastForwardMain(ref: string) {
       if (mock.failOn === "fastForwardMain") throw new Error("mock error");
       mock.ffRef = ref;
@@ -1145,6 +1149,31 @@ describe("runProcess", () => {
     expect(api.labels.get(1)).toContain("queue");
   });
 
+  it("passes headSHA from batch result to findWorkflowRun", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+
+    let capturedHeadSha: string | undefined;
+    api.findWorkflowRun = async (
+      _workflow,
+      _branch,
+      _since,
+      headSha,
+    ): Promise<WorkflowRunHandle> => {
+      capturedHeadSha = headSha;
+      return { runId: 1234567, htmlUrl: CI_RUN_URL };
+    };
+
+    await runProcess(api, git, cfg, nop);
+
+    // The mock git returns `mock-sha-<branch>` from getHeadSHA; confirm
+    // that value is threaded through to findWorkflowRun.
+    expect(capturedHeadSha).toMatch(/^mock-sha-merge-queue\/batch-/);
+  });
+
   it("cleans up and requeues on completeMerge failure", async () => {
     const api = newMockAPI();
     api.prs.set("queue", [makePR(1)]);
@@ -2076,6 +2105,31 @@ describe("runBisect", () => {
       const c = api.comments.get(n) ?? [];
       expect(c.some((s) => s.includes("— requeued"))).toBe(true);
     }
+  });
+
+  it("passes headSHA from bisect batch result to findWorkflowRun", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+
+    let capturedHeadSha: string | undefined;
+    api.findWorkflowRun = async (
+      _workflow,
+      _branch,
+      _since,
+      headSha,
+    ): Promise<WorkflowRunHandle> => {
+      capturedHeadSha = headSha;
+      return { runId: 1234567, htmlUrl: CI_RUN_URL };
+    };
+
+    await runBisect(api, git, cfg, nop);
+
+    // The mock git returns `mock-sha-<branch>` from getHeadSHA; confirm
+    // that value is threaded through to findWorkflowRun.
+    expect(capturedHeadSha).toMatch(/^mock-sha-merge-queue\/batch-/);
   });
 
   it("cleans up and requeues when bisect CI status cannot be read", async () => {

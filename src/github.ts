@@ -159,6 +159,7 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
     workflowFile: string,
     ref: string,
     dispatchedAt: Date,
+    headSha?: string,
   ): Promise<WorkflowRunHandle> {
     const createdAfter = new Date(dispatchedAt.getTime() - 5000);
     const maxAttempts = 60;
@@ -167,6 +168,26 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
     // then sleep between attempts so we can post the "CI running" comment
     // the moment GitHub registers the dispatched run.
     for (let i = 0; i < maxAttempts; i++) {
+      // Try querying by head_sha first if available (more reliable, no indexing delay)
+      if (headSha) {
+        const { data: runs } =
+          await this.octokit.rest.actions.listWorkflowRuns({
+            owner: this.owner,
+            repo: this.repo,
+            workflow_id: workflowFile,
+            head_sha: headSha,
+            event: "workflow_dispatch",
+            created: `>=${createdAfter.toISOString()}`,
+            per_page: 1,
+          });
+
+        if (runs.workflow_runs.length > 0) {
+          const run = runs.workflow_runs[0];
+          return { runId: run.id, htmlUrl: run.html_url };
+        }
+      }
+
+      // Fallback to branch-based query (may have indexing delays)
       const { data: runs } =
         await this.octokit.rest.actions.listWorkflowRuns({
           owner: this.owner,

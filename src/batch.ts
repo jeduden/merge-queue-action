@@ -9,6 +9,7 @@ export interface GitOperator {
     commitMsg: string,
   ): Promise<boolean>;
   pushBranch(branch: string): Promise<void>;
+  getHeadSHA(ref: string): Promise<string>;
   /** Fast-forwards main to the given ref and returns the resulting main SHA. */
   fastForwardMain(ref: string): Promise<string>;
   deleteBranch(branch: string): Promise<void>;
@@ -25,6 +26,7 @@ export interface BatchPR {
 /** MergeResult describes the outcome of merging PRs into a batch branch. */
 export interface MergeResult {
   branch: string;
+  headSHA?: string;
   merged: BatchPR[];
   conflicted: BatchPR[];
 }
@@ -111,6 +113,17 @@ export class Batch {
       if (result.merged.length > 0 && !this.dryRun) {
         this.log(`Pushing batch branch ${branch}`);
         await this.git.pushBranch(branch);
+        // Capture the head SHA for reliable workflow run lookup.
+        // This is best-effort: the batch branch has already been
+        // pushed successfully, so a SHA lookup failure should not
+        // fail the whole batch creation.
+        try {
+          result.headSHA = await this.git.getHeadSHA(branch);
+        } catch (err) {
+          await this.reporter.warn(
+            `failed to capture head SHA for batch branch \`${branch}\`: ${errorMessage(err)}`,
+          );
+        }
       }
 
       return result;

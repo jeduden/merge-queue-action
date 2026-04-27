@@ -388,6 +388,16 @@ export class GitOps implements GitOperator {
     return true;
   }
 
+  async getHeadSHA(ref: string): Promise<string> {
+    const result = await this.git(["rev-parse", "--verify", `${ref}^{commit}`]);
+    if (result.code !== 0) {
+      throw new Error(
+        `failed to get SHA for ${ref}: ${result.stderr.trim() || result.stdout.trim()}`,
+      );
+    }
+    return result.stdout.trim();
+  }
+
   async pushBranch(branch: string): Promise<void> {
     this.log(`Pushing ${branch} to origin`);
     // No `--force-with-lease` / `--force`: batch branches are
