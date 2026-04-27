@@ -25,6 +25,7 @@ export interface BatchPR {
 /** MergeResult describes the outcome of merging PRs into a batch branch. */
 export interface MergeResult {
   branch: string;
+  headSHA?: string;
   merged: BatchPR[];
   conflicted: BatchPR[];
 }
@@ -111,6 +112,8 @@ export class Batch {
       if (result.merged.length > 0 && !this.dryRun) {
         this.log(`Pushing batch branch ${branch}`);
         await this.git.pushBranch(branch);
+        // Capture the head SHA for reliable workflow run lookup
+        result.headSHA = await this.git.getHeadSHA(branch);
       }
 
       return result;

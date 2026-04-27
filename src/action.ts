@@ -549,6 +549,7 @@ export async function runProcess(
         cfg.ciWorkflow,
         result.branch,
         dispatchedAt,
+        result.headSHA,
       );
     } catch (err) {
       await cleanupBranch(result.branch);
@@ -909,6 +910,7 @@ export async function runBisect(
           cfg.ciWorkflow,
           result.branch,
           dispatchedAt,
+          result.headSHA,
         );
       } catch (err) {
         await handleBisectObservationFailure(
