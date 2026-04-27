@@ -41,7 +41,7 @@ export interface GitHubAPI {
 export interface WorkflowAPI {
     triggerWorkflow(workflowFile: string, ref: string, inputs?: Record<string, string>): Promise<void>;
     /** Waits for the dispatched workflow run to appear and returns its URL. */
-    findWorkflowRun(workflowFile: string, ref: string, dispatchedAt: Date): Promise<WorkflowRunHandle>;
+    findWorkflowRun(workflowFile: string, ref: string, dispatchedAt: Date, headSha?: string): Promise<WorkflowRunHandle>;
     /** Polls an already-located run until it completes. */
     waitForWorkflowRun(runId: number): Promise<WorkflowRunResult>;
     closePR(prNumber: number): Promise<void>;

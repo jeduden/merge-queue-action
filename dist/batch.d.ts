@@ -4,6 +4,7 @@ export interface GitOperator {
     createBranchFromRef(branch: string, baseRef: string): Promise<void>;
     mergeBranch(branch: string, sourceRef: string, commitMsg: string): Promise<boolean>;
     pushBranch(branch: string): Promise<void>;
+    getHeadSHA(ref: string): Promise<string>;
     /** Fast-forwards main to the given ref and returns the resulting main SHA. */
     fastForwardMain(ref: string): Promise<string>;
     deleteBranch(branch: string): Promise<void>;
@@ -18,6 +19,7 @@ export interface BatchPR {
 /** MergeResult describes the outcome of merging PRs into a batch branch. */
 export interface MergeResult {
     branch: string;
+    headSHA?: string;
     merged: BatchPR[];
     conflicted: BatchPR[];
 }

@@ -68,6 +68,7 @@ export declare class GitOps implements GitOperator {
     private assertWorktreeReady;
     createBranchFromRef(branch: string, baseRef: string): Promise<void>;
     mergeBranch(branch: string, sourceRef: string, commitMsg: string): Promise<boolean>;
+    getHeadSHA(ref: string): Promise<string>;
     pushBranch(branch: string): Promise<void>;
     fastForwardMain(ref: string): Promise<string>;
     deleteBranch(branch: string): Promise<void>;

@@ -15,7 +15,7 @@ export declare class GitHubClient implements GitHubAPI, WorkflowAPI {
     comment(prNumber: number, body: string): Promise<void>;
     createLabel(name: string, color: string, description: string): Promise<void>;
     triggerWorkflow(workflowFile: string, ref: string, inputs?: Record<string, string>): Promise<void>;
-    findWorkflowRun(workflowFile: string, ref: string, dispatchedAt: Date): Promise<WorkflowRunHandle>;
+    findWorkflowRun(workflowFile: string, ref: string, dispatchedAt: Date, headSha?: string): Promise<WorkflowRunHandle>;
     waitForWorkflowRun(runId: number): Promise<WorkflowRunResult>;
     closePR(prNumber: number): Promise<void>;
     getPR(prNumber: number): Promise<PR>;

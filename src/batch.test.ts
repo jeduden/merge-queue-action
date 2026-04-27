@@ -41,6 +41,11 @@ function newMockGit(): GitOperator & {
       mock.pushed.push(branch);
     },
 
+    async getHeadSHA(ref: string) {
+      if (mock.failOn === "getHeadSHA") throw new Error("mock error");
+      return `mock-sha-${ref}`;
+    },
+
     async fastForwardMain(ref: string) {
       if (mock.failOn === "fastForwardMain") throw new Error("mock error");
       mock.ffRef = ref;
