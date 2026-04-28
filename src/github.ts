@@ -6,6 +6,7 @@ import type {
   WorkflowRunHandle,
   WorkflowRunResult,
 } from "./queue.js";
+import { errorMessage } from "./reporter.js";
 
 type Octokit = ReturnType<typeof github.getOctokit>;
 
@@ -209,7 +210,7 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
               ? (err as { status: number }).status
               : undefined;
           this.log(
-            `[findWorkflowRun] head_sha query failed${status !== undefined ? ` (status ${status})` : ""}: ${err instanceof Error ? err.message : String(err)}`,
+            `[findWorkflowRun] head_sha query failed${status !== undefined ? ` (status ${status})` : ""}: ${errorMessage(err)}`,
           );
           throw err;
         }
@@ -250,7 +251,7 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
             ? (err as { status: number }).status
             : undefined;
         this.log(
-          `[findWorkflowRun] branch query failed${status !== undefined ? ` (status ${status})` : ""}: ${err instanceof Error ? err.message : String(err)}`,
+          `[findWorkflowRun] branch query failed${status !== undefined ? ` (status ${status})` : ""}: ${errorMessage(err)}`,
         );
         throw err;
       }
