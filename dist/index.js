@@ -28672,6 +28672,13 @@ module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:events"
 
 /***/ }),
 
+/***/ 1455:
+/***/ ((module) => {
+
+module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:fs/promises");
+
+/***/ }),
+
 /***/ 7067:
 /***/ ((module) => {
 
@@ -28690,6 +28697,13 @@ module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:http2")
 /***/ ((module) => {
 
 module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:net");
+
+/***/ }),
+
+/***/ 6760:
+/***/ ((module) => {
+
+module.exports = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:path");
 
 /***/ }),
 
@@ -28987,6 +29001,64 @@ __webpack_unused_export__ = defaultContentType
 /******/ }
 /******/ 
 /************************************************************************/
+/******/ /* webpack/runtime/create fake namespace object */
+/******/ (() => {
+/******/ 	var getProto = Object.getPrototypeOf ? (obj) => (Object.getPrototypeOf(obj)) : (obj) => (obj.__proto__);
+/******/ 	var leafPrototypes;
+/******/ 	// create a fake namespace object
+/******/ 	// mode & 1: value is a module id, require it
+/******/ 	// mode & 2: merge all properties of value into the ns
+/******/ 	// mode & 4: return value when already ns object
+/******/ 	// mode & 16: return value when it's Promise-like
+/******/ 	// mode & 8|1: behave like require
+/******/ 	__nccwpck_require__.t = function(value, mode) {
+/******/ 		if(mode & 1) value = this(value);
+/******/ 		if(mode & 8) return value;
+/******/ 		if(typeof value === 'object' && value) {
+/******/ 			if((mode & 4) && value.__esModule) return value;
+/******/ 			if((mode & 16) && typeof value.then === 'function') return value;
+/******/ 		}
+/******/ 		var ns = Object.create(null);
+/******/ 		__nccwpck_require__.r(ns);
+/******/ 		var def = {};
+/******/ 		leafPrototypes = leafPrototypes || [null, getProto({}), getProto([]), getProto(getProto)];
+/******/ 		for(var current = mode & 2 && value; typeof current == 'object' && !~leafPrototypes.indexOf(current); current = getProto(current)) {
+/******/ 			Object.getOwnPropertyNames(current).forEach((key) => (def[key] = () => (value[key])));
+/******/ 		}
+/******/ 		def['default'] = () => (value);
+/******/ 		__nccwpck_require__.d(ns, def);
+/******/ 		return ns;
+/******/ 	};
+/******/ })();
+/******/ 
+/******/ /* webpack/runtime/define property getters */
+/******/ (() => {
+/******/ 	// define getter functions for harmony exports
+/******/ 	__nccwpck_require__.d = (exports, definition) => {
+/******/ 		for(var key in definition) {
+/******/ 			if(__nccwpck_require__.o(definition, key) && !__nccwpck_require__.o(exports, key)) {
+/******/ 				Object.defineProperty(exports, key, { enumerable: true, get: definition[key] });
+/******/ 			}
+/******/ 		}
+/******/ 	};
+/******/ })();
+/******/ 
+/******/ /* webpack/runtime/hasOwnProperty shorthand */
+/******/ (() => {
+/******/ 	__nccwpck_require__.o = (obj, prop) => (Object.prototype.hasOwnProperty.call(obj, prop))
+/******/ })();
+/******/ 
+/******/ /* webpack/runtime/make namespace object */
+/******/ (() => {
+/******/ 	// define __esModule on exports
+/******/ 	__nccwpck_require__.r = (exports) => {
+/******/ 		if(typeof Symbol !== 'undefined' && Symbol.toStringTag) {
+/******/ 			Object.defineProperty(exports, Symbol.toStringTag, { value: 'Module' });
+/******/ 		}
+/******/ 		Object.defineProperty(exports, '__esModule', { value: true });
+/******/ 	};
+/******/ })();
+/******/ 
 /******/ /* webpack/runtime/compat */
 /******/ 
 /******/ if (typeof __nccwpck_require__ !== 'undefined') __nccwpck_require__.ab = new URL('.', import.meta.url).pathname.slice(import.meta.url.match(/^file:\/\/\/\w:/) ? 1 : 0, -1) + "/";
@@ -37053,6 +37125,108 @@ class GitOps {
             throw err;
         }
     }
+    /**
+     * Invoke the pre-merge-commit hook if it exists.
+     *
+     * Git's pre-merge-commit hook is normally invoked by `git merge` when
+     * it creates a commit. Since we use `git merge --no-commit`, we must
+     * invoke the hook manually to allow hooks (like mdsmith's) to fix
+     * generated sections after all files are merged but before the final
+     * commit is created.
+     *
+     * Returns an ExecResult with code 0 if the hook passed or didn't exist,
+     * or non-zero if the hook exists and rejected the merge.
+     */
+    async invokePreMergeCommitHook() {
+        // Get the working tree root first - this will be our base for all paths
+        const worktreeResult = await this.git(["rev-parse", "--show-toplevel"]);
+        const worktree = worktreeResult.stdout.trim();
+        // Determine the hooks path. This can be customized via core.hooksPath,
+        // or defaults to .git/hooks. If it's a relative path, it's relative to
+        // the working tree root.
+        const hooksPathResult = await this.git([
+            "config",
+            "--get",
+            "core.hooksPath",
+        ]);
+        let hooksPath;
+        if (hooksPathResult.code === 0 && hooksPathResult.stdout.trim()) {
+            const configuredPath = hooksPathResult.stdout.trim();
+            // If relative, make it absolute relative to worktree
+            if (configuredPath.startsWith("/")) {
+                hooksPath = configuredPath;
+            }
+            else {
+                const path = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 6760, 23));
+                hooksPath = path.join(worktree, configuredPath);
+            }
+        }
+        else {
+            // No core.hooksPath set; use the default .git/hooks
+            const gitDirResult = await this.git(["rev-parse", "--git-dir"]);
+            if (gitDirResult.code !== 0) {
+                throw new Error(`failed to determine git directory: ${gitDirResult.stderr.trim()}`);
+            }
+            const gitDir = gitDirResult.stdout.trim();
+            // git-dir can be relative (e.g., ".git") or absolute
+            const path = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 6760, 23));
+            hooksPath = path.isAbsolute(gitDir)
+                ? `${gitDir}/hooks`
+                : path.join(worktree, gitDir, "hooks");
+        }
+        const path = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 6760, 23));
+        const hookPath = path.join(hooksPath, "pre-merge-commit");
+        // Check if the hook exists and is executable using Node.js fs APIs
+        // instead of spawning a shell. Git only invokes hooks that have the
+        // executable bit set.
+        try {
+            const fs = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 1455, 23));
+            const stat = await fs.stat(hookPath);
+            // Check if file is executable by owner (mode & 0o100)
+            if (!stat.isFile() || !(stat.mode & 0o100)) {
+                this.log(`No executable pre-merge-commit hook found at ${hookPath}`);
+                return { code: 0, stdout: "", stderr: "" };
+            }
+        }
+        catch (err) {
+            // File doesn't exist or can't be accessed
+            this.log(`No pre-merge-commit hook found at ${hookPath}`);
+            return { code: 0, stdout: "", stderr: "" };
+        }
+        // Hook exists and is executable; invoke it. According to git docs,
+        // the pre-merge-commit hook takes no parameters and is invoked with
+        // GIT_EDITOR=: if the command will not bring up an editor.
+        this.log(`Invoking pre-merge-commit hook at ${hookPath}`);
+        // Spawn the hook as a separate process (not via git), running in the
+        // working tree root
+        const hookResult = await new Promise((resolve) => {
+            const child = (0,external_node_child_process_namespaceObject.spawn)(hookPath, [], {
+                cwd: worktree,
+                env: {
+                    ...process.env,
+                    GIT_EDITOR: ":",
+                },
+            });
+            let stdout = "";
+            let stderr = "";
+            child.stdout.on("data", (d) => {
+                stdout += d.toString();
+            });
+            child.stderr.on("data", (d) => {
+                stderr += d.toString();
+            });
+            child.on("close", (code) => {
+                resolve({ code: code ?? -1, stdout, stderr });
+            });
+        });
+        if (hookResult.code !== 0) {
+            this.log(`pre-merge-commit hook failed (exit ${hookResult.code}): ${hookResult.stderr.trim() || hookResult.stdout.trim()}`);
+        }
+        else {
+            this.log("pre-merge-commit hook passed");
+        }
+        return hookResult;
+    }
     async mergeBranch(branch, sourceRef, commitMsg) {
         this.log(`Merging ${sourceRef} into ${branch}`);
         await this.gitOrThrow(["checkout", branch]);
@@ -37063,11 +37237,12 @@ class GitOps {
         // If you "optimise" this to fetch a branch, fork PRs will break.
         await this.gitOrThrow(["fetch", "--no-tags", "origin", sourceRef]);
         // Use `--no-commit` so git completes the merge but doesn't commit
-        // yet. This allows pre-merge-commit hooks to run (they fire when
-        // `git commit` is invoked, not during `git merge`). Without this,
-        // passing `-m` directly to `git merge` would bypass the hook
-        // entirely, breaking repos that rely on merge drivers with hooks
-        // (e.g. mdsmith's merge-driver that fixes generated sections).
+        // yet. This allows us to manually invoke pre-merge-commit hooks
+        // (they are normally invoked by `git merge` when it creates a
+        // commit, but since we use --no-commit, we must invoke them
+        // manually). Without this split, passing `-m` directly to
+        // `git merge` would invoke the hook, but we'd lose the ability to
+        // detect no-op merges and conflicts would be harder to clean up.
         //
         // `-c commit.gpgsign=false` / `-c tag.gpgsign=false`: `git merge
         // --no-ff` creates a merge commit and would otherwise inherit any
@@ -37120,9 +37295,32 @@ class GitOps {
             // No merge in progress — source was already reachable from HEAD.
             return true;
         }
-        // Merge succeeded and is staged; now commit it. This is where
-        // pre-merge-commit hooks run. The `-c` overrides apply to both
-        // the merge and commit steps.
+        // Merge succeeded and is staged; now invoke the pre-merge-commit
+        // hook if it exists. Git's pre-merge-commit hook is normally
+        // invoked by `git merge` when it creates a commit. Since we used
+        // `git merge --no-commit`, git doesn't invoke it automatically.
+        // We must call it manually here to allow hooks (like mdsmith's)
+        // to fix generated sections after all files are merged but before
+        // the final commit is created.
+        const hookResult = await this.invokePreMergeCommitHook();
+        if (hookResult.code !== 0) {
+            // Hook rejected the merge. Clean up and throw.
+            this.log(`pre-merge-commit hook rejected merge (exit ${hookResult.code}): ${hookResult.stderr.trim()}`);
+            const abort = await this.git(["merge", "--abort"]);
+            let cleanupDetail = "";
+            if (abort.code !== 0) {
+                const reset = await this.git(["reset", "--hard", "HEAD"]);
+                if (reset.code !== 0) {
+                    cleanupDetail = ` Cleanup failed: git merge --abort (exit ${abort.code}): ${abort.stderr.trim() || abort.stdout.trim()}; git reset --hard HEAD (exit ${reset.code}): ${reset.stderr.trim() || reset.stdout.trim()}`;
+                }
+                else {
+                    cleanupDetail = ` Cleanup fallback succeeded after git merge --abort failed (exit ${abort.code}): ${abort.stderr.trim() || abort.stdout.trim()}`;
+                }
+            }
+            throw new Error(`pre-merge-commit hook failed (exit ${hookResult.code}): ${hookResult.stderr.trim() || hookResult.stdout.trim()}${cleanupDetail}`);
+        }
+        // Hook passed (or didn't exist); now commit. The `-c` overrides
+        // apply to both the merge and commit steps.
         const commit = await this.git([
             "-c",
             "commit.gpgsign=false",

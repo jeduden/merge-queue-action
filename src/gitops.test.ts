@@ -5,6 +5,7 @@ import {
   writeFileSync,
   readFileSync,
   chmodSync,
+  existsSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -861,16 +862,102 @@ describe("GitOps against a real git repo (integration)", () => {
     expect(merged).toContain("b");
   });
 
-  // NOTE: We do not directly test pre-merge-commit hook execution here.
-  // This integration suite exercises the two-step merge flow in a real git
-  // repo, and the custom merge driver test above verifies that the merge
-  // driver still works correctly with `git merge --no-commit` followed by
-  // `git commit`. That split is what allows commit-time hooks such as
-  // pre-merge-commit to run, whereas `git merge -m "msg"` could bypass that
-  // path.
+  it("invokes pre-merge-commit hook if it exists", async () => {
+    // Create a pre-merge-commit hook that modifies a file that's already
+    // part of the merge. This simulates hooks like mdsmith that fix
+    // generated sections after all files are merged.
+    const hooksDir = join(work, ".git", "hooks");
+    mkdirSync(hooksDir, { recursive: true });
+    const hookPath = join(hooksDir, "pre-merge-commit");
+    writeFileSync(
+      hookPath,
+      "#!/bin/sh\nset -eu\necho 'hook modified' >> base.txt\ngit add base.txt\nexit 0\n",
+    );
+    chmodSync(hookPath, 0o755);
+
+    // Create a file on main
+    writeFileSync(join(work, "base.txt"), "base\n");
+    await runIn(work, "add", "base.txt");
+    await runIn(work, "commit", "-m", "base");
+    await runIn(work, "push", "origin", "main");
+
+    // Create a PR branch that adds a new file
+    await runIn(work, "checkout", "-b", "pr-hook-test");
+    writeFileSync(join(work, "new.txt"), "content\n");
+    await runIn(work, "add", "new.txt");
+    await runIn(work, "commit", "-m", "add new file");
+    const prSha = await runIn(work, "rev-parse", "HEAD");
+    await runIn(work, "push", "origin", "pr-hook-test");
+    await runIn(work, "checkout", "main");
+
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(makeOctokitBackedByBare() as any, "o", "r", {
+      exec: execInWork(),
+    });
+
+    await ops.createBranchFromRef("merge-queue/batch-hook", "main");
+    expect(
+      await ops.mergeBranch("merge-queue/batch-hook", prSha, "Merge PR"),
+    ).toBe(true);
+
+    // Verify the hook ran by checking that base.txt was modified and
+    // the modification was committed
+    const baseContent = readFileSync(join(work, "base.txt"), "utf8");
+    expect(baseContent).toContain("hook modified");
+  });
+
+  it("aborts merge if pre-merge-commit hook fails", async () => {
+    // Create a hook that rejects the merge
+    const hooksDir = join(work, ".git", "hooks");
+    mkdirSync(hooksDir, { recursive: true });
+    const hookPath = join(hooksDir, "pre-merge-commit");
+    writeFileSync(
+      hookPath,
+      "#!/bin/sh\necho 'hook rejected' >&2\nexit 1\n",
+    );
+    chmodSync(hookPath, 0o755);
+
+    // Create a file on main
+    writeFileSync(join(work, "base.txt"), "base\n");
+    await runIn(work, "add", "base.txt");
+    await runIn(work, "commit", "-m", "base");
+    await runIn(work, "push", "origin", "main");
+
+    // Create a PR branch
+    await runIn(work, "checkout", "-b", "pr-reject");
+    writeFileSync(join(work, "new.txt"), "content\n");
+    await runIn(work, "add", "new.txt");
+    await runIn(work, "commit", "-m", "add file");
+    const prSha = await runIn(work, "rev-parse", "HEAD");
+    await runIn(work, "push", "origin", "pr-reject");
+    await runIn(work, "checkout", "main");
+
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(makeOctokitBackedByBare() as any, "o", "r", {
+      exec: execInWork(),
+    });
+
+    await ops.createBranchFromRef("merge-queue/batch-reject", "main");
+
+    // mergeBranch should throw when the hook rejects
+    await expect(
+      ops.mergeBranch("merge-queue/batch-reject", prSha, "Merge PR"),
+    ).rejects.toThrow(/pre-merge-commit hook failed/);
+
+    // Verify the working tree is clean after hook failure
+    const status = await runIn(work, "status", "--porcelain");
+    expect(status.trim()).toBe("");
+  });
+
+  // NOTE: The tests above verify that pre-merge-commit hooks are invoked
+  // correctly. The action manually invokes the hook after `git merge
+  // --no-commit` completes but before `git commit` runs, because git's
+  // pre-merge-commit hook is only invoked when `git merge` creates a
+  // commit itself (not when using --no-commit).
   //
-  // Hook behavior is validated out-of-band / in real-world usage. For
-  // example, jeduden/mdsmith uses a pre-merge-commit hook together with its
-  // merge driver to fix generated catalog sections after merging, and that
-  // setup works with the two-step merge process implemented here.
+  // This integration suite exercises the complete merge flow in a real git
+  // repo, and the custom merge driver test verifies that merge drivers work
+  // correctly with the two-step merge process. The hook tests verify that
+  // hooks like mdsmith's catalog regeneration execute at the right time and
+  // can modify files before the final merge commit is created.
 });
