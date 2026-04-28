@@ -37188,7 +37188,7 @@ class GitOps {
                 return { code: 0, stdout: "", stderr: "" };
             }
         }
-        catch (err) {
+        catch (_err) {
             // File doesn't exist or can't be accessed
             this.log(`No pre-merge-commit hook found at ${hookPath}`);
             return { code: 0, stdout: "", stderr: "" };
