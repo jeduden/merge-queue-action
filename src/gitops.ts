@@ -281,6 +281,10 @@ export class GitOps implements GitOperator {
    * or non-zero if the hook exists and rejected the merge.
    */
   private async invokePreMergeCommitHook(): Promise<ExecResult> {
+    // Import modules once at the top
+    const path = await import("node:path");
+    const fs = await import("node:fs/promises");
+
     // Get the working tree root first - this will be our base for all paths
     const worktreeResult = await this.git(["rev-parse", "--show-toplevel"]);
     const worktree = worktreeResult.stdout.trim();
@@ -300,7 +304,6 @@ export class GitOps implements GitOperator {
       if (configuredPath.startsWith("/")) {
         hooksPath = configuredPath;
       } else {
-        const path = await import("node:path");
         hooksPath = path.join(worktree, configuredPath);
       }
     } else {
@@ -313,20 +316,17 @@ export class GitOps implements GitOperator {
       }
       const gitDir = gitDirResult.stdout.trim();
       // git-dir can be relative (e.g., ".git") or absolute
-      const path = await import("node:path");
       hooksPath = path.isAbsolute(gitDir)
         ? `${gitDir}/hooks`
         : path.join(worktree, gitDir, "hooks");
     }
 
-    const path = await import("node:path");
     const hookPath = path.join(hooksPath, "pre-merge-commit");
 
     // Check if the hook exists and is executable using Node.js fs APIs
     // instead of spawning a shell. Git only invokes hooks that have the
     // executable bit set.
     try {
-      const fs = await import("node:fs/promises");
       const stat = await fs.stat(hookPath);
       // Check if file is executable by owner (mode & 0o100)
       if (!stat.isFile() || !(stat.mode & 0o100)) {

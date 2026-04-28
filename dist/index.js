@@ -37138,6 +37138,9 @@ class GitOps {
      * or non-zero if the hook exists and rejected the merge.
      */
     async invokePreMergeCommitHook() {
+        // Import modules once at the top
+        const path = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 6760, 23));
+        const fs = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 1455, 23));
         // Get the working tree root first - this will be our base for all paths
         const worktreeResult = await this.git(["rev-parse", "--show-toplevel"]);
         const worktree = worktreeResult.stdout.trim();
@@ -37157,7 +37160,6 @@ class GitOps {
                 hooksPath = configuredPath;
             }
             else {
-                const path = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 6760, 23));
                 hooksPath = path.join(worktree, configuredPath);
             }
         }
@@ -37169,18 +37171,15 @@ class GitOps {
             }
             const gitDir = gitDirResult.stdout.trim();
             // git-dir can be relative (e.g., ".git") or absolute
-            const path = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 6760, 23));
             hooksPath = path.isAbsolute(gitDir)
                 ? `${gitDir}/hooks`
                 : path.join(worktree, gitDir, "hooks");
         }
-        const path = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 6760, 23));
         const hookPath = path.join(hooksPath, "pre-merge-commit");
         // Check if the hook exists and is executable using Node.js fs APIs
         // instead of spawning a shell. Git only invokes hooks that have the
         // executable bit set.
         try {
-            const fs = await Promise.resolve(/* import() */).then(__nccwpck_require__.t.bind(__nccwpck_require__, 1455, 23));
             const stat = await fs.stat(hookPath);
             // Check if file is executable by owner (mode & 0o100)
             if (!stat.isFile() || !(stat.mode & 0o100)) {
