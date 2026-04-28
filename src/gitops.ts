@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { stat } from "node:fs/promises";
+import { join, isAbsolute } from "node:path";
 import type * as github from "@actions/github";
 import type { GitOperator } from "./batch.js";
 import { errorMessage, silentReporter, type Reporter } from "./reporter.js";
@@ -281,10 +283,6 @@ export class GitOps implements GitOperator {
    * or non-zero if the hook exists and rejected the merge.
    */
   private async invokePreMergeCommitHook(): Promise<ExecResult> {
-    // Import modules once at the top
-    const path = await import("node:path");
-    const fs = await import("node:fs/promises");
-
     // Get the working tree root first - this will be our base for all paths
     const worktreeResult = await this.git(["rev-parse", "--show-toplevel"]);
     const worktree = worktreeResult.stdout.trim();
@@ -304,7 +302,7 @@ export class GitOps implements GitOperator {
       if (configuredPath.startsWith("/")) {
         hooksPath = configuredPath;
       } else {
-        hooksPath = path.join(worktree, configuredPath);
+        hooksPath = join(worktree, configuredPath);
       }
     } else {
       // No core.hooksPath set; use the default .git/hooks
@@ -316,20 +314,20 @@ export class GitOps implements GitOperator {
       }
       const gitDir = gitDirResult.stdout.trim();
       // git-dir can be relative (e.g., ".git") or absolute
-      hooksPath = path.isAbsolute(gitDir)
+      hooksPath = isAbsolute(gitDir)
         ? `${gitDir}/hooks`
-        : path.join(worktree, gitDir, "hooks");
+        : join(worktree, gitDir, "hooks");
     }
 
-    const hookPath = path.join(hooksPath, "pre-merge-commit");
+    const hookPath = join(hooksPath, "pre-merge-commit");
 
     // Check if the hook exists and is executable using Node.js fs APIs
     // instead of spawning a shell. Git only invokes hooks that have the
     // executable bit set.
     try {
-      const stat = await fs.stat(hookPath);
+      const fileStat = await stat(hookPath);
       // Check if file is executable by owner (mode & 0o100)
-      if (!stat.isFile() || !(stat.mode & 0o100)) {
+      if (!fileStat.isFile() || !(fileStat.mode & 0o100)) {
         this.log(`No executable pre-merge-commit hook found at ${hookPath}`);
         return { code: 0, stdout: "", stderr: "" };
       }
