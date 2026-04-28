@@ -165,7 +165,7 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
     const maxAttempts = 60;
 
     // Log search parameters for debugging
-    console.log(
+    this.log(
       `[findWorkflowRun] Searching for workflow run: workflow=${workflowFile}, ref=${ref}, headSha=${headSha || "undefined"}, createdAfter=${createdAfter.toISOString()}`,
     );
 
@@ -188,22 +188,30 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
             });
 
           if (i === 0 || i === 5 || i % 30 === 0) {
-            console.log(
+            this.log(
               `[findWorkflowRun] Attempt ${i + 1}/${maxAttempts}: head_sha query returned ${runs.workflow_runs.length} runs`,
             );
           }
 
           if (runs.workflow_runs.length > 0) {
             const run = runs.workflow_runs[0];
-            console.log(
+            this.log(
               `[findWorkflowRun] Found run via head_sha query: id=${run.id}, status=${run.status}, conclusion=${run.conclusion}`,
             );
             return { runId: run.id, htmlUrl: run.html_url };
           }
         } catch (err) {
-          console.log(
-            `[findWorkflowRun] head_sha query failed: ${err instanceof Error ? err.message : String(err)}`,
+          const status =
+            typeof err === "object" &&
+            err !== null &&
+            "status" in err &&
+            typeof (err as { status: unknown }).status === "number"
+              ? (err as { status: number }).status
+              : undefined;
+          this.log(
+            `[findWorkflowRun] head_sha query failed${status !== undefined ? ` (status ${status})` : ""}: ${err instanceof Error ? err.message : String(err)}`,
           );
+          throw err;
         }
       }
 
@@ -221,22 +229,30 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
           });
 
         if (i === 0 || i === 5 || i % 30 === 0) {
-          console.log(
+          this.log(
             `[findWorkflowRun] Attempt ${i + 1}/${maxAttempts}: branch query returned ${runs.workflow_runs.length} runs`,
           );
         }
 
         if (runs.workflow_runs.length > 0) {
           const run = runs.workflow_runs[0];
-          console.log(
+          this.log(
             `[findWorkflowRun] Found run via branch query: id=${run.id}, status=${run.status}, conclusion=${run.conclusion}`,
           );
           return { runId: run.id, htmlUrl: run.html_url };
         }
       } catch (err) {
-        console.log(
-          `[findWorkflowRun] branch query failed: ${err instanceof Error ? err.message : String(err)}`,
+        const status =
+          typeof err === "object" &&
+          err !== null &&
+          "status" in err &&
+          typeof (err as { status: unknown }).status === "number"
+            ? (err as { status: number }).status
+            : undefined;
+        this.log(
+          `[findWorkflowRun] branch query failed${status !== undefined ? ` (status ${status})` : ""}: ${err instanceof Error ? err.message : String(err)}`,
         );
+        throw err;
       }
 
       if (i < maxAttempts - 1) await sleep(10_000);

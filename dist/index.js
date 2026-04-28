@@ -36368,7 +36368,7 @@ class GitHubClient {
         const createdAfter = new Date(dispatchedAt.getTime() - 5000);
         const maxAttempts = 60;
         // Log search parameters for debugging
-        console.log(`[findWorkflowRun] Searching for workflow run: workflow=${workflowFile}, ref=${ref}, headSha=${headSha || "undefined"}, createdAfter=${createdAfter.toISOString()}`);
+        this.log(`[findWorkflowRun] Searching for workflow run: workflow=${workflowFile}, ref=${ref}, headSha=${headSha || "undefined"}, createdAfter=${createdAfter.toISOString()}`);
         // Poll up to ~10 min for the run to appear. Check immediately first,
         // then sleep between attempts so we can post the "CI running" comment
         // the moment GitHub registers the dispatched run.
@@ -36386,16 +36386,23 @@ class GitHubClient {
                         per_page: 1,
                     });
                     if (i === 0 || i === 5 || i % 30 === 0) {
-                        console.log(`[findWorkflowRun] Attempt ${i + 1}/${maxAttempts}: head_sha query returned ${runs.workflow_runs.length} runs`);
+                        this.log(`[findWorkflowRun] Attempt ${i + 1}/${maxAttempts}: head_sha query returned ${runs.workflow_runs.length} runs`);
                     }
                     if (runs.workflow_runs.length > 0) {
                         const run = runs.workflow_runs[0];
-                        console.log(`[findWorkflowRun] Found run via head_sha query: id=${run.id}, status=${run.status}, conclusion=${run.conclusion}`);
+                        this.log(`[findWorkflowRun] Found run via head_sha query: id=${run.id}, status=${run.status}, conclusion=${run.conclusion}`);
                         return { runId: run.id, htmlUrl: run.html_url };
                     }
                 }
                 catch (err) {
-                    console.log(`[findWorkflowRun] head_sha query failed: ${err instanceof Error ? err.message : String(err)}`);
+                    const status = typeof err === "object" &&
+                        err !== null &&
+                        "status" in err &&
+                        typeof err.status === "number"
+                        ? err.status
+                        : undefined;
+                    this.log(`[findWorkflowRun] head_sha query failed${status !== undefined ? ` (status ${status})` : ""}: ${err instanceof Error ? err.message : String(err)}`);
+                    throw err;
                 }
             }
             // Fallback to branch-based query (may have indexing delays)
@@ -36410,16 +36417,23 @@ class GitHubClient {
                     per_page: 1,
                 });
                 if (i === 0 || i === 5 || i % 30 === 0) {
-                    console.log(`[findWorkflowRun] Attempt ${i + 1}/${maxAttempts}: branch query returned ${runs.workflow_runs.length} runs`);
+                    this.log(`[findWorkflowRun] Attempt ${i + 1}/${maxAttempts}: branch query returned ${runs.workflow_runs.length} runs`);
                 }
                 if (runs.workflow_runs.length > 0) {
                     const run = runs.workflow_runs[0];
-                    console.log(`[findWorkflowRun] Found run via branch query: id=${run.id}, status=${run.status}, conclusion=${run.conclusion}`);
+                    this.log(`[findWorkflowRun] Found run via branch query: id=${run.id}, status=${run.status}, conclusion=${run.conclusion}`);
                     return { runId: run.id, htmlUrl: run.html_url };
                 }
             }
             catch (err) {
-                console.log(`[findWorkflowRun] branch query failed: ${err instanceof Error ? err.message : String(err)}`);
+                const status = typeof err === "object" &&
+                    err !== null &&
+                    "status" in err &&
+                    typeof err.status === "number"
+                    ? err.status
+                    : undefined;
+                this.log(`[findWorkflowRun] branch query failed${status !== undefined ? ` (status ${status})` : ""}: ${err instanceof Error ? err.message : String(err)}`);
+                throw err;
             }
             if (i < maxAttempts - 1)
                 await sleep(10_000);
