@@ -160,14 +160,22 @@ driver setup.
    checked out locally.
 
 2. **Local merges** — Each PR's head SHA is fetched and merged into
-   the batch branch with `git merge --no-ff -m "Merge PR #N: <title>"`.
-   Because the merge runs locally, `.gitattributes` and any registered
-   `merge.<name>.driver` config are consulted exactly as they would be
-   for a developer running `git merge`. If a PR still conflicts after
-   drivers run, the action aborts that merge, leaves the working tree
-   clean, skips the PR, and labels it `queue:failed`; remaining PRs
-   continue. The resulting batch branch is pushed to `origin` before
-   CI is triggered.
+   the batch branch using a two-step process: `git merge --no-commit`
+   followed by `git commit`. This allows both merge drivers (which run
+   during `git merge`) and pre-merge-commit hooks (which run during
+   `git commit`) to resolve conflicts automatically.
+
+   **Conflict resolution:** When `git merge` reports conflicts (exit
+   code 1), the action does NOT abort immediately. Instead, it proceeds
+   to `git commit`, allowing pre-merge-commit hooks to resolve any
+   remaining conflicts. Only after hooks have executed does the action
+   check for unresolved conflicts using `git ls-files -u`. If conflicts
+   remain in the index, the action aborts that merge, labels the PR
+   `queue:failed`, and continues with remaining PRs. See
+   [Using pre-merge-commit hooks with merge drivers](#using-pre-merge-commit-hooks-with-merge-drivers)
+   for details on the two-stage resolution pipeline.
+
+   The resulting batch branch is pushed to `origin` before CI is triggered.
 
 3. **CI verification** — The CI workflow is triggered on the batch branch
    via `workflow_dispatch`. Because the batch branch contains the result
@@ -701,6 +709,44 @@ The action's two-step merge process (`git merge --no-commit` followed by
 `git commit`) ensures `pre-merge-commit` hooks execute correctly. (In
 earlier versions, using `git merge -m "message"` bypassed the hook
 entirely.)
+
+#### How conflict resolution works
+
+The action supports a **two-stage conflict resolution pipeline**:
+
+1. **Merge drivers** run during `git merge` and can resolve per-file
+   conflicts based on the file's `.gitattributes` configuration.
+2. **Pre-merge-commit hooks** run during `git commit` and can resolve
+   conflicts that remain after merge drivers have executed, or regenerate
+   content that depends on the final merged state.
+
+**Important:** The action does NOT abort immediately when `git merge`
+reports conflicts (exit code 1). Instead, it proceeds to invoke
+`git commit`, which runs pre-merge-commit hooks. Only after hooks have
+executed does the action check if conflicts remain in the index (using
+`git ls-files -u`). This allows hooks to fix conflicts that merge drivers
+couldn't resolve automatically.
+
+**Conflict resolution flow:**
+
+```
+git merge --no-commit
+  ↓
+  (merge drivers run, may resolve some conflicts)
+  ↓
+git commit -m "..."
+  ↓
+  (pre-merge-commit hooks run, may resolve remaining conflicts)
+  ↓
+Check git ls-files -u
+  ↓
+  ├─ No unresolved files → merge succeeds
+  └─ Conflicts remain → PR labeled queue:failed
+```
+
+This enables workflows where merge drivers handle file-level conflicts
+and hooks perform final cleanup or regeneration that depends on the
+complete merge result.
 
 #### Example: mdsmith merge-driver + pre-merge-commit hook
 
