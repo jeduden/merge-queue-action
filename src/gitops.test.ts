@@ -116,7 +116,7 @@ describe("GitOps with injected exec", () => {
     ]);
   });
 
-  it("mergeBranch returns false and cleans up on conflict exit code", async () => {
+  it("mergeBranch returns false and cleans up on unresolved conflict", async () => {
     const { octokit } = makeFakeOctokit();
     const execCalls: string[][] = [];
     const exec: Exec = async (args) => {
@@ -127,6 +127,11 @@ describe("GitOps with injected exec", () => {
       if (mergeIdx >= 0 && args[mergeIdx + 1] !== "--abort") {
         // Git writes conflict info to stdout, not stderr.
         return { code: 1, stdout: "CONFLICT (content): Merge conflict in file.txt", stderr: "" };
+      }
+      // Check for unresolved conflicts with `git ls-files -u`
+      if (args[0] === "ls-files" && args[1] === "-u") {
+        // Simulate unresolved conflicts in the index
+        return { code: 0, stdout: "100644 abc123 1\tfile.txt\n100644 def456 2\tfile.txt\n100644 789ghi 3\tfile.txt", stderr: "" };
       }
       return { code: 0, stdout: "", stderr: "" };
     };
@@ -147,6 +152,46 @@ describe("GitOps with injected exec", () => {
         c.includes("merge") && c[c.indexOf("merge") + 1] !== "--abort",
     );
     expect(mergeAttempt).toContain("commit.gpgsign=false");
+  });
+
+  it("mergeBranch succeeds when merge driver resolves all conflicts (exit 1 but no unresolved files)", async () => {
+    const { octokit } = makeFakeOctokit();
+    const execCalls: string[][] = [];
+    const exec: Exec = async (args) => {
+      execCalls.push(args);
+      const mergeIdx = args.indexOf("merge");
+      if (mergeIdx >= 0 && args[mergeIdx + 1] !== "--abort") {
+        // Merge driver encountered conflicts but resolved them all
+        return { code: 1, stdout: "Auto-merging file.md\nCONFLICT (content): Merge conflict in file.md\nmdsmith merge driver: resolved conflict in file.md", stderr: "" };
+      }
+      // Check for unresolved conflicts with `git ls-files -u`
+      if (args[0] === "ls-files" && args[1] === "-u") {
+        // No unresolved conflicts — merge driver resolved everything
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      // MERGE_HEAD exists, so commit can proceed
+      if (args[0] === "rev-parse" && args[2] === "MERGE_HEAD") {
+        return { code: 0, stdout: "abc1234", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+
+    const ok = await ops.mergeBranch("batch", "sha-1", "msg");
+    expect(ok).toBe(true);
+
+    // Should NOT have aborted the merge
+    const mergeAbort = execCalls.find(
+      (c) => c[0] === "merge" && c[1] === "--abort",
+    );
+    expect(mergeAbort).toBeUndefined();
+
+    // Should have committed after merge driver resolved conflicts
+    const commitCall = execCalls.find(
+      (c) => c.includes("commit") && c.includes("-m"),
+    );
+    expect(commitCall).toBeDefined();
   });
 
   it("mergeBranch returns true on clean merge", async () => {
@@ -429,6 +474,11 @@ describe("GitOps with injected exec", () => {
       if (mergeIdx >= 0 && args[mergeIdx + 1] !== "--abort") {
         // Git writes conflict info to stdout, not stderr.
         return { code: 1, stdout: "CONFLICT (content): Merge conflict in file.txt", stderr: "" };
+      }
+      // Check for unresolved conflicts with `git ls-files -u`
+      if (args[0] === "ls-files" && args[1] === "-u") {
+        // Simulate unresolved conflicts in the index
+        return { code: 0, stdout: "100644 abc123 1\tfile.txt\n", stderr: "" };
       }
       if (args[0] === "merge" && args[1] === "--abort") {
         return { code: 128, stdout: "", stderr: "abort failed" };

@@ -316,29 +316,49 @@ export class GitOps implements GitOperator {
     }
 
     if (merge.code === 1) {
-      // Git writes conflict details to stdout, not stderr. Merge drivers
-      // (like mdsmith) also write their output to stdout during the merge.
-      // Log both streams to surface diagnostic info.
-      const output = merge.stdout.trim() || merge.stderr.trim() || "(no output)";
-      this.log(
-        `git merge reported a conflict (exit 1); aborting. Output: ${output}`,
-      );
-      const abort = await this.git(["merge", "--abort"]);
-      if (abort.code !== 0) {
-        // Leave the working tree tidy even if --abort is a no-op (merge
-        // may have failed before touching the index).
-        const reset = await this.git(["reset", "--hard", "HEAD"]);
-        if (reset.code !== 0) {
-          // Both cleanup paths failed — the working tree may be dirty,
-          // which would silently corrupt the next PR's merge if we kept
-          // going. Throw so the batch stops and the failure surfaces
-          // with enough detail to diagnose.
-          throw new Error(
-            `failed to clean up conflicted merge: both \`git merge --abort\` and \`git reset --hard HEAD\` failed; worktree is in an unknown state. abort stderr: ${abort.stderr.trim()}; reset stderr: ${reset.stderr.trim()}`,
-          );
+      // Git returns exit code 1 when it detects conflicts during merge.
+      // However, merge drivers (configured via .gitattributes and git config)
+      // run during the merge and may automatically resolve these conflicts.
+      // We must check if conflicts actually remain in the index rather than
+      // blindly aborting on exit code 1.
+      //
+      // `git ls-files -u` lists unmerged (conflicted) files in the index.
+      // If it returns empty output, all conflicts were resolved by merge
+      // drivers and we should proceed with the commit (which will run
+      // pre-merge-commit hooks that may further fix generated content).
+      const checkConflicts = await this.git(["ls-files", "-u"]);
+      const hasUnresolvedConflicts = checkConflicts.stdout.trim().length > 0;
+
+      if (hasUnresolvedConflicts) {
+        // True conflicts remain — merge drivers couldn't resolve everything.
+        // Log diagnostic info and abort the merge.
+        const output = merge.stdout.trim() || merge.stderr.trim() || "(no output)";
+        this.log(
+          `git merge reported conflicts that remain unresolved (exit 1). Unresolved files:\n${checkConflicts.stdout.trim()}\nMerge output: ${output}`,
+        );
+        const abort = await this.git(["merge", "--abort"]);
+        if (abort.code !== 0) {
+          // Leave the working tree tidy even if --abort is a no-op (merge
+          // may have failed before touching the index).
+          const reset = await this.git(["reset", "--hard", "HEAD"]);
+          if (reset.code !== 0) {
+            // Both cleanup paths failed — the working tree may be dirty,
+            // which would silently corrupt the next PR's merge if we kept
+            // going. Throw so the batch stops and the failure surfaces
+            // with enough detail to diagnose.
+            throw new Error(
+              `failed to clean up conflicted merge: both \`git merge --abort\` and \`git reset --hard HEAD\` failed; worktree is in an unknown state. abort stderr: ${abort.stderr.trim()}; reset stderr: ${reset.stderr.trim()}`,
+            );
+          }
         }
+        return false;
       }
-      return false;
+
+      // Exit code 1 but no unresolved conflicts — merge drivers resolved
+      // everything. Log this and proceed with the commit.
+      this.log(
+        `git merge reported exit code 1, but merge drivers resolved all conflicts. Proceeding with commit. Merge output: ${merge.stdout.trim() || "(no output)"}`,
+      );
     }
 
     // Log merge output (including any merge driver messages) for
