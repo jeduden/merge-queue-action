@@ -316,8 +316,12 @@ export class GitOps implements GitOperator {
     }
 
     if (merge.code === 1) {
+      // Git writes conflict details to stdout, not stderr. Merge drivers
+      // (like mdsmith) also write their output to stdout during the merge.
+      // Log both streams to surface diagnostic info.
+      const output = merge.stdout.trim() || merge.stderr.trim() || "(no output)";
       this.log(
-        `git merge reported a conflict (exit 1); aborting. stderr: ${merge.stderr.trim()}`,
+        `git merge reported a conflict (exit 1); aborting. Output: ${output}`,
       );
       const abort = await this.git(["merge", "--abort"]);
       if (abort.code !== 0) {
@@ -335,6 +339,13 @@ export class GitOps implements GitOperator {
         }
       }
       return false;
+    }
+
+    // Log merge output (including any merge driver messages) for
+    // successful merges. Merge drivers like mdsmith write diagnostic info
+    // to stdout during the merge that can be helpful for debugging.
+    if (merge.stdout.trim()) {
+      this.log(`git merge output: ${merge.stdout.trim()}`);
     }
 
     // Detect no-op merges: `git merge --no-commit` exits 0 with "Already

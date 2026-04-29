@@ -125,7 +125,8 @@ describe("GitOps with injected exec", () => {
       // the `merge` subcommand; abort is a bare `["merge", "--abort"]`.
       const mergeIdx = args.indexOf("merge");
       if (mergeIdx >= 0 && args[mergeIdx + 1] !== "--abort") {
-        return { code: 1, stdout: "", stderr: "CONFLICT (content)" };
+        // Git writes conflict info to stdout, not stderr.
+        return { code: 1, stdout: "CONFLICT (content): Merge conflict in file.txt", stderr: "" };
       }
       return { code: 0, stdout: "", stderr: "" };
     };
@@ -426,7 +427,8 @@ describe("GitOps with injected exec", () => {
     const exec: Exec = async (args) => {
       const mergeIdx = args.indexOf("merge");
       if (mergeIdx >= 0 && args[mergeIdx + 1] !== "--abort") {
-        return { code: 1, stdout: "", stderr: "CONFLICT (content)" };
+        // Git writes conflict info to stdout, not stderr.
+        return { code: 1, stdout: "CONFLICT (content): Merge conflict in file.txt", stderr: "" };
       }
       if (args[0] === "merge" && args[1] === "--abort") {
         return { code: 128, stdout: "", stderr: "abort failed" };
