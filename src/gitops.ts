@@ -125,7 +125,7 @@ export class GitOps implements GitOperator {
     await this.assertWorktreeReady();
 
     this.log(
-      `Configuring git identity as "${opts.userName} <${opts.userEmail}>"`,
+      `Configuring git identity: name="${opts.userName}" email="${opts.userEmail}"`,
     );
     await this.gitOrThrow(["config", "user.email", opts.userEmail]);
     await this.gitOrThrow(["config", "user.name", opts.userName]);
