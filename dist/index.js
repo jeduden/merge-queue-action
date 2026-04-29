@@ -37063,15 +37063,16 @@ class GitOps {
             // may also resolve conflicts.
             //
             // We cannot check for conflicts here — we must let pre-merge-commit
-            // hooks run first. Log the merge output for diagnostics.
-            const output = merge.stdout.trim() || merge.stderr.trim() || "(no output)";
-            this.log(`git merge reported exit code 1 (conflicts detected). Merge output: ${output}\nAttempting commit to allow hooks to resolve conflicts...`);
-        }
-        // Log merge output (including any merge driver messages) for
-        // successful merges. Merge drivers like mdsmith write diagnostic info
-        // to stdout during the merge that can be helpful for debugging.
-        if (merge.stdout.trim()) {
-            this.log(`git merge output: ${merge.stdout.trim()}`);
+            // hooks run first. Log both stdout and stderr for diagnostics.
+            const stdout = merge.stdout.trim();
+            const stderr = merge.stderr.trim();
+            const output = [
+                stdout ? `stdout: ${stdout}` : "",
+                stderr ? `stderr: ${stderr}` : "",
+            ]
+                .filter(Boolean)
+                .join("\n") || "(no output)";
+            this.log(`git merge reported exit code 1 (conflicts detected). Merge output:\n${output}\nAttempting commit to allow hooks to resolve conflicts...`);
         }
         // Detect no-op merges: `git merge --no-commit` exits 0 with "Already
         // up to date." but does NOT create MERGE_HEAD, so the subsequent
@@ -37085,6 +37086,13 @@ class GitOps {
         if (mergeHeadCheck.code !== 0) {
             // No merge in progress — source was already reachable from HEAD.
             return true;
+        }
+        // Log merge output (including any merge driver messages) for
+        // actual merges. Merge drivers like mdsmith write diagnostic info
+        // to stdout during the merge that can be helpful for debugging.
+        // Only log when MERGE_HEAD exists to avoid noise from no-op merges.
+        if (merge.stdout.trim()) {
+            this.log(`git merge output: ${merge.stdout.trim()}`);
         }
         // Merge succeeded and is staged; now commit it. This is where
         // pre-merge-commit hooks run. The `-c` overrides apply to both
