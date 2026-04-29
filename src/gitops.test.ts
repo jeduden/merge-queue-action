@@ -308,7 +308,7 @@ describe("GitOps with injected exec", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test double
     const ops = new GitOps(octokit as any, "o", "r", { exec });
     await expect(ops.mergeBranch("batch", "sha-1", "msg")).rejects.toThrow(
-      "git commit after merge failed",
+      "pre-merge-commit hook failed",
     );
     // merge --abort must be attempted to clean up the staged merge state.
     const abortCall = execCalls.find(
@@ -349,7 +349,7 @@ describe("GitOps with injected exec", () => {
     // biome-ignore lint/suspicious/noExplicitAny: test double
     const ops = new GitOps(octokit as any, "o", "r", { exec });
     await expect(ops.mergeBranch("batch", "sha-1", "msg")).rejects.toThrow(
-      "git commit after merge failed",
+      "pre-merge-commit hook failed",
     );
     // git reset --hard HEAD must be the fallback cleanup.
     const resetCall = execCalls.find(

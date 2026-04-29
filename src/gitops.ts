@@ -519,8 +519,36 @@ export class GitOps implements GitOperator {
       );
     }
 
-    // Hook passed (or didn't exist); now commit. The `-c` overrides
-    // apply to both the merge and commit steps.
+    // Hook passed (or didn't exist). If merge reported conflicts earlier,
+    // check if they were resolved by the hook. Only proceed to commit if
+    // no conflicts remain.
+    if (merge.code === 1) {
+      const checkConflicts = await this.git(["ls-files", "-u"]);
+      const hasUnresolvedConflicts = checkConflicts.stdout.trim().length > 0;
+
+      if (hasUnresolvedConflicts) {
+        // Conflicts remain after hook ran. Clean up and return false.
+        this.log(
+          `Merge conflicts remain unresolved after pre-merge-commit hook. Unresolved files:\n${checkConflicts.stdout.trim()}`,
+        );
+        const abort = await this.git(["merge", "--abort"]);
+        if (abort.code !== 0) {
+          const reset = await this.git(["reset", "--hard", "HEAD"]);
+          if (reset.code !== 0) {
+            throw new Error(
+              `failed to clean up conflicted merge: both \`git merge --abort\` and \`git reset --hard HEAD\` failed; worktree is in an unknown state. abort stderr: ${abort.stderr.trim()}; reset stderr: ${reset.stderr.trim()}`,
+            );
+          }
+        }
+        return false;
+      }
+
+      // Conflicts were resolved by merge drivers and/or hook!
+      this.log("Merge conflicts were resolved by merge drivers and/or pre-merge-commit hook");
+    }
+
+    // Hook passed (or didn't exist) and no conflicts remain; now commit.
+    // The `-c` overrides apply to both the merge and commit steps.
     const commit = await this.git([
       "-c",
       "commit.gpgsign=false",
