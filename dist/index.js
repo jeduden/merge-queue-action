@@ -37196,21 +37196,23 @@ class GitOps {
             throw new Error(`git merge failed (exit ${merge.code}): ${merge.stderr.trim() || merge.stdout.trim()}`);
         }
         if (merge.code === 1) {
-            this.log(`git merge reported a conflict (exit 1); aborting. stderr: ${merge.stderr.trim()}`);
-            const abort = await this.git(["merge", "--abort"]);
-            if (abort.code !== 0) {
-                // Leave the working tree tidy even if --abort is a no-op (merge
-                // may have failed before touching the index).
-                const reset = await this.git(["reset", "--hard", "HEAD"]);
-                if (reset.code !== 0) {
-                    // Both cleanup paths failed — the working tree may be dirty,
-                    // which would silently corrupt the next PR's merge if we kept
-                    // going. Throw so the batch stops and the failure surfaces
-                    // with enough detail to diagnose.
-                    throw new Error(`failed to clean up conflicted merge: both \`git merge --abort\` and \`git reset --hard HEAD\` failed; worktree is in an unknown state. abort stderr: ${abort.stderr.trim()}; reset stderr: ${reset.stderr.trim()}`);
-                }
-            }
-            return false;
+            // Git returns exit code 1 when it detects conflicts during merge.
+            // However, merge drivers (configured via .gitattributes and git config)
+            // run during the merge and may automatically resolve these conflicts.
+            // Additionally, pre-merge-commit hooks (which we invoke manually below)
+            // may also resolve conflicts.
+            //
+            // We cannot abort here — we must let pre-merge-commit hooks run first.
+            // Log both stdout and stderr for diagnostics.
+            const stdout = merge.stdout.trim();
+            const stderr = merge.stderr.trim();
+            const output = [
+                stdout ? `stdout: ${stdout}` : "",
+                stderr ? `stderr: ${stderr}` : "",
+            ]
+                .filter(Boolean)
+                .join("\n") || "(no output)";
+            this.log(`git merge reported exit code 1 (conflicts detected). Merge output:\n${output}\nWill invoke pre-merge-commit hook (if present) to allow conflict resolution...`);
         }
         // Detect no-op merges: `git merge --no-commit` exits 0 with "Already
         // up to date." but does NOT create MERGE_HEAD, so the subsequent
@@ -37225,17 +37227,46 @@ class GitOps {
             // No merge in progress — source was already reachable from HEAD.
             return true;
         }
+        // Log merge output (including any merge driver messages) for
+        // actual merges. Merge drivers like mdsmith write diagnostic info
+        // to stdout during the merge that can be helpful for debugging.
+        // Only log when MERGE_HEAD exists to avoid noise from no-op merges.
+        // Skip when merge.code === 1 because conflict output was already
+        // logged in the exit-code-1 block above.
+        if (merge.stdout.trim() && merge.code !== 1) {
+            this.log(`git merge output: ${merge.stdout.trim()}`);
+        }
         // Merge succeeded and is staged; now invoke the pre-merge-commit
         // hook if it exists. Git's pre-merge-commit hook is normally
         // invoked by `git merge` when it creates a commit. Since we used
         // `git merge --no-commit`, git doesn't invoke it automatically.
         // We must call it manually here to allow hooks (like mdsmith's)
         // to fix generated sections after all files are merged but before
-        // the final commit is created.
+        // the final commit is created. Hooks may also resolve conflicts that
+        // merge drivers couldn't fix.
         const hookResult = await this.invokePreMergeCommitHook();
         if (hookResult.code !== 0) {
-            // Hook rejected the merge. Clean up and throw.
-            this.log(`pre-merge-commit hook rejected merge (exit ${hookResult.code}): ${hookResult.stderr.trim()}`);
+            // Hook rejected the merge. Check if conflicts remain - if so, this
+            // is a legitimate conflict. If not, it's a hook failure.
+            const checkConflicts = await this.git(["ls-files", "-u"]);
+            if (checkConflicts.code !== 0) {
+                throw new Error(`git ls-files -u failed (exit ${checkConflicts.code}): ${checkConflicts.stderr.trim() || checkConflicts.stdout.trim()}`);
+            }
+            const hasUnresolvedConflicts = checkConflicts.stdout.trim().length > 0;
+            if (hasUnresolvedConflicts) {
+                // Hook couldn't resolve conflicts. Clean up and return false.
+                this.log(`pre-merge-commit hook failed to resolve conflicts (exit ${hookResult.code}). Unresolved files:\n${checkConflicts.stdout.trim()}`);
+                const abort = await this.git(["merge", "--abort"]);
+                if (abort.code !== 0) {
+                    const reset = await this.git(["reset", "--hard", "HEAD"]);
+                    if (reset.code !== 0) {
+                        throw new Error(`failed to clean up conflicted merge: both \`git merge --abort\` and \`git reset --hard HEAD\` failed; worktree is in an unknown state. abort stderr: ${abort.stderr.trim()}; reset stderr: ${reset.stderr.trim()}`);
+                    }
+                }
+                return false;
+            }
+            // No conflicts, but hook still failed. This is an unexpected error.
+            this.log(`pre-merge-commit hook rejected merge (exit ${hookResult.code}): ${hookResult.stderr.trim() || hookResult.stdout.trim()}`);
             const abort = await this.git(["merge", "--abort"]);
             let cleanupDetail = "";
             if (abort.code !== 0) {
@@ -37249,8 +37280,32 @@ class GitOps {
             }
             throw new Error(`pre-merge-commit hook failed (exit ${hookResult.code}): ${hookResult.stderr.trim() || hookResult.stdout.trim()}${cleanupDetail}`);
         }
-        // Hook passed (or didn't exist); now commit. The `-c` overrides
-        // apply to both the merge and commit steps.
+        // Hook passed (or didn't exist). If merge reported conflicts earlier,
+        // check if they were resolved by the hook. Only proceed to commit if
+        // no conflicts remain.
+        if (merge.code === 1) {
+            const checkConflicts = await this.git(["ls-files", "-u"]);
+            if (checkConflicts.code !== 0) {
+                throw new Error(`git ls-files -u failed (exit ${checkConflicts.code}): ${checkConflicts.stderr.trim() || checkConflicts.stdout.trim()}`);
+            }
+            const hasUnresolvedConflicts = checkConflicts.stdout.trim().length > 0;
+            if (hasUnresolvedConflicts) {
+                // Conflicts remain after hook ran. Clean up and return false.
+                this.log(`Merge conflicts remain unresolved after pre-merge-commit hook. Unresolved files:\n${checkConflicts.stdout.trim()}`);
+                const abort = await this.git(["merge", "--abort"]);
+                if (abort.code !== 0) {
+                    const reset = await this.git(["reset", "--hard", "HEAD"]);
+                    if (reset.code !== 0) {
+                        throw new Error(`failed to clean up conflicted merge: both \`git merge --abort\` and \`git reset --hard HEAD\` failed; worktree is in an unknown state. abort stderr: ${abort.stderr.trim()}; reset stderr: ${reset.stderr.trim()}`);
+                    }
+                }
+                return false;
+            }
+            // Conflicts were resolved by merge drivers and/or hook!
+            this.log("Merge conflicts were resolved by merge drivers and/or pre-merge-commit hook");
+        }
+        // Hook passed (or didn't exist) and no conflicts remain; now commit.
+        // The `-c` overrides apply to both the merge and commit steps.
         const commit = await this.git([
             "-c",
             "commit.gpgsign=false",
