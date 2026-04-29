@@ -705,10 +705,12 @@ is particularly useful when a merge driver handles per-file conflicts,
 but you need a post-processing step to update derived content (catalogs,
 indexes, lock files, etc.) based on the complete merge result.
 
-The action's two-step merge process (`git merge --no-commit` followed by
-`git commit`) ensures `pre-merge-commit` hooks execute correctly. (In
-earlier versions, using `git merge -m "message"` bypassed the hook
-entirely.)
+The action's merge process uses `git merge --no-commit` followed by
+`git commit`, and manually invokes the `pre-merge-commit` hook between
+these steps. This is necessary because git only invokes the hook when
+`git merge` itself creates a commit, not when using `--no-commit`. By
+manually invoking the hook, the action ensures hooks like mdsmith's
+catalog regeneration work correctly during batch merges.
 
 #### How conflict resolution works
 

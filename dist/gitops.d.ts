@@ -67,6 +67,19 @@ export declare class GitOps implements GitOperator {
      */
     private assertWorktreeReady;
     createBranchFromRef(branch: string, baseRef: string): Promise<void>;
+    /**
+     * Invoke the pre-merge-commit hook if it exists.
+     *
+     * Git's pre-merge-commit hook is normally invoked by `git merge` when
+     * it creates a commit. Since we use `git merge --no-commit`, we must
+     * invoke the hook manually to allow hooks (like mdsmith's) to fix
+     * generated sections after all files are merged but before the final
+     * commit is created.
+     *
+     * Returns an ExecResult with code 0 if the hook passed or didn't exist,
+     * or non-zero if the hook exists and rejected the merge.
+     */
+    private invokePreMergeCommitHook;
     mergeBranch(branch: string, sourceRef: string, commitMsg: string): Promise<boolean>;
     getHeadSHA(ref: string): Promise<string>;
     pushBranch(branch: string): Promise<void>;

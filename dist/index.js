@@ -36255,225 +36255,6 @@ function getOctokit(token, options, ...additionalPlugins) {
     return new GitHubWithPlugins(getOctokitOptions(token, options));
 }
 //# sourceMappingURL=github.js.map
-;// CONCATENATED MODULE: ./src/github.ts
-
-function sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-}
-/** GitHubClient implements GitHubAPI and WorkflowAPI using the GitHub REST API. */
-class GitHubClient {
-    octokit;
-    owner;
-    repo;
-    log;
-    constructor(token, owner, repo, log) {
-        this.octokit = getOctokit(token);
-        this.owner = owner;
-        this.repo = repo;
-        this.log = log ?? (() => { });
-    }
-    async listPRsWithLabel(label, limit) {
-        const result = [];
-        let page = 1;
-        this.log(`listPRsWithLabel: querying ${this.owner}/${this.repo} for label="${label}" (limit=${limit})`);
-        for (;;) {
-            const { data: issues } = await this.octokit.rest.issues.listForRepo({
-                owner: this.owner,
-                repo: this.repo,
-                state: "open",
-                labels: label,
-                sort: "created",
-                direction: "asc",
-                per_page: 100,
-                page,
-            });
-            this.log(`listPRsWithLabel: page=${page} returned ${issues.length} issue(s)`);
-            for (const issue of issues) {
-                const isPR = !!issue.pull_request;
-                const issueLabels = (issue.labels ?? [])
-                    .map((l) => typeof l === "string" ? l : l.name ?? "")
-                    .filter((n) => n !== "");
-                this.log(`listPRsWithLabel:   #${issue.number} isPR=${isPR} state=${issue.state} labels=[${issueLabels.join(", ")}]`);
-                if (!isPR)
-                    continue;
-                const { data: pr } = await this.octokit.rest.pulls.get({
-                    owner: this.owner,
-                    repo: this.repo,
-                    pull_number: issue.number,
-                });
-                const headRef = pr.head.label || pr.head.ref;
-                result.push({
-                    number: pr.number,
-                    headRef,
-                    headSHA: pr.head.sha,
-                    title: pr.title,
-                    state: pr.state,
-                    createdAt: Math.floor(new Date(pr.created_at).getTime() / 1000),
-                });
-                if (limit > 0 && result.length >= limit) {
-                    this.log(`listPRsWithLabel: reached limit=${limit}, returning ${result.length} PR(s)`);
-                    return result;
-                }
-            }
-            if (issues.length < 100)
-                break;
-            page++;
-        }
-        this.log(`listPRsWithLabel: done, found ${result.length} PR(s) total`);
-        return result;
-    }
-    async addLabel(prNumber, label) {
-        await this.octokit.rest.issues.addLabels({
-            owner: this.owner,
-            repo: this.repo,
-            issue_number: prNumber,
-            labels: [label],
-        });
-    }
-    async removeLabel(prNumber, label) {
-        await this.octokit.rest.issues.removeLabel({
-            owner: this.owner,
-            repo: this.repo,
-            issue_number: prNumber,
-            name: label,
-        });
-    }
-    async comment(prNumber, body) {
-        await this.octokit.rest.issues.createComment({
-            owner: this.owner,
-            repo: this.repo,
-            issue_number: prNumber,
-            body,
-        });
-    }
-    async createLabel(name, color, description) {
-        await this.octokit.rest.issues.createLabel({
-            owner: this.owner,
-            repo: this.repo,
-            name,
-            color,
-            description,
-        });
-    }
-    async triggerWorkflow(workflowFile, ref, inputs) {
-        await this.octokit.rest.actions.createWorkflowDispatch({
-            owner: this.owner,
-            repo: this.repo,
-            workflow_id: workflowFile,
-            ref,
-            inputs,
-        });
-    }
-    async findWorkflowRun(workflowFile, ref, dispatchedAt, headSha) {
-        const createdAfter = new Date(dispatchedAt.getTime() - 5000);
-        const maxAttempts = 60;
-        // Poll up to ~10 min for the run to appear. Check immediately first,
-        // then sleep between attempts so we can post the "CI running" comment
-        // the moment GitHub registers the dispatched run.
-        for (let i = 0; i < maxAttempts; i++) {
-            // Try querying by head_sha first if available (more reliable, no indexing delay)
-            if (headSha) {
-                const { data: runs } = await this.octokit.rest.actions.listWorkflowRuns({
-                    owner: this.owner,
-                    repo: this.repo,
-                    workflow_id: workflowFile,
-                    head_sha: headSha,
-                    event: "workflow_dispatch",
-                    created: `>=${createdAfter.toISOString()}`,
-                    per_page: 1,
-                });
-                if (runs.workflow_runs.length > 0) {
-                    const run = runs.workflow_runs[0];
-                    return { runId: run.id, htmlUrl: run.html_url };
-                }
-            }
-            // Fallback to branch-based query (may have indexing delays)
-            const { data: runs } = await this.octokit.rest.actions.listWorkflowRuns({
-                owner: this.owner,
-                repo: this.repo,
-                workflow_id: workflowFile,
-                branch: ref,
-                event: "workflow_dispatch",
-                created: `>=${createdAfter.toISOString()}`,
-                per_page: 1,
-            });
-            if (runs.workflow_runs.length > 0) {
-                const run = runs.workflow_runs[0];
-                return { runId: run.id, htmlUrl: run.html_url };
-            }
-            if (i < maxAttempts - 1)
-                await sleep(10_000);
-        }
-        throw new Error("timed out waiting for workflow run to appear");
-    }
-    async waitForWorkflowRun(runId) {
-        const maxAttempts = 360;
-        // Poll up to ~1h for completion.
-        for (let i = 0; i < maxAttempts; i++) {
-            const { data: run } = await this.octokit.rest.actions.getWorkflowRun({
-                owner: this.owner,
-                repo: this.repo,
-                run_id: runId,
-            });
-            if (run.status === "completed") {
-                return {
-                    conclusion: run.conclusion ?? "unknown",
-                    htmlUrl: run.html_url,
-                };
-            }
-            if (i < maxAttempts - 1)
-                await sleep(10_000);
-        }
-        throw new Error("timed out waiting for workflow run to complete");
-    }
-    async closePR(prNumber) {
-        await this.octokit.rest.pulls.update({
-            owner: this.owner,
-            repo: this.repo,
-            pull_number: prNumber,
-            state: "closed",
-        });
-    }
-    async getPR(prNumber) {
-        const { data: pr } = await this.octokit.rest.pulls.get({
-            owner: this.owner,
-            repo: this.repo,
-            pull_number: prNumber,
-        });
-        const headRef = pr.head.label || pr.head.ref;
-        const labels = (pr.labels ?? [])
-            .map((l) => typeof l === "string" ? l : l.name ?? "")
-            .filter((n) => n !== "");
-        return {
-            number: pr.number,
-            headRef,
-            headSHA: pr.head.sha,
-            title: pr.title,
-            state: pr.state,
-            createdAt: Math.floor(new Date(pr.created_at).getTime() / 1000),
-            labels,
-        };
-    }
-    async getActorPermission(username) {
-        try {
-            const { data } = await this.octokit.rest.repos.getCollaboratorPermissionLevel({
-                owner: this.owner,
-                repo: this.repo,
-                username,
-            });
-            return data.permission;
-        }
-        catch (err) {
-            const status = err.status;
-            if (status === 404 || status === 403)
-                return "none";
-            throw err;
-        }
-    }
-}
-
-;// CONCATENATED MODULE: external "node:child_process"
-const external_node_child_process_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:child_process");
 ;// CONCATENATED MODULE: ./src/comments.ts
 function formatErrorForComment(err, maxLen = 200) {
     let raw;
@@ -36788,6 +36569,264 @@ class PRReporter {
     }
 }
 
+;// CONCATENATED MODULE: ./src/github.ts
+
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+/** GitHubClient implements GitHubAPI and WorkflowAPI using the GitHub REST API. */
+class GitHubClient {
+    octokit;
+    owner;
+    repo;
+    log;
+    constructor(token, owner, repo, log) {
+        this.octokit = getOctokit(token);
+        this.owner = owner;
+        this.repo = repo;
+        this.log = log ?? (() => { });
+    }
+    async listPRsWithLabel(label, limit) {
+        const result = [];
+        let page = 1;
+        this.log(`listPRsWithLabel: querying ${this.owner}/${this.repo} for label="${label}" (limit=${limit})`);
+        for (;;) {
+            const { data: issues } = await this.octokit.rest.issues.listForRepo({
+                owner: this.owner,
+                repo: this.repo,
+                state: "open",
+                labels: label,
+                sort: "created",
+                direction: "asc",
+                per_page: 100,
+                page,
+            });
+            this.log(`listPRsWithLabel: page=${page} returned ${issues.length} issue(s)`);
+            for (const issue of issues) {
+                const isPR = !!issue.pull_request;
+                const issueLabels = (issue.labels ?? [])
+                    .map((l) => typeof l === "string" ? l : l.name ?? "")
+                    .filter((n) => n !== "");
+                this.log(`listPRsWithLabel:   #${issue.number} isPR=${isPR} state=${issue.state} labels=[${issueLabels.join(", ")}]`);
+                if (!isPR)
+                    continue;
+                const { data: pr } = await this.octokit.rest.pulls.get({
+                    owner: this.owner,
+                    repo: this.repo,
+                    pull_number: issue.number,
+                });
+                const headRef = pr.head.label || pr.head.ref;
+                result.push({
+                    number: pr.number,
+                    headRef,
+                    headSHA: pr.head.sha,
+                    title: pr.title,
+                    state: pr.state,
+                    createdAt: Math.floor(new Date(pr.created_at).getTime() / 1000),
+                });
+                if (limit > 0 && result.length >= limit) {
+                    this.log(`listPRsWithLabel: reached limit=${limit}, returning ${result.length} PR(s)`);
+                    return result;
+                }
+            }
+            if (issues.length < 100)
+                break;
+            page++;
+        }
+        this.log(`listPRsWithLabel: done, found ${result.length} PR(s) total`);
+        return result;
+    }
+    async addLabel(prNumber, label) {
+        await this.octokit.rest.issues.addLabels({
+            owner: this.owner,
+            repo: this.repo,
+            issue_number: prNumber,
+            labels: [label],
+        });
+    }
+    async removeLabel(prNumber, label) {
+        await this.octokit.rest.issues.removeLabel({
+            owner: this.owner,
+            repo: this.repo,
+            issue_number: prNumber,
+            name: label,
+        });
+    }
+    async comment(prNumber, body) {
+        await this.octokit.rest.issues.createComment({
+            owner: this.owner,
+            repo: this.repo,
+            issue_number: prNumber,
+            body,
+        });
+    }
+    async createLabel(name, color, description) {
+        await this.octokit.rest.issues.createLabel({
+            owner: this.owner,
+            repo: this.repo,
+            name,
+            color,
+            description,
+        });
+    }
+    async triggerWorkflow(workflowFile, ref, inputs) {
+        await this.octokit.rest.actions.createWorkflowDispatch({
+            owner: this.owner,
+            repo: this.repo,
+            workflow_id: workflowFile,
+            ref,
+            inputs,
+        });
+    }
+    async findWorkflowRun(workflowFile, ref, dispatchedAt, headSha) {
+        const createdAfter = new Date(dispatchedAt.getTime() - 5000);
+        const maxAttempts = 60;
+        // Log search parameters for debugging
+        this.log(`[findWorkflowRun] Searching for workflow run: workflow=${workflowFile}, ref=${ref}, headSha=${headSha || "undefined"}, createdAfter=${createdAfter.toISOString()}`);
+        // Poll up to ~10 min for the run to appear. Check immediately first,
+        // then sleep between attempts so we can post the "CI running" comment
+        // the moment GitHub registers the dispatched run.
+        for (let i = 0; i < maxAttempts; i++) {
+            // Try querying by head_sha first if available (more reliable, no indexing delay)
+            if (headSha) {
+                try {
+                    const { data: runs } = await this.octokit.rest.actions.listWorkflowRuns({
+                        owner: this.owner,
+                        repo: this.repo,
+                        workflow_id: workflowFile,
+                        head_sha: headSha,
+                        event: "workflow_dispatch",
+                        created: `>=${createdAfter.toISOString()}`,
+                        per_page: 1,
+                    });
+                    if (i === 0 || i === 5 || i % 30 === 0) {
+                        this.log(`[findWorkflowRun] Attempt ${i + 1}/${maxAttempts}: head_sha query returned ${runs.workflow_runs.length} runs`);
+                    }
+                    if (runs.workflow_runs.length > 0) {
+                        const run = runs.workflow_runs[0];
+                        this.log(`[findWorkflowRun] Found run via head_sha query: id=${run.id}, status=${run.status}, conclusion=${run.conclusion}`);
+                        return { runId: run.id, htmlUrl: run.html_url };
+                    }
+                }
+                catch (err) {
+                    const status = typeof err === "object" &&
+                        err !== null &&
+                        "status" in err &&
+                        typeof err.status === "number"
+                        ? err.status
+                        : undefined;
+                    this.log(`[findWorkflowRun] head_sha query failed${status !== undefined ? ` (status ${status})` : ""}: ${errorMessage(err)}`);
+                    throw err;
+                }
+            }
+            // Fallback to branch-based query (may have indexing delays)
+            try {
+                const { data: runs } = await this.octokit.rest.actions.listWorkflowRuns({
+                    owner: this.owner,
+                    repo: this.repo,
+                    workflow_id: workflowFile,
+                    branch: ref,
+                    event: "workflow_dispatch",
+                    created: `>=${createdAfter.toISOString()}`,
+                    per_page: 1,
+                });
+                if (i === 0 || i === 5 || i % 30 === 0) {
+                    this.log(`[findWorkflowRun] Attempt ${i + 1}/${maxAttempts}: branch query returned ${runs.workflow_runs.length} runs`);
+                }
+                if (runs.workflow_runs.length > 0) {
+                    const run = runs.workflow_runs[0];
+                    this.log(`[findWorkflowRun] Found run via branch query: id=${run.id}, status=${run.status}, conclusion=${run.conclusion}`);
+                    return { runId: run.id, htmlUrl: run.html_url };
+                }
+            }
+            catch (err) {
+                const status = typeof err === "object" &&
+                    err !== null &&
+                    "status" in err &&
+                    typeof err.status === "number"
+                    ? err.status
+                    : undefined;
+                this.log(`[findWorkflowRun] branch query failed${status !== undefined ? ` (status ${status})` : ""}: ${errorMessage(err)}`);
+                throw err;
+            }
+            if (i < maxAttempts - 1)
+                await sleep(10_000);
+        }
+        throw new Error("timed out waiting for workflow run to appear");
+    }
+    async waitForWorkflowRun(runId) {
+        const maxAttempts = 360;
+        // Poll up to ~1h for completion.
+        for (let i = 0; i < maxAttempts; i++) {
+            const { data: run } = await this.octokit.rest.actions.getWorkflowRun({
+                owner: this.owner,
+                repo: this.repo,
+                run_id: runId,
+            });
+            if (run.status === "completed") {
+                return {
+                    conclusion: run.conclusion ?? "unknown",
+                    htmlUrl: run.html_url,
+                };
+            }
+            if (i < maxAttempts - 1)
+                await sleep(10_000);
+        }
+        throw new Error("timed out waiting for workflow run to complete");
+    }
+    async closePR(prNumber) {
+        await this.octokit.rest.pulls.update({
+            owner: this.owner,
+            repo: this.repo,
+            pull_number: prNumber,
+            state: "closed",
+        });
+    }
+    async getPR(prNumber) {
+        const { data: pr } = await this.octokit.rest.pulls.get({
+            owner: this.owner,
+            repo: this.repo,
+            pull_number: prNumber,
+        });
+        const headRef = pr.head.label || pr.head.ref;
+        const labels = (pr.labels ?? [])
+            .map((l) => typeof l === "string" ? l : l.name ?? "")
+            .filter((n) => n !== "");
+        return {
+            number: pr.number,
+            headRef,
+            headSHA: pr.head.sha,
+            title: pr.title,
+            state: pr.state,
+            createdAt: Math.floor(new Date(pr.created_at).getTime() / 1000),
+            labels,
+        };
+    }
+    async getActorPermission(username) {
+        try {
+            const { data } = await this.octokit.rest.repos.getCollaboratorPermissionLevel({
+                owner: this.owner,
+                repo: this.repo,
+                username,
+            });
+            return data.permission;
+        }
+        catch (err) {
+            const status = err.status;
+            if (status === 404 || status === 403)
+                return "none";
+            throw err;
+        }
+    }
+}
+
+;// CONCATENATED MODULE: external "node:child_process"
+const external_node_child_process_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:child_process");
+;// CONCATENATED MODULE: external "node:fs/promises"
+const promises_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:fs/promises");
+;// CONCATENATED MODULE: external "node:path"
+const external_node_path_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:path");
 ;// CONCATENATED MODULE: ./src/errors.ts
 /**
  * Thrown when the merge queue action cannot proceed due to a configuration
@@ -36807,6 +36846,8 @@ class ConfigurationError extends Error {
 }
 
 ;// CONCATENATED MODULE: ./src/gitops.ts
+
+
 
 
 
@@ -37018,6 +37059,104 @@ class GitOps {
             throw err;
         }
     }
+    /**
+     * Invoke the pre-merge-commit hook if it exists.
+     *
+     * Git's pre-merge-commit hook is normally invoked by `git merge` when
+     * it creates a commit. Since we use `git merge --no-commit`, we must
+     * invoke the hook manually to allow hooks (like mdsmith's) to fix
+     * generated sections after all files are merged but before the final
+     * commit is created.
+     *
+     * Returns an ExecResult with code 0 if the hook passed or didn't exist,
+     * or non-zero if the hook exists and rejected the merge.
+     */
+    async invokePreMergeCommitHook() {
+        // Get the working tree root first - this will be our base for all paths
+        const worktreeResult = await this.git(["rev-parse", "--show-toplevel"]);
+        const worktree = worktreeResult.stdout.trim();
+        // Determine the hooks path. This can be customized via core.hooksPath,
+        // or defaults to .git/hooks. If it's a relative path, it's relative to
+        // the working tree root.
+        const hooksPathResult = await this.git([
+            "config",
+            "--get",
+            "core.hooksPath",
+        ]);
+        let hooksPath;
+        if (hooksPathResult.code === 0 && hooksPathResult.stdout.trim()) {
+            const configuredPath = hooksPathResult.stdout.trim();
+            // If relative, make it absolute relative to worktree
+            if (configuredPath.startsWith("/")) {
+                hooksPath = configuredPath;
+            }
+            else {
+                hooksPath = (0,external_node_path_namespaceObject.join)(worktree, configuredPath);
+            }
+        }
+        else {
+            // No core.hooksPath set; use the default .git/hooks
+            const gitDirResult = await this.git(["rev-parse", "--git-dir"]);
+            if (gitDirResult.code !== 0) {
+                throw new Error(`failed to determine git directory: ${gitDirResult.stderr.trim()}`);
+            }
+            const gitDir = gitDirResult.stdout.trim();
+            // git-dir can be relative (e.g., ".git") or absolute
+            hooksPath = (0,external_node_path_namespaceObject.isAbsolute)(gitDir)
+                ? `${gitDir}/hooks`
+                : (0,external_node_path_namespaceObject.join)(worktree, gitDir, "hooks");
+        }
+        const hookPath = (0,external_node_path_namespaceObject.join)(hooksPath, "pre-merge-commit");
+        // Check if the hook exists and is executable using Node.js fs APIs
+        // instead of spawning a shell. Git only invokes hooks that have the
+        // executable bit set.
+        try {
+            const fileStat = await (0,promises_namespaceObject.stat)(hookPath);
+            // Check if file is executable by owner (mode & 0o100)
+            if (!fileStat.isFile() || !(fileStat.mode & 0o100)) {
+                this.log(`No executable pre-merge-commit hook found at ${hookPath}`);
+                return { code: 0, stdout: "", stderr: "" };
+            }
+        }
+        catch (_err) {
+            // File doesn't exist or can't be accessed
+            this.log(`No pre-merge-commit hook found at ${hookPath}`);
+            return { code: 0, stdout: "", stderr: "" };
+        }
+        // Hook exists and is executable; invoke it. According to git docs,
+        // the pre-merge-commit hook takes no parameters and is invoked with
+        // GIT_EDITOR=: if the command will not bring up an editor.
+        this.log(`Invoking pre-merge-commit hook at ${hookPath}`);
+        // Spawn the hook as a separate process (not via git), running in the
+        // working tree root
+        const hookResult = await new Promise((resolve) => {
+            const child = (0,external_node_child_process_namespaceObject.spawn)(hookPath, [], {
+                cwd: worktree,
+                env: {
+                    ...process.env,
+                    GIT_EDITOR: ":",
+                },
+            });
+            let stdout = "";
+            let stderr = "";
+            child.stdout.on("data", (d) => {
+                stdout += d.toString();
+            });
+            child.stderr.on("data", (d) => {
+                stderr += d.toString();
+            });
+            child.on("close", (code) => {
+                resolve({ code: code ?? -1, stdout, stderr });
+            });
+        });
+        if (hookResult.code !== 0) {
+            this.log(`pre-merge-commit hook failed (exit ${hookResult.code}): ${hookResult.stderr.trim() || hookResult.stdout.trim()}`);
+        }
+        else {
+            this.log("pre-merge-commit hook passed");
+        }
+        return hookResult;
+    }
     async mergeBranch(branch, sourceRef, commitMsg) {
         this.log(`Merging ${sourceRef} into ${branch}`);
         await this.gitOrThrow(["checkout", branch]);
@@ -37028,11 +37167,12 @@ class GitOps {
         // If you "optimise" this to fetch a branch, fork PRs will break.
         await this.gitOrThrow(["fetch", "--no-tags", "origin", sourceRef]);
         // Use `--no-commit` so git completes the merge but doesn't commit
-        // yet. This allows pre-merge-commit hooks to run (they fire when
-        // `git commit` is invoked, not during `git merge`). Without this,
-        // passing `-m` directly to `git merge` would bypass the hook
-        // entirely, breaking repos that rely on merge drivers with hooks
-        // (e.g. mdsmith's merge-driver that fixes generated sections).
+        // yet. This allows us to manually invoke pre-merge-commit hooks
+        // (they are normally invoked by `git merge` when it creates a
+        // commit, but since we use --no-commit, we must invoke them
+        // manually). Without this split, passing `-m` directly to
+        // `git merge` would invoke the hook, but we'd lose the ability to
+        // detect no-op merges and conflicts would be harder to clean up.
         //
         // `-c commit.gpgsign=false` / `-c tag.gpgsign=false`: `git merge
         // --no-ff` creates a merge commit and would otherwise inherit any
@@ -37059,11 +37199,11 @@ class GitOps {
             // Git returns exit code 1 when it detects conflicts during merge.
             // However, merge drivers (configured via .gitattributes and git config)
             // run during the merge and may automatically resolve these conflicts.
-            // Additionally, pre-merge-commit hooks (which run during `git commit`)
+            // Additionally, pre-merge-commit hooks (which we invoke manually below)
             // may also resolve conflicts.
             //
-            // We cannot check for conflicts here — we must let pre-merge-commit
-            // hooks run first. Log both stdout and stderr for diagnostics.
+            // We cannot abort here — we must let pre-merge-commit hooks run first.
+            // Log both stdout and stderr for diagnostics.
             const stdout = merge.stdout.trim();
             const stderr = merge.stderr.trim();
             const output = [
@@ -37072,7 +37212,7 @@ class GitOps {
             ]
                 .filter(Boolean)
                 .join("\n") || "(no output)";
-            this.log(`git merge reported exit code 1 (conflicts detected). Merge output:\n${output}\nAttempting commit to allow hooks to resolve conflicts...`);
+            this.log(`git merge reported exit code 1 (conflicts detected). Merge output:\n${output}\nWill invoke pre-merge-commit hook to allow conflict resolution...`);
         }
         // Detect no-op merges: `git merge --no-commit` exits 0 with "Already
         // up to date." but does NOT create MERGE_HEAD, so the subsequent
@@ -37094,33 +37234,23 @@ class GitOps {
         if (merge.stdout.trim()) {
             this.log(`git merge output: ${merge.stdout.trim()}`);
         }
-        // Merge succeeded and is staged; now commit it. This is where
-        // pre-merge-commit hooks run. The `-c` overrides apply to both
-        // the merge and commit steps.
-        const commit = await this.git([
-            "-c",
-            "commit.gpgsign=false",
-            "-c",
-            "tag.gpgsign=false",
-            "commit",
-            "-m",
-            commitMsg,
-        ]);
-        if (commit.code !== 0) {
-            // Commit failed. This could be:
-            // 1. Unresolved conflicts that neither merge drivers nor hooks could fix
-            // 2. Pre-merge-commit hook failure (misconfiguration or broken hook)
-            // 3. Empty commit or other commit-time error
-            //
-            // Check if conflicts remain in the index. If so, this is a legitimate
-            // conflict that should abort the merge. If not, it's an unexpected
-            // hook failure that should throw an error.
+        // Merge succeeded and is staged; now invoke the pre-merge-commit
+        // hook if it exists. Git's pre-merge-commit hook is normally
+        // invoked by `git merge` when it creates a commit. Since we used
+        // `git merge --no-commit`, git doesn't invoke it automatically.
+        // We must call it manually here to allow hooks (like mdsmith's)
+        // to fix generated sections after all files are merged but before
+        // the final commit is created. Hooks may also resolve conflicts that
+        // merge drivers couldn't fix.
+        const hookResult = await this.invokePreMergeCommitHook();
+        if (hookResult.code !== 0) {
+            // Hook rejected the merge. Check if conflicts remain - if so, this
+            // is a legitimate conflict. If not, it's a hook failure.
             const checkConflicts = await this.git(["ls-files", "-u"]);
             const hasUnresolvedConflicts = checkConflicts.stdout.trim().length > 0;
             if (hasUnresolvedConflicts) {
-                // True conflicts remain — neither merge drivers nor hooks could
-                // resolve everything. Log diagnostic info and abort the merge.
-                this.log(`git commit failed due to unresolved conflicts. Unresolved files:\n${checkConflicts.stdout.trim()}\nCommit output: ${commit.stderr.trim() || commit.stdout.trim() || "(no output)"}`);
+                // Hook couldn't resolve conflicts. Clean up and return false.
+                this.log(`pre-merge-commit hook failed to resolve conflicts (exit ${hookResult.code}). Unresolved files:\n${checkConflicts.stdout.trim()}`);
                 const abort = await this.git(["merge", "--abort"]);
                 if (abort.code !== 0) {
                     const reset = await this.git(["reset", "--hard", "HEAD"]);
@@ -37130,9 +37260,8 @@ class GitOps {
                 }
                 return false;
             }
-            // No conflicts in index — this is an unexpected hook failure or other
-            // commit-time error (misconfiguration or broken hook). Clean up and
-            // throw so the issue surfaces.
+            // No conflicts, but hook still failed. This is an unexpected error.
+            this.log(`pre-merge-commit hook rejected merge (exit ${hookResult.code}): ${hookResult.stderr.trim()}`);
             const abort = await this.git(["merge", "--abort"]);
             let cleanupDetail = "";
             if (abort.code !== 0) {
@@ -37144,7 +37273,37 @@ class GitOps {
                     cleanupDetail = ` Cleanup fallback succeeded after git merge --abort failed (exit ${abort.code}): ${abort.stderr.trim() || abort.stdout.trim()}`;
                 }
             }
-            throw new Error(`git commit after merge failed (exit ${commit.code}), but no conflicts remain in index — likely a pre-merge-commit hook failure: ${commit.stderr.trim() || commit.stdout.trim()}${cleanupDetail}`);
+            throw new Error(`pre-merge-commit hook failed (exit ${hookResult.code}): ${hookResult.stderr.trim() || hookResult.stdout.trim()}${cleanupDetail}`);
+        }
+        // Hook passed (or didn't exist); now commit. The `-c` overrides
+        // apply to both the merge and commit steps.
+        const commit = await this.git([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "commit",
+            "-m",
+            commitMsg,
+        ]);
+        if (commit.code !== 0) {
+            // Hook failure, empty commit, or other commit-time error. Unlike
+            // a merge conflict (exit 1 from merge), this is unexpected and
+            // indicates misconfiguration or a broken hook. Best-effort clean
+            // up any in-progress merge state before surfacing the error so
+            // later steps do not inherit a dirty worktree.
+            const abort = await this.git(["merge", "--abort"]);
+            let cleanupDetail = "";
+            if (abort.code !== 0) {
+                const reset = await this.git(["reset", "--hard", "HEAD"]);
+                if (reset.code !== 0) {
+                    cleanupDetail = ` Cleanup failed: git merge --abort (exit ${abort.code}): ${abort.stderr.trim() || abort.stdout.trim()}; git reset --hard HEAD (exit ${reset.code}): ${reset.stderr.trim() || reset.stdout.trim()}`;
+                }
+                else {
+                    cleanupDetail = ` Cleanup fallback succeeded after git merge --abort failed (exit ${abort.code}): ${abort.stderr.trim() || abort.stdout.trim()}`;
+                }
+            }
+            throw new Error(`git commit after successful merge failed (exit ${commit.code}): ${commit.stderr.trim() || commit.stdout.trim()}${cleanupDetail}`);
         }
         return true;
     }

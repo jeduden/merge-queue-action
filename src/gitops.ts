@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import { stat } from "node:fs/promises";
+import { join, isAbsolute } from "node:path";
 import type * as github from "@actions/github";
 import type { GitOperator } from "./batch.js";
 import { errorMessage, silentReporter, type Reporter } from "./reporter.js";
@@ -268,6 +270,112 @@ export class GitOps implements GitOperator {
     }
   }
 
+  /**
+   * Invoke the pre-merge-commit hook if it exists.
+   *
+   * Git's pre-merge-commit hook is normally invoked by `git merge` when
+   * it creates a commit. Since we use `git merge --no-commit`, we must
+   * invoke the hook manually to allow hooks (like mdsmith's) to fix
+   * generated sections after all files are merged but before the final
+   * commit is created.
+   *
+   * Returns an ExecResult with code 0 if the hook passed or didn't exist,
+   * or non-zero if the hook exists and rejected the merge.
+   */
+  private async invokePreMergeCommitHook(): Promise<ExecResult> {
+    // Get the working tree root first - this will be our base for all paths
+    const worktreeResult = await this.git(["rev-parse", "--show-toplevel"]);
+    const worktree = worktreeResult.stdout.trim();
+
+    // Determine the hooks path. This can be customized via core.hooksPath,
+    // or defaults to .git/hooks. If it's a relative path, it's relative to
+    // the working tree root.
+    const hooksPathResult = await this.git([
+      "config",
+      "--get",
+      "core.hooksPath",
+    ]);
+    let hooksPath: string;
+    if (hooksPathResult.code === 0 && hooksPathResult.stdout.trim()) {
+      const configuredPath = hooksPathResult.stdout.trim();
+      // If relative, make it absolute relative to worktree
+      if (configuredPath.startsWith("/")) {
+        hooksPath = configuredPath;
+      } else {
+        hooksPath = join(worktree, configuredPath);
+      }
+    } else {
+      // No core.hooksPath set; use the default .git/hooks
+      const gitDirResult = await this.git(["rev-parse", "--git-dir"]);
+      if (gitDirResult.code !== 0) {
+        throw new Error(
+          `failed to determine git directory: ${gitDirResult.stderr.trim()}`,
+        );
+      }
+      const gitDir = gitDirResult.stdout.trim();
+      // git-dir can be relative (e.g., ".git") or absolute
+      hooksPath = isAbsolute(gitDir)
+        ? `${gitDir}/hooks`
+        : join(worktree, gitDir, "hooks");
+    }
+
+    const hookPath = join(hooksPath, "pre-merge-commit");
+
+    // Check if the hook exists and is executable using Node.js fs APIs
+    // instead of spawning a shell. Git only invokes hooks that have the
+    // executable bit set.
+    try {
+      const fileStat = await stat(hookPath);
+      // Check if file is executable by owner (mode & 0o100)
+      if (!fileStat.isFile() || !(fileStat.mode & 0o100)) {
+        this.log(`No executable pre-merge-commit hook found at ${hookPath}`);
+        return { code: 0, stdout: "", stderr: "" };
+      }
+    } catch (_err) {
+      // File doesn't exist or can't be accessed
+      this.log(`No pre-merge-commit hook found at ${hookPath}`);
+      return { code: 0, stdout: "", stderr: "" };
+    }
+
+    // Hook exists and is executable; invoke it. According to git docs,
+    // the pre-merge-commit hook takes no parameters and is invoked with
+    // GIT_EDITOR=: if the command will not bring up an editor.
+    this.log(`Invoking pre-merge-commit hook at ${hookPath}`);
+
+    // Spawn the hook as a separate process (not via git), running in the
+    // working tree root
+    const hookResult = await new Promise<ExecResult>((resolve) => {
+      const child = spawn(hookPath, [], {
+        cwd: worktree,
+        env: {
+          ...process.env,
+          GIT_EDITOR: ":",
+        },
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", (d) => {
+        stdout += d.toString();
+      });
+      child.stderr.on("data", (d) => {
+        stderr += d.toString();
+      });
+      child.on("close", (code) => {
+        resolve({ code: code ?? -1, stdout, stderr });
+      });
+    });
+
+    if (hookResult.code !== 0) {
+      this.log(
+        `pre-merge-commit hook failed (exit ${hookResult.code}): ${hookResult.stderr.trim() || hookResult.stdout.trim()}`,
+      );
+    } else {
+      this.log("pre-merge-commit hook passed");
+    }
+
+    return hookResult;
+  }
+
   async mergeBranch(
     branch: string,
     sourceRef: string,
@@ -284,11 +392,12 @@ export class GitOps implements GitOperator {
     await this.gitOrThrow(["fetch", "--no-tags", "origin", sourceRef]);
 
     // Use `--no-commit` so git completes the merge but doesn't commit
-    // yet. This allows pre-merge-commit hooks to run (they fire when
-    // `git commit` is invoked, not during `git merge`). Without this,
-    // passing `-m` directly to `git merge` would bypass the hook
-    // entirely, breaking repos that rely on merge drivers with hooks
-    // (e.g. mdsmith's merge-driver that fixes generated sections).
+    // yet. This allows us to manually invoke pre-merge-commit hooks
+    // (they are normally invoked by `git merge` when it creates a
+    // commit, but since we use --no-commit, we must invoke them
+    // manually). Without this split, passing `-m` directly to
+    // `git merge` would invoke the hook, but we'd lose the ability to
+    // detect no-op merges and conflicts would be harder to clean up.
     //
     // `-c commit.gpgsign=false` / `-c tag.gpgsign=false`: `git merge
     // --no-ff` creates a merge commit and would otherwise inherit any
@@ -319,11 +428,11 @@ export class GitOps implements GitOperator {
       // Git returns exit code 1 when it detects conflicts during merge.
       // However, merge drivers (configured via .gitattributes and git config)
       // run during the merge and may automatically resolve these conflicts.
-      // Additionally, pre-merge-commit hooks (which run during `git commit`)
+      // Additionally, pre-merge-commit hooks (which we invoke manually below)
       // may also resolve conflicts.
       //
-      // We cannot check for conflicts here — we must let pre-merge-commit
-      // hooks run first. Log both stdout and stderr for diagnostics.
+      // We cannot abort here — we must let pre-merge-commit hooks run first.
+      // Log both stdout and stderr for diagnostics.
       const stdout = merge.stdout.trim();
       const stderr = merge.stderr.trim();
       const output = [
@@ -333,7 +442,7 @@ export class GitOps implements GitOperator {
         .filter(Boolean)
         .join("\n") || "(no output)";
       this.log(
-        `git merge reported exit code 1 (conflicts detected). Merge output:\n${output}\nAttempting commit to allow hooks to resolve conflicts...`,
+        `git merge reported exit code 1 (conflicts detected). Merge output:\n${output}\nWill invoke pre-merge-commit hook to allow conflict resolution...`,
       );
     }
 
@@ -359,36 +468,25 @@ export class GitOps implements GitOperator {
       this.log(`git merge output: ${merge.stdout.trim()}`);
     }
 
-    // Merge succeeded and is staged; now commit it. This is where
-    // pre-merge-commit hooks run. The `-c` overrides apply to both
-    // the merge and commit steps.
-    const commit = await this.git([
-      "-c",
-      "commit.gpgsign=false",
-      "-c",
-      "tag.gpgsign=false",
-      "commit",
-      "-m",
-      commitMsg,
-    ]);
-
-    if (commit.code !== 0) {
-      // Commit failed. This could be:
-      // 1. Unresolved conflicts that neither merge drivers nor hooks could fix
-      // 2. Pre-merge-commit hook failure (misconfiguration or broken hook)
-      // 3. Empty commit or other commit-time error
-      //
-      // Check if conflicts remain in the index. If so, this is a legitimate
-      // conflict that should abort the merge. If not, it's an unexpected
-      // hook failure that should throw an error.
+    // Merge succeeded and is staged; now invoke the pre-merge-commit
+    // hook if it exists. Git's pre-merge-commit hook is normally
+    // invoked by `git merge` when it creates a commit. Since we used
+    // `git merge --no-commit`, git doesn't invoke it automatically.
+    // We must call it manually here to allow hooks (like mdsmith's)
+    // to fix generated sections after all files are merged but before
+    // the final commit is created. Hooks may also resolve conflicts that
+    // merge drivers couldn't fix.
+    const hookResult = await this.invokePreMergeCommitHook();
+    if (hookResult.code !== 0) {
+      // Hook rejected the merge. Check if conflicts remain - if so, this
+      // is a legitimate conflict. If not, it's a hook failure.
       const checkConflicts = await this.git(["ls-files", "-u"]);
       const hasUnresolvedConflicts = checkConflicts.stdout.trim().length > 0;
 
       if (hasUnresolvedConflicts) {
-        // True conflicts remain — neither merge drivers nor hooks could
-        // resolve everything. Log diagnostic info and abort the merge.
+        // Hook couldn't resolve conflicts. Clean up and return false.
         this.log(
-          `git commit failed due to unresolved conflicts. Unresolved files:\n${checkConflicts.stdout.trim()}\nCommit output: ${commit.stderr.trim() || commit.stdout.trim() || "(no output)"}`,
+          `pre-merge-commit hook failed to resolve conflicts (exit ${hookResult.code}). Unresolved files:\n${checkConflicts.stdout.trim()}`,
         );
         const abort = await this.git(["merge", "--abort"]);
         if (abort.code !== 0) {
@@ -402,9 +500,10 @@ export class GitOps implements GitOperator {
         return false;
       }
 
-      // No conflicts in index — this is an unexpected hook failure or other
-      // commit-time error (misconfiguration or broken hook). Clean up and
-      // throw so the issue surfaces.
+      // No conflicts, but hook still failed. This is an unexpected error.
+      this.log(
+        `pre-merge-commit hook rejected merge (exit ${hookResult.code}): ${hookResult.stderr.trim()}`,
+      );
       const abort = await this.git(["merge", "--abort"]);
       let cleanupDetail = "";
       if (abort.code !== 0) {
@@ -416,7 +515,40 @@ export class GitOps implements GitOperator {
         }
       }
       throw new Error(
-        `git commit after merge failed (exit ${commit.code}), but no conflicts remain in index — likely a pre-merge-commit hook failure: ${commit.stderr.trim() || commit.stdout.trim()}${cleanupDetail}`,
+        `pre-merge-commit hook failed (exit ${hookResult.code}): ${hookResult.stderr.trim() || hookResult.stdout.trim()}${cleanupDetail}`,
+      );
+    }
+
+    // Hook passed (or didn't exist); now commit. The `-c` overrides
+    // apply to both the merge and commit steps.
+    const commit = await this.git([
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      "tag.gpgsign=false",
+      "commit",
+      "-m",
+      commitMsg,
+    ]);
+
+    if (commit.code !== 0) {
+      // Hook failure, empty commit, or other commit-time error. Unlike
+      // a merge conflict (exit 1 from merge), this is unexpected and
+      // indicates misconfiguration or a broken hook. Best-effort clean
+      // up any in-progress merge state before surfacing the error so
+      // later steps do not inherit a dirty worktree.
+      const abort = await this.git(["merge", "--abort"]);
+      let cleanupDetail = "";
+      if (abort.code !== 0) {
+        const reset = await this.git(["reset", "--hard", "HEAD"]);
+        if (reset.code !== 0) {
+          cleanupDetail = ` Cleanup failed: git merge --abort (exit ${abort.code}): ${abort.stderr.trim() || abort.stdout.trim()}; git reset --hard HEAD (exit ${reset.code}): ${reset.stderr.trim() || reset.stdout.trim()}`;
+        } else {
+          cleanupDetail = ` Cleanup fallback succeeded after git merge --abort failed (exit ${abort.code}): ${abort.stderr.trim() || abort.stdout.trim()}`;
+        }
+      }
+      throw new Error(
+        `git commit after successful merge failed (exit ${commit.code}): ${commit.stderr.trim() || commit.stdout.trim()}${cleanupDetail}`,
       );
     }
 
