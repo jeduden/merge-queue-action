@@ -442,7 +442,7 @@ export class GitOps implements GitOperator {
         .filter(Boolean)
         .join("\n") || "(no output)";
       this.log(
-        `git merge reported exit code 1 (conflicts detected). Merge output:\n${output}\nWill invoke pre-merge-commit hook to allow conflict resolution...`,
+        `git merge reported exit code 1 (conflicts detected). Merge output:\n${output}\nWill invoke pre-merge-commit hook (if present) to allow conflict resolution...`,
       );
     }
 
@@ -464,7 +464,9 @@ export class GitOps implements GitOperator {
     // actual merges. Merge drivers like mdsmith write diagnostic info
     // to stdout during the merge that can be helpful for debugging.
     // Only log when MERGE_HEAD exists to avoid noise from no-op merges.
-    if (merge.stdout.trim()) {
+    // Skip when merge.code === 1 because conflict output was already
+    // logged in the exit-code-1 block above.
+    if (merge.stdout.trim() && merge.code !== 1) {
       this.log(`git merge output: ${merge.stdout.trim()}`);
     }
 
@@ -481,6 +483,11 @@ export class GitOps implements GitOperator {
       // Hook rejected the merge. Check if conflicts remain - if so, this
       // is a legitimate conflict. If not, it's a hook failure.
       const checkConflicts = await this.git(["ls-files", "-u"]);
+      if (checkConflicts.code !== 0) {
+        throw new Error(
+          `git ls-files -u failed (exit ${checkConflicts.code}): ${checkConflicts.stderr.trim() || checkConflicts.stdout.trim()}`,
+        );
+      }
       const hasUnresolvedConflicts = checkConflicts.stdout.trim().length > 0;
 
       if (hasUnresolvedConflicts) {
@@ -524,6 +531,11 @@ export class GitOps implements GitOperator {
     // no conflicts remain.
     if (merge.code === 1) {
       const checkConflicts = await this.git(["ls-files", "-u"]);
+      if (checkConflicts.code !== 0) {
+        throw new Error(
+          `git ls-files -u failed (exit ${checkConflicts.code}): ${checkConflicts.stderr.trim() || checkConflicts.stdout.trim()}`,
+        );
+      }
       const hasUnresolvedConflicts = checkConflicts.stdout.trim().length > 0;
 
       if (hasUnresolvedConflicts) {

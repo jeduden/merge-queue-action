@@ -202,7 +202,7 @@ describe("GitOps with injected exec", () => {
     expect(commitCall).toBeDefined();
   });
 
-  it("mergeBranch succeeds when pre-merge-commit hook resolves conflicts after merge driver", async () => {
+  it("mergeBranch succeeds when conflict resolution pipeline clears all conflicts (merge exits 1 but ls-files -u is empty)", async () => {
     const { octokit } = makeFakeOctokit();
     const execCalls: string[][] = [];
     const exec: Exec = async (args) => {

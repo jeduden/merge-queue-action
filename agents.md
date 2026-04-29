@@ -11,17 +11,20 @@ The action uses a **two-step merge process** that is critical to understand:
 ```
 git merge --no-commit <source>
   ↓
+invoke pre-merge-commit hook (if present)
+  ↓
 git commit -m "message"
 ```
 
 **Why two steps?**
 - `git merge --no-commit` stages the merge but doesn't create the commit yet
-- This allows `pre-merge-commit` hooks to run when `git commit` is invoked
-- Using `git merge -m "message"` would bypass hooks entirely
+- The action manually invokes the `pre-merge-commit` hook between merge and commit
+- Git does NOT run the hook automatically when `--no-commit` is used
+- Using `git merge -m "message"` would bypass both the staged merge and hooks entirely
 
 **Key files:**
-- Implementation: `src/gitops.ts:271-420` (GitOps.mergeBranch method)
-- Tests: `src/gitops.test.ts:119-242`
+- Implementation: `src/gitops.ts:379-560` (GitOps.mergeBranch method)
+- Tests: `src/gitops.test.ts:119-280`
 
 ## Conflict Resolution Pipeline
 
@@ -34,9 +37,9 @@ Merge drivers are configured via `.gitattributes` and git config:
 - Can resolve per-file conflicts (e.g., lockfiles, generated files)
 - Exit code 0 = resolved, non-zero = unresolved
 
-### 2. Pre-Merge-Commit Hooks (run during `git commit`)
+### 2. Pre-Merge-Commit Hooks (invoked manually before `git commit`)
 
-Pre-merge-commit hooks run after merge but before creating the commit:
+Pre-merge-commit hooks are invoked manually by the action after `git merge --no-commit` and before `git commit`:
 - Can resolve conflicts that merge drivers couldn't fix
 - Can regenerate content based on the final merged state
 - Can update indexes, catalogs, or other derived files
@@ -50,23 +53,21 @@ Pre-merge-commit hooks run after merge but before creating the commit:
    ↓
 2. Log conflict message but DO NOT check for conflicts yet
    ↓
-3. Proceed to git commit -m "message"
+3. Invoke pre-merge-commit hook manually (if present)
    ↓
-4. Pre-merge-commit hooks run
+4. Check git ls-files -u
    ↓
-5. If commit fails, THEN check git ls-files -u
+5. If git ls-files -u shows files → conflicts remain → abort
    ↓
-6. If git ls-files -u shows files → conflicts remain → abort
-   ↓
-7. If git ls-files -u is empty → hooks resolved everything → success
+6. If git ls-files -u is empty → run git commit → success
 ```
 
-**Code location:** `src/gitops.ts:318-413`
+**Code location:** `src/gitops.ts:418-560`
 
 **Test coverage:**
 - Unresolved conflicts: `src/gitops.test.ts:119` ("mergeBranch returns false and cleans up on unresolved conflict")
 - Merge driver resolves: `src/gitops.test.ts:165` ("mergeBranch succeeds when merge driver resolves all conflicts")
-- Hook resolves: `src/gitops.test.ts:205` ("mergeBranch succeeds when pre-merge-commit hook resolves conflicts after merge driver")
+- Hook resolves: `src/gitops.test.ts:205` ("mergeBranch succeeds when conflict resolution pipeline clears all conflicts (merge exits 1 but ls-files -u is empty)")
 
 ### Why This Matters
 
@@ -87,10 +88,13 @@ Previous implementations checked for conflicts immediately after `git merge` ret
 **Correct approach:**
 ```typescript
 const checkConflicts = await this.git(["ls-files", "-u"]);
+if (checkConflicts.code !== 0) {
+  throw new Error(`git ls-files -u failed (exit ${checkConflicts.code}): ${checkConflicts.stderr.trim() || checkConflicts.stdout.trim()}`);
+}
 const hasUnresolvedConflicts = checkConflicts.stdout.trim().length > 0;
 ```
 
-`git ls-files -u` lists unmerged files in the index. If stdout is empty, all conflicts were resolved (by drivers, hooks, or both).
+`git ls-files -u` lists unmerged files in the index. If stdout is empty, all conflicts were resolved (by drivers, hooks, or both). Always check the exit code before trusting stdout.
 
 ### Logging Merge Output
 
@@ -105,21 +109,21 @@ const output = merge.stderr.trim() || "(no output)";
 
 **Why:** Git uses stdout for progress messages and conflict markers. Stderr is for actual errors.
 
-### Commit Failure Handling
+### Hook Failure Handling
 
-When `git commit` fails (exit code != 0), distinguish between:
+When the pre-merge-commit hook fails (exit code != 0), distinguish between:
 
-1. **Unresolved conflicts** (return false):
+1. **Hook failed due to unresolved conflicts** (return false):
    - Check `git ls-files -u`
    - If it lists files, conflicts remain
    - Clean up with `git merge --abort`
 
-2. **Hook failures** (throw error):
+2. **Hook failed for other reasons** (throw error):
    - Check `git ls-files -u`
    - If empty, no conflicts → hook itself failed
    - Throw descriptive error (not just return false)
 
-**Code location:** `src/gitops.ts:367-413`
+**Code location:** `src/gitops.ts:481-525`
 
 ## Testing Patterns
 
