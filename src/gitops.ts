@@ -365,10 +365,14 @@ export class GitOps implements GitOperator {
       });
     });
 
+    if (hookResult.stdout.trim()) {
+      this.log(`pre-merge-commit hook stdout: ${hookResult.stdout.trim()}`);
+    }
+    if (hookResult.stderr.trim()) {
+      this.log(`pre-merge-commit hook stderr: ${hookResult.stderr.trim()}`);
+    }
     if (hookResult.code !== 0) {
-      this.log(
-        `pre-merge-commit hook failed (exit ${hookResult.code}): ${hookResult.stderr.trim() || hookResult.stdout.trim()}`,
-      );
+      this.log(`pre-merge-commit hook failed (exit ${hookResult.code})`);
     } else {
       this.log("pre-merge-commit hook passed");
     }
@@ -509,7 +513,7 @@ export class GitOps implements GitOperator {
 
       // No conflicts, but hook still failed. This is an unexpected error.
       this.log(
-        `pre-merge-commit hook rejected merge (exit ${hookResult.code}): ${hookResult.stderr.trim() || hookResult.stdout.trim()}`,
+        `pre-merge-commit hook rejected merge (exit ${hookResult.code})`,
       );
       const abort = await this.git(["merge", "--abort"]);
       let cleanupDetail = "";
