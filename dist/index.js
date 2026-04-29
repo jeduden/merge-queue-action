@@ -37266,7 +37266,7 @@ class GitOps {
                 return false;
             }
             // No conflicts, but hook still failed. This is an unexpected error.
-            this.log(`pre-merge-commit hook rejected merge (exit ${hookResult.code}): ${hookResult.stderr.trim()}`);
+            this.log(`pre-merge-commit hook rejected merge (exit ${hookResult.code}): ${hookResult.stderr.trim() || hookResult.stdout.trim()}`);
             const abort = await this.git(["merge", "--abort"]);
             let cleanupDetail = "";
             if (abort.code !== 0) {

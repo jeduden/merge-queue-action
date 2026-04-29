@@ -509,7 +509,7 @@ export class GitOps implements GitOperator {
 
       // No conflicts, but hook still failed. This is an unexpected error.
       this.log(
-        `pre-merge-commit hook rejected merge (exit ${hookResult.code}): ${hookResult.stderr.trim()}`,
+        `pre-merge-commit hook rejected merge (exit ${hookResult.code}): ${hookResult.stderr.trim() || hookResult.stdout.trim()}`,
       );
       const abort = await this.git(["merge", "--abort"]);
       let cleanupDetail = "";

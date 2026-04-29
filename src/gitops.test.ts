@@ -216,6 +216,10 @@ describe("GitOps with injected exec", () => {
       if (args[0] === "rev-parse" && args[2] === "MERGE_HEAD") {
         return { code: 0, stdout: "abc1234", stderr: "" };
       }
+      // ls-files -u returns empty (no unmerged files - conflicts were resolved)
+      if (args[0] === "ls-files" && args[1] === "-u") {
+        return { code: 0, stdout: "", stderr: "" };
+      }
       // Commit succeeds — pre-merge-commit hook resolved the conflicts
       if (args.includes("commit") && args.includes("-m")) {
         return { code: 0, stdout: "[batch abc1234] msg\n 1 file changed, 5 insertions(+), 2 deletions(-)", stderr: "" };
@@ -239,6 +243,12 @@ describe("GitOps with injected exec", () => {
       (c) => c.includes("commit") && c.includes("-m"),
     );
     expect(commitCall).toBeDefined();
+
+    // Should have checked for unmerged files with ls-files -u
+    const lsFilesCall = execCalls.find(
+      (c) => c[0] === "ls-files" && c[1] === "-u",
+    );
+    expect(lsFilesCall).toBeDefined();
   });
 
   it("mergeBranch returns true on clean merge", async () => {

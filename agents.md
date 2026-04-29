@@ -23,8 +23,8 @@ git commit -m "message"
 - Using `git merge -m "message"` would bypass both the staged merge and hooks entirely
 
 **Key files:**
-- Implementation: `src/gitops.ts:379-560` (GitOps.mergeBranch method)
-- Tests: `src/gitops.test.ts:119-280`
+- Implementation: `src/gitops.ts` (GitOps.mergeBranch method)
+- Tests: `src/gitops.test.ts` (mergeBranch test suite)
 
 ## Conflict Resolution Pipeline
 
@@ -197,7 +197,7 @@ The MERGE_HEAD check distinguishes between:
 - Actual merge in progress → proceed to commit
 - Already up-to-date → skip commit (nothing to commit)
 
-**Code location:** `src/gitops.ts:375-383`
+**Code location:** `src/gitops.ts` (GitOps.mergeBranch MERGE_HEAD check)
 
 ### 3. Don't confuse hook failures with conflicts
 
@@ -274,7 +274,7 @@ Merge drivers and hooks execute **during the merge** with access to:
 
 If you're implementing features related to merge behavior, conflict resolution, or git operations:
 
-1. Read `src/gitops.ts:271-420` (mergeBranch method) carefully
+1. Read `src/gitops.ts` (GitOps.mergeBranch method) carefully
 2. Review the test cases in `src/gitops.test.ts` for expected behavior
 3. Check the README for user-facing documentation
 4. Store any new patterns you discover using `store_memory` with citations
