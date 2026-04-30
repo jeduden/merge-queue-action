@@ -997,7 +997,7 @@ describe("GitOps against a real git repo (integration)", () => {
     const hookPath = join(hooksDir, "pre-merge-commit");
     writeFileSync(
       hookPath,
-      "#!/bin/sh\nset -eu\necho 'hook modified' >> base.txt\ngit add base.txt\nexit 0\n",
+      "#!/bin/sh\nset -eu\necho 'hook modified' >> base.txt\ngit add base.txt\necho 'hook ran ok'\nexit 0\n",
     );
     chmodSync(hookPath, 0o755);
 
@@ -1016,9 +1016,11 @@ describe("GitOps against a real git repo (integration)", () => {
     await runIn(work, "push", "origin", "pr-hook-test");
     await runIn(work, "checkout", "main");
 
+    const logs: string[] = [];
     // biome-ignore lint/suspicious/noExplicitAny: test double
     const ops = new GitOps(makeOctokitBackedByBare() as any, "o", "r", {
       exec: execInWork(),
+      log: (msg) => logs.push(msg),
     });
 
     await ops.createBranchFromRef("merge-queue/batch-hook", "main");
@@ -1030,6 +1032,8 @@ describe("GitOps against a real git repo (integration)", () => {
     // the modification was committed
     const baseContent = readFileSync(join(work, "base.txt"), "utf8");
     expect(baseContent).toContain("hook modified");
+    // Verify the hook's stdout was forwarded to the action log
+    expect(logs.some((l) => l.includes("hook ran ok"))).toBe(true);
   });
 
   it("aborts merge if pre-merge-commit hook fails", async () => {
@@ -1058,9 +1062,11 @@ describe("GitOps against a real git repo (integration)", () => {
     await runIn(work, "push", "origin", "pr-reject");
     await runIn(work, "checkout", "main");
 
+    const logs: string[] = [];
     // biome-ignore lint/suspicious/noExplicitAny: test double
     const ops = new GitOps(makeOctokitBackedByBare() as any, "o", "r", {
       exec: execInWork(),
+      log: (msg) => logs.push(msg),
     });
 
     await ops.createBranchFromRef("merge-queue/batch-reject", "main");
@@ -1069,6 +1075,17 @@ describe("GitOps against a real git repo (integration)", () => {
     await expect(
       ops.mergeBranch("merge-queue/batch-reject", prSha, "Merge PR"),
     ).rejects.toThrow(/pre-merge-commit hook failed/);
+
+    // Verify the hook's stderr was forwarded to the log before the "failed" line
+    const hookRejectedLogIndex = logs.findIndex((l) =>
+      l.includes("hook rejected"),
+    );
+    const hookFailedLogIndex = logs.findIndex((l) =>
+      l.includes("pre-merge-commit hook failed"),
+    );
+    expect(hookRejectedLogIndex).toBeGreaterThanOrEqual(0);
+    expect(hookFailedLogIndex).toBeGreaterThanOrEqual(0);
+    expect(hookRejectedLogIndex).toBeLessThan(hookFailedLogIndex);
 
     // Verify the working tree is clean after hook failure
     const status = await runIn(work, "status", "--porcelain");

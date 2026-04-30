@@ -125,7 +125,7 @@ export class GitOps implements GitOperator {
     await this.assertWorktreeReady();
 
     this.log(
-      `Configuring git identity as "${opts.userName} <${opts.userEmail}>"`,
+      `Configuring git identity: name="${opts.userName}" email="${opts.userEmail}"`,
     );
     await this.gitOrThrow(["config", "user.email", opts.userEmail]);
     await this.gitOrThrow(["config", "user.name", opts.userName]);
@@ -365,10 +365,18 @@ export class GitOps implements GitOperator {
       });
     });
 
+    const trimmedStdout = hookResult.stdout.trim();
+    if (trimmedStdout) {
+      this.log("pre-merge-commit hook stdout:");
+      this.log(trimmedStdout);
+    }
+    const trimmedStderr = hookResult.stderr.trim();
+    if (trimmedStderr) {
+      this.log("pre-merge-commit hook stderr:");
+      this.log(trimmedStderr);
+    }
     if (hookResult.code !== 0) {
-      this.log(
-        `pre-merge-commit hook failed (exit ${hookResult.code}): ${hookResult.stderr.trim() || hookResult.stdout.trim()}`,
-      );
+      this.log(`pre-merge-commit hook failed (exit ${hookResult.code})`);
     } else {
       this.log("pre-merge-commit hook passed");
     }
@@ -509,7 +517,7 @@ export class GitOps implements GitOperator {
 
       // No conflicts, but hook still failed. This is an unexpected error.
       this.log(
-        `pre-merge-commit hook rejected merge (exit ${hookResult.code}): ${hookResult.stderr.trim() || hookResult.stdout.trim()}`,
+        `pre-merge-commit hook rejected merge (exit ${hookResult.code})`,
       );
       const abort = await this.git(["merge", "--abort"]);
       let cleanupDetail = "";
