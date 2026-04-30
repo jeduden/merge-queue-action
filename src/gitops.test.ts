@@ -1077,7 +1077,15 @@ describe("GitOps against a real git repo (integration)", () => {
     ).rejects.toThrow(/pre-merge-commit hook failed/);
 
     // Verify the hook's stderr was forwarded to the log before the "failed" line
-    expect(logs.some((l) => l.includes("hook rejected"))).toBe(true);
+    const hookRejectedLogIndex = logs.findIndex((l) =>
+      l.includes("hook rejected"),
+    );
+    const hookFailedLogIndex = logs.findIndex((l) =>
+      l.includes("pre-merge-commit hook failed"),
+    );
+    expect(hookRejectedLogIndex).toBeGreaterThanOrEqual(0);
+    expect(hookFailedLogIndex).toBeGreaterThanOrEqual(0);
+    expect(hookRejectedLogIndex).toBeLessThan(hookFailedLogIndex);
 
     // Verify the working tree is clean after hook failure
     const status = await runIn(work, "status", "--porcelain");

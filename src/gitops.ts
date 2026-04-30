@@ -365,11 +365,15 @@ export class GitOps implements GitOperator {
       });
     });
 
-    if (hookResult.stdout.trim()) {
-      this.log(`pre-merge-commit hook stdout: ${hookResult.stdout.trim()}`);
+    const trimmedStdout = hookResult.stdout.trim();
+    if (trimmedStdout) {
+      this.log("pre-merge-commit hook stdout:");
+      this.log(trimmedStdout);
     }
-    if (hookResult.stderr.trim()) {
-      this.log(`pre-merge-commit hook stderr: ${hookResult.stderr.trim()}`);
+    const trimmedStderr = hookResult.stderr.trim();
+    if (trimmedStderr) {
+      this.log("pre-merge-commit hook stderr:");
+      this.log(trimmedStderr);
     }
     if (hookResult.code !== 0) {
       this.log(`pre-merge-commit hook failed (exit ${hookResult.code})`);
