@@ -745,6 +745,39 @@ Check git ls-files -u
   └─ Conflicts remain → abort → PR labeled queue:failed
 ```
 
+**Critical requirement for conflict-resolving hooks:**
+
+If your pre-merge-commit hook resolves remaining conflicts or otherwise
+clears unmerged index entries, it **MUST** stage the resolved paths using
+`git add` so the git index no longer contains unresolved merge entries.
+Simply fixing file content in the working tree is not sufficient—git tracks
+conflict resolution in the index (staging area).
+
+When a file has a merge conflict, git creates one or more unmerged index
+entries for that file (up to stages 1, 2, and 3) representing the common
+ancestor, current branch, and incoming branch versions. Running `git add`
+on a resolved file replaces those unmerged entries with a single stage 0
+entry, marking the conflict as resolved.
+
+**Example hook that resolves conflicts:**
+
+```bash
+#!/bin/bash
+# Fix conflicted files
+your-tool fix internal/rules/index.md
+
+# REQUIRED: Stage the resolved file to clear conflict markers
+git add internal/rules/index.md
+
+exit 0
+```
+
+**What happens if you don't stage:**
+- The file content is fixed in the working tree
+- Git index still shows stages 1, 2, 3 (unresolved conflict)
+- `git ls-files -u` lists the file as conflicted
+- The action aborts and labels the PR `queue:failed`
+
 This enables workflows where merge drivers handle file-level conflicts
 and hooks perform final cleanup or regeneration that depends on the
 complete merge result.
@@ -758,7 +791,10 @@ this pattern to maintain a generated catalog in `PLAN.md`:
    a custom 3-way merge strategy.
 2. **pre-merge-commit hook** runs after all `plan/*.md` files are merged,
    regenerates the catalog section in `PLAN.md` based on the final merged
-   state, and stages the update.
+   state, and stages the update. If the hook also resolves any conflicts
+   (e.g., in generated files like `internal/rules/index.md`), it must stage
+   those resolved files with `git add` to clear conflict markers from the
+   git index.
 
 **Setup:**
 
@@ -785,7 +821,9 @@ this pattern to maintain a generated catalog in `PLAN.md`:
 
    This registers `merge.mdsmith.driver` in `.git/config` and creates a
    `pre-merge-commit` hook at `.git/hooks/pre-merge-commit` that runs
-   `mdsmith fix` on generated files after each merge.
+   `mdsmith fix` on generated files after each merge. The hook must stage
+   any files it modifies or resolves using `git add` to ensure changes are
+   included in the merge commit.
 
 3. **Commit `.gitattributes`** mapping Markdown files to the driver:
 
