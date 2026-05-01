@@ -747,17 +747,17 @@ Check git ls-files -u
 
 **Critical requirement for conflict-resolving hooks:**
 
-If your pre-merge-commit hook resolves conflicts (fixes files that contain
-conflict markers), it **MUST** stage the resolved files using `git add` to
-clear the conflict state from the git index. Simply fixing file content in
-the working tree is not sufficient—git tracks conflict resolution in the
-index (staging area).
+If your pre-merge-commit hook resolves remaining conflicts or otherwise
+clears unmerged index entries, it **MUST** stage the resolved paths using
+`git add` so the git index no longer contains unresolved merge entries.
+Simply fixing file content in the working tree is not sufficient—git tracks
+conflict resolution in the index (staging area).
 
-When a file has a merge conflict, git creates three index entries (stages
-1, 2, 3) for that file representing the common ancestor, current branch,
-and incoming branch versions. Running `git add` on a resolved file replaces
-these three conflict stages with a single stage 0 entry, marking the conflict
-as resolved.
+When a file has a merge conflict, git creates one or more unmerged index
+entries for that file (up to stages 1, 2, and 3) representing the common
+ancestor, current branch, and incoming branch versions. Running `git add`
+on a resolved file replaces those unmerged entries with a single stage 0
+entry, marking the conflict as resolved.
 
 **Example hook that resolves conflicts:**
 
