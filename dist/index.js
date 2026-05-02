@@ -38437,6 +38437,17 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
                     throw new Error(`dispatching follow-up bisect: ${formatErrorForComment(err)}`);
                 }
             }
+            // Requeue right half (skip any already marked failed) since it hasn't been tested yet
+            for (const n of right) {
+                if (excluded.has(n))
+                    continue;
+                try {
+                    await q.requeue(prMap.get(n));
+                }
+                catch (err) {
+                    log(`Warning: failed to requeue PR #${n}: ${err}`);
+                }
+            }
         }
     }
 }

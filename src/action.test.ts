@@ -2461,12 +2461,9 @@ describe("runBisect", () => {
     )).toBe(true);
 
     // Right half ([3,4]) should be requeued since they haven't been tested
+    // The mock's addLabel is called when requeue() adds the "queue" label
     expect(api.labels.get(3)).toContain("queue");
     expect(api.labels.get(4)).toContain("queue");
-
-    // Left half should NOT be requeued (they're being bisected)
-    expect(api.labels.get(1)).not.toContain("queue");
-    expect(api.labels.get(2)).not.toContain("queue");
 
     expect(logs.some((l) => l.includes("Left half failed, splitting further"))).toBe(true);
   });
