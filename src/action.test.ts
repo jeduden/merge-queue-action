@@ -2438,6 +2438,222 @@ describe("runBisect", () => {
       ).toBe(true);
     }
   });
+
+  it("requeues right half when left half fails with multiple PRs", async () => {
+    const api = newMockAPI();
+    // 4 PRs: left=[1,2], right=[3,4]
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3), makePR(4)]);
+    api.ciConclusion = "failure"; // Left half [1,2] fails
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2,3,4]", dryRun: false });
+    const logs: string[] = [];
+
+    // Initialize PRs with queue:active labels to verify state transition
+    for (const n of [1, 2, 3, 4]) {
+      api.labels.set(n, ["queue:active"]);
+    }
+
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await runBisect(api, git, cfg, (m) => logs.push(m));
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
+
+    // Left half ([1,2]) should trigger follow-up bisect
+    expect(api.workflows.some((w) =>
+      w.inputs?.bisect === "true" && w.inputs?.batch_prs === "[1,2]"
+    )).toBe(true);
+
+    // Right half ([3,4]) should be requeued since they haven't been tested
+    // The mock's addLabel is called when requeue() adds the "queue" label
+    expect(api.labels.get(3)).toContain("queue");
+    expect(api.labels.get(4)).toContain("queue");
+
+    // Verify queue:active was removed during requeue
+    expect(api.labels.get(3)).not.toContain("queue:active");
+    expect(api.labels.get(4)).not.toContain("queue:active");
+
+    expect(logs.some((l) => l.includes("Left half failed, splitting further"))).toBe(true);
+  });
+
+  it("warns when requeue fails for right half after left fails with multiple PRs", async () => {
+    const api = newMockAPI();
+    // 4 PRs: left=[1,2], right=[3,4]
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3), makePR(4)]);
+    api.ciConclusion = "failure"; // Left half [1,2] fails
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2,3,4]", dryRun: false });
+    const logs: string[] = [];
+
+    // Make requeue fail for right-half PRs
+    api.addLabel = async (n, label) => {
+      if (label === "queue" && (n === 3 || n === 4)) {
+        throw new Error("addLabel failed");
+      }
+    };
+
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await runBisect(api, git, cfg, (m) => logs.push(m));
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
+
+    // Should log warnings for failed requeues
+    expect(logs.some((l) => l.includes("Warning: failed to requeue PR #3"))).toBe(true);
+    expect(logs.some((l) => l.includes("Warning: failed to requeue PR #4"))).toBe(true);
+  });
+
+  it("requeues right half after single culprit identified when left had conflicts", async () => {
+    // 4 PRs: left=[1,2], right=[3,4]. PR#1 conflicts and is excluded.
+    // The remaining left-half PR (#2) fails CI and is identified as the culprit.
+    // The untouched right half should then be requeued.
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3), makePR(4)]);
+    api.ciConclusion = "failure"; // Left half fails
+    const git = newMockGit();
+    git.conflictOn = "sha-1"; // PR#1 conflicts → excluded
+    const cfg = baseCfg({ batchPrs: "[1,2,3,4]", dryRun: false });
+
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await runBisect(api, git, cfg, nop);
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
+
+    // PR#1 should be marked failed due to conflict
+    expect(api.labels.get(1)).toContain("queue:failed");
+
+    // PR#2 should be marked as failed (single culprit)
+    expect(api.labels.get(2)).toContain("queue:failed");
+
+    // PR#3 and PR#4 (right half) should be requeued
+    expect(api.labels.get(3)).toContain("queue");
+    expect(api.labels.get(4)).toContain("queue");
+  });
+
+  it("requeues right half after dispatching follow-up bisect when left had conflicts", async () => {
+    // Six PRs are split into left [1,2,3] and right [4,5,6].
+    // PR#1 conflicts and is excluded, leaving [2,3] on the left.
+    // When the remaining left subset fails CI, a follow-up bisect is dispatched
+    // for [2,3], and the right half [4,5,6] is requeued.
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3), makePR(4), makePR(5), makePR(6)]);
+    api.ciConclusion = "failure"; // Left half fails
+    const git = newMockGit();
+    git.conflictOn = "sha-1"; // PR#1 conflicts → excluded
+    const cfg = baseCfg({ batchPrs: "[1,2,3,4,5,6]", dryRun: false });
+
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await runBisect(api, git, cfg, nop);
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
+
+    // Follow-up bisect for mergedLeft [2,3] should be dispatched
+    expect(api.workflows.some((w) =>
+      w.inputs?.bisect === "true" && w.inputs?.batch_prs === "[2,3]"
+    )).toBe(true);
+
+    // PR#1 should be marked failed due to conflict
+    expect(api.labels.get(1)).toContain("queue:failed");
+
+    // PR#4, PR#5, PR#6 (right half) should be requeued
+    for (const n of [4, 5, 6]) {
+      expect(api.labels.get(n)).toContain("queue");
+    }
+  });
+
+  it("requeues right half when dispatching right-half bisect fails after left succeeds with conflicts", async () => {
+    // Tests line 1017 code path.
+    // 4 PRs: left=[1,2], right=[3,4]. PR#1 conflicts → excluded.
+    // mergedLeft=[2], CI succeeds → merge to main.
+    // Try to dispatch right-half bisect but triggerWorkflow fails.
+    // Should requeue [3,4] (line 1016-1033 executed).
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3), makePR(4)]);
+    api.ciConclusion = "success"; // Left half succeeds
+    const git = newMockGit();
+    git.conflictOn = "sha-1"; // PR#1 conflicts → excluded
+    const cfg = baseCfg({ batchPrs: "[1,2,3,4]", dryRun: false });
+
+    // triggerWorkflow succeeds for initial CI, fails for right-half bisect dispatch
+    let triggerCount = 0;
+    api.triggerWorkflow = async (_wf, _ref, inputs) => {
+      triggerCount++;
+      if (triggerCount === 2 && inputs?.bisect === "true") {
+        throw new Error("dispatch failed");
+      }
+    };
+
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await expect(runBisect(api, git, cfg, nop)).rejects.toThrow(
+        "dispatching bisect for right half",
+      );
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
+
+    // PR#1 should be marked failed due to conflict
+    expect(api.labels.get(1)).toContain("queue:failed");
+
+    // PR#3 and PR#4 should be requeued with comments
+    for (const n of [3, 4]) {
+      expect(api.labels.get(n)).toContain("queue");
+      const c = api.comments.get(n) ?? [];
+      expect(c.some((s) => s.includes("requeued"))).toBe(true);
+    }
+  });
+
+  it("requeues all non-excluded PRs when dispatching follow-up bisect fails after left fails with conflicts", async () => {
+    // Tests line 1090 code path.
+    // 4 PRs: left=[1,2], right=[3,4]. PR#2 conflicts → excluded.
+    // mergedLeft=[1], CI fails, mergedLeft.length === 1 → single culprit path.
+    // Actually, we want the follow-up bisect dispatch path. Let me use 6 PRs.
+    // 6 PRs: left=[1,2,3], right=[4,5,6]. PR#2 conflicts → excluded.
+    // mergedLeft=[1,3], CI fails, mergedLeft.length === 2 > 1 → dispatch follow-up.
+    // triggerWorkflow fails → should requeue all prNumbers except excluded (line 1089-1106).
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3), makePR(4), makePR(5), makePR(6)]);
+    api.ciConclusion = "failure"; // Left half fails
+    const git = newMockGit();
+    git.conflictOn = "sha-2"; // PR#2 conflicts → excluded
+    const cfg = baseCfg({ batchPrs: "[1,2,3,4,5,6]", dryRun: false });
+
+    // triggerWorkflow succeeds for initial CI, fails for follow-up bisect dispatch
+    let triggerCount = 0;
+    api.triggerWorkflow = async (_wf, _ref, inputs) => {
+      triggerCount++;
+      if (triggerCount === 2 && inputs?.batch_prs === "[1,3]") {
+        throw new Error("dispatch failed");
+      }
+    };
+
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await expect(runBisect(api, git, cfg, nop)).rejects.toThrow(
+        "dispatching follow-up bisect",
+      );
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
+
+    // PR#2 should be marked failed due to conflict (no requeue comment)
+    expect(api.labels.get(2)).toContain("queue:failed");
+    const c2 = api.comments.get(2) ?? [];
+    expect(c2.some((s) => s.includes("requeued"))).toBe(false);
+
+    // PR#1, PR#3, PR#4, PR#5, PR#6 should be requeued with comments
+    for (const n of [1, 3, 4, 5, 6]) {
+      expect(api.labels.get(n)).toContain("queue");
+      const c = api.comments.get(n) ?? [];
+      expect(c.some((s) => s.includes("requeued"))).toBe(true);
+    }
+  });
 });
 
 describe("runSetup", () => {
