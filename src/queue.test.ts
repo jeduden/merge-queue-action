@@ -483,7 +483,7 @@ describe("isAlreadyExistsError edge cases", () => {
     };
 
     const q = new Queue(api, "queue", false, nop);
-    await expect(q.setupLabels()).rejects.toThrow();
+    await expect(q.setupLabels()).rejects.toBeNull();
   });
 
   it("returns false for error without response field", async () => {

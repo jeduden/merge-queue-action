@@ -2506,10 +2506,9 @@ describe("runBisect", () => {
   });
 
   it("requeues right half after single culprit identified when left had conflicts", async () => {
-    // Tests line 1069 code path (even though excluded.has(n) is always false for right PRs).
-    // 4 PRs: left=[1,2], right=[3,4]. PR#1 conflicts → excluded.
-    // mergedLeft=[2], CI fails → PR#2 is single culprit.
-    // Right half [3,4] should be requeued (line 1068-1075 executed).
+    // 4 PRs: left=[1,2], right=[3,4]. PR#1 conflicts and is excluded.
+    // The remaining left-half PR (#2) fails CI and is identified as the culprit.
+    // The untouched right half should then be requeued.
     const api = newMockAPI();
     api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3), makePR(4)]);
     api.ciConclusion = "failure"; // Left half fails
@@ -2536,14 +2535,10 @@ describe("runBisect", () => {
   });
 
   it("requeues right half after dispatching follow-up bisect when left had conflicts", async () => {
-    // Tests line 1114 code path.
-    // 4 PRs: left=[1,2], right=[3,4]. PR#1 conflicts → excluded.
-    // mergedLeft=[2], CI fails, mergedLeft.length > 1 is false but we still have
-    // the else branch at line 1076. Actually mergedLeft=[2] has length 1, so we go
-    // to the single-culprit path, not the follow-up bisect path.
-    // Let me use 6 PRs: left=[1,2,3], right=[4,5,6]. PR#1 conflicts.
-    // mergedLeft=[2,3], CI fails, mergedLeft.length === 2 > 1 → dispatch follow-up.
-    // Right half [4,5,6] should be requeued (line 1113-1120 executed).
+    // Six PRs are split into left [1,2,3] and right [4,5,6].
+    // PR#1 conflicts and is excluded, leaving [2,3] on the left.
+    // When the remaining left subset fails CI, a follow-up bisect is dispatched
+    // for [2,3], and the right half [4,5,6] is requeued.
     const api = newMockAPI();
     api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3), makePR(4), makePR(5), makePR(6)]);
     api.ciConclusion = "failure"; // Left half fails
