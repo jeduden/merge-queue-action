@@ -2438,6 +2438,38 @@ describe("runBisect", () => {
       ).toBe(true);
     }
   });
+
+  it("requeues right half when left half fails with multiple PRs", async () => {
+    const api = newMockAPI();
+    // 4 PRs: left=[1,2], right=[3,4]
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3), makePR(4)]);
+    api.ciConclusion = "failure"; // Left half [1,2] fails
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2,3,4]", dryRun: false });
+    const logs: string[] = [];
+
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await runBisect(api, git, cfg, (m) => logs.push(m));
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
+
+    // Left half ([1,2]) should trigger follow-up bisect
+    expect(api.workflows.some((w) =>
+      w.inputs?.bisect === "true" && w.inputs?.batch_prs === "[1,2]"
+    )).toBe(true);
+
+    // Right half ([3,4]) should be requeued since they haven't been tested
+    expect(api.labels.get(3)).toContain("queue");
+    expect(api.labels.get(4)).toContain("queue");
+
+    // Left half should NOT be requeued (they're being bisected)
+    expect(api.labels.get(1)).not.toContain("queue");
+    expect(api.labels.get(2)).not.toContain("queue");
+
+    expect(logs.some((l) => l.includes("Left half failed, splitting further"))).toBe(true);
+  });
 });
 
 describe("runSetup", () => {
