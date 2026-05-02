@@ -80,6 +80,18 @@ export declare class GitOps implements GitOperator {
      * or non-zero if the hook exists and rejected the merge.
      */
     private invokePreMergeCommitHook;
+    /**
+     * Cleans up a conflicted merge by running `git merge --abort`, falling back
+     * to `git reset --hard HEAD` if abort fails. Returns false to indicate a
+     * merge conflict.
+     */
+    private cleanupConflictedMergeAndReturnFalse;
+    /**
+     * Cleans up a failed merge by running `git merge --abort`, falling back
+     * to `git reset --hard HEAD` if abort fails. Returns cleanup details for
+     * inclusion in an error message.
+     */
+    private cleanupFailedMergeAndGetDetail;
     mergeBranch(branch: string, sourceRef: string, commitMsg: string): Promise<boolean>;
     getHeadSHA(ref: string): Promise<string>;
     pushBranch(branch: string): Promise<void>;

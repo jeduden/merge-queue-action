@@ -87,6 +87,32 @@ function newMockAPI(): GitHubAPI & {
 
 const nop = () => {};
 
+describe("Queue", () => {
+  it("uses nop log by default if log parameter is undefined", async () => {
+    const api = newMockAPI();
+    const q = new Queue(api, "queue", false, undefined);
+    // Actually use the queue to ensure the noop log is called (activate logs)
+    api.labels.set(1, ["queue"]);
+    await q.activate([
+      { number: 1, headRef: "", headSHA: "", title: "", createdAt: 100 },
+    ]);
+    expect(q).toBeDefined();
+  });
+
+  it("routes log output through custom log function", async () => {
+    const api = newMockAPI();
+    const logged: string[] = [];
+    const customLog = (msg: string) => logged.push(msg);
+    const q = new Queue(api, "queue", false, customLog);
+    // activate() logs label transitions, so it exercises the custom log.
+    api.labels.set(1, ["queue"]);
+    await q.activate([
+      { number: 1, headRef: "", headSHA: "", title: "", createdAt: 100 },
+    ]);
+    expect(logged.length).toBeGreaterThan(0);
+  });
+});
+
 describe("Collect", () => {
   it("sorts oldest first", async () => {
     const api = newMockAPI();
@@ -164,10 +190,31 @@ describe("Activate", () => {
     expect(api.labels.get(1)).toContain("queue:active");
   });
 
-  it("returns non-404 RemoveLabel error", async () => {
+  it("propagates non-404 RemoveLabel error", async () => {
     const api = newMockAPI();
     api.labels.set(1, ["queue"]);
     api.removeLabelErr = new Mock500Error();
+
+    const q = new Queue(api, "queue", false, nop);
+    await expect(
+      q.activate([
+        { number: 1, headRef: "", headSHA: "", title: "", createdAt: 0 },
+      ]),
+    ).rejects.toThrow();
+  });
+
+  it("propagates non-404 error when removing failed label", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue", "queue:failed"]);
+
+    // Override removeLabel to throw error only for the failed label
+    const origRemoveLabel = api.removeLabel.bind(api);
+    api.removeLabel = async (prNumber: number, label: string) => {
+      if (label === "queue:failed") {
+        throw new Mock500Error();
+      }
+      return origRemoveLabel(prNumber, label);
+    };
 
     const q = new Queue(api, "queue", false, nop);
     await expect(
@@ -293,6 +340,20 @@ describe("MarkFailed", () => {
         "test",
       ),
     ).rejects.toThrow("server error");
+  });
+
+  it("does not modify labels in dry run", async () => {
+    const api = newMockAPI();
+    api.labels.set(5, ["queue:active"]);
+
+    const q = new Queue(api, "queue", true, nop);
+    await q.markFailed(
+      { number: 5, headRef: "", headSHA: "", title: "", createdAt: 0 },
+      "CI failed",
+    );
+
+    // In dry run, labels should not be modified
+    expect(api.labels.get(5)).toEqual(["queue:active"]);
   });
 });
 
@@ -438,6 +499,54 @@ describe("SetupLabels", () => {
     await q.setupLabels();
 
     expect(api.createdLabels).toHaveLength(0);
+  });
+
+  it("handles createLabel error with non-object", async () => {
+    const api = newMockAPI();
+    api.createLabel = async () => {
+      throw "string error";
+    };
+    const q = new Queue(api, "queue", false, nop);
+    await expect(q.setupLabels()).rejects.toThrow();
+  });
+
+  it("handles createLabel error with null", async () => {
+    const api = newMockAPI();
+    api.createLabel = async () => {
+      throw null;
+    };
+    const q = new Queue(api, "queue", false, nop);
+    await expect(q.setupLabels()).rejects.toThrow();
+  });
+
+  it("handles createLabel error with non-array errors field", async () => {
+    const api = newMockAPI();
+    api.createLabel = async () => {
+      const err = new Error("Validation Failed") as Error & {
+        status: number;
+        response: { data: { errors: unknown } };
+      };
+      err.status = 422;
+      err.response = { data: { errors: "not an array" } };
+      throw err;
+    };
+    const q = new Queue(api, "queue", false, nop);
+    await expect(q.setupLabels()).rejects.toThrow();
+  });
+
+  it("handles createLabel error with array but no already_exists code", async () => {
+    const api = newMockAPI();
+    api.createLabel = async () => {
+      const err = new Error("Validation Failed") as Error & {
+        status: number;
+        response: { data: { errors: { code: string }[] } };
+      };
+      err.status = 422;
+      err.response = { data: { errors: [{ code: "something_else" }] } };
+      throw err;
+    };
+    const q = new Queue(api, "queue", false, nop);
+    await expect(q.setupLabels()).rejects.toThrow();
   });
 });
 
