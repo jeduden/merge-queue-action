@@ -1014,7 +1014,6 @@ export async function runBisect(
           });
         } catch (err) {
           for (const n of right) {
-            if (excluded.has(n)) continue;
             try {
               await q.requeue(prMap.get(n)!);
             } catch (reqErr) {
@@ -1064,9 +1063,8 @@ export async function runBisect(
           log,
         );
       }
-      // Requeue right half (skip conflicted PRs)
+      // Requeue right half (not yet tested)
       for (const n of right) {
-        if (excluded.has(n)) continue;
         try {
           await q.requeue(prMap.get(n)!);
         } catch (err) {
@@ -1109,9 +1107,8 @@ export async function runBisect(
           );
         }
       }
-      // Requeue right half (skip conflicted PRs) since it hasn't been tested yet
+      // Requeue right half since it hasn't been tested yet
       for (const n of right) {
-        if (excluded.has(n)) continue;
         try {
           await q.requeue(prMap.get(n)!);
         } catch (err) {
