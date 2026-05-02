@@ -327,6 +327,42 @@ describe("GitOps with injected exec", () => {
     expect(abortCall).toBeDefined();
   });
 
+  it("mergeBranch returns false when git commit fails with conflicts", async () => {
+    const { octokit } = makeFakeOctokit();
+    const execCalls: string[][] = [];
+    const exec: Exec = async (args) => {
+      execCalls.push(args);
+      // merge --no-commit exits 0 (merge staged successfully)
+      const mergeIdx = args.indexOf("merge");
+      if (mergeIdx >= 0 && args.includes("--no-commit")) {
+        return { code: 0, stdout: "", stderr: "" };
+      }
+      // MERGE_HEAD exists — merge is in progress
+      if (args[0] === "rev-parse" && args.includes("MERGE_HEAD")) {
+        return { code: 0, stdout: "abc1234\n", stderr: "" };
+      }
+      // commit step fails (e.g., pre-commit hook adds conflicting changes)
+      if (args.includes("commit")) {
+        return { code: 1, stdout: "", stderr: "error: commit failed" };
+      }
+      // Check for unresolved conflicts with `git ls-files -u`
+      if (args[0] === "ls-files" && args[1] === "-u") {
+        // Conflicts exist in index — treat as merge conflict
+        return { code: 0, stdout: "100644 abc123 1\tconflicted.txt\n", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    const ok = await ops.mergeBranch("batch", "sha-1", "msg");
+    expect(ok).toBe(false);
+    // merge --abort must be attempted to clean up the staged merge state.
+    const abortCall = execCalls.find(
+      (c) => c[0] === "merge" && c[1] === "--abort",
+    );
+    expect(abortCall).toBeDefined();
+  });
+
   it("mergeBranch falls back to git reset --hard HEAD when git merge --abort also fails after commit failure", async () => {
     const { octokit } = makeFakeOctokit();
     const execCalls: string[][] = [];
