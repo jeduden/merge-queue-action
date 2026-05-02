@@ -236,12 +236,11 @@ describe("CreateAndMerge", () => {
     expect(result.merged.map((p) => p.number)).toEqual([1]);
   });
 
-  it("routes status through a custom Reporter (withScope + info)", async () => {
+  it("routes status through a custom Reporter (withScope) and custom log", async () => {
     const git = newMockGit();
     const scopes: number[][] = [];
-    const infos: string[] = [];
     const customReporter = {
-      info: (msg: string) => infos.push(msg),
+      info: () => {},
       async warn() {},
       async withScope<T>(prs: number[], fn: () => Promise<T>) {
         scopes.push(prs);

@@ -190,7 +190,7 @@ describe("Activate", () => {
     expect(api.labels.get(1)).toContain("queue:active");
   });
 
-  it("returns non-404 RemoveLabel error", async () => {
+  it("propagates non-404 RemoveLabel error", async () => {
     const api = newMockAPI();
     api.labels.set(1, ["queue"]);
     api.removeLabelErr = new Mock500Error();
@@ -203,7 +203,7 @@ describe("Activate", () => {
     ).rejects.toThrow();
   });
 
-  it("returns non-404 error when removing failed label", async () => {
+  it("propagates non-404 error when removing failed label", async () => {
     const api = newMockAPI();
     api.labels.set(1, ["queue", "queue:failed"]);
 
@@ -269,7 +269,7 @@ describe("MarkFailed", () => {
     // Should not throw
   });
 
-  it("returns non-404 RemoveLabel error", async () => {
+  it("propagates non-404 RemoveLabel error", async () => {
     const api = newMockAPI();
     api.labels.set(1, ["queue:active"]);
     api.removeLabelErr = new Mock500Error();
@@ -283,7 +283,7 @@ describe("MarkFailed", () => {
     ).rejects.toThrow();
   });
 
-  it("returns non-404 error when removing pending label", async () => {
+  it("propagates non-404 error when removing pending label", async () => {
     const api = newMockAPI();
     api.labels.set(1, ["queue:active", "queue"]);
 
@@ -354,7 +354,7 @@ describe("Requeue", () => {
     expect(api.labels.get(1)).toContain("queue");
   });
 
-  it("returns non-404 RemoveLabel error", async () => {
+  it("propagates non-404 RemoveLabel error", async () => {
     const api = newMockAPI();
     api.labels.set(1, ["queue:active"]);
     api.removeLabelErr = new Mock500Error();
@@ -371,7 +371,7 @@ describe("Requeue", () => {
     ).rejects.toThrow();
   });
 
-  it("returns non-404 error when removing failed label", async () => {
+  it("propagates non-404 error when removing failed label", async () => {
     const api = newMockAPI();
     api.labels.set(1, ["queue:active", "queue:failed"]);
 
