@@ -307,3 +307,18 @@ describe("CompleteMerge", () => {
     ).rejects.toThrow();
   });
 });
+
+describe("Constructor defaults", () => {
+  it("uses default log function when not provided", async () => {
+    const git = newMockGit();
+    // Create Batch without log parameter to test default
+    const b = new Batch(git, false);
+    const prs: BatchPR[] = [
+      { number: 1, headRef: "feature-a", headSHA: "sha-a", title: "A" },
+    ];
+
+    const result = await b.createAndMerge("test", prs);
+    // Should succeed without errors even though no log function provided
+    expect(result.merged).toHaveLength(1);
+  });
+});

@@ -238,6 +238,28 @@ describe("Activate", () => {
     expect(api.labels.get(1)).not.toContain("queue:failed");
     expect(api.labels.get(1)).not.toContain("queue");
   });
+
+  it("throws on non-404 error when removing failed label", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue", "queue:failed"]);
+    let callCount = 0;
+    const origRemove = api.removeLabel.bind(api);
+    api.removeLabel = async (n: number, label: string) => {
+      callCount++;
+      // First call (removing pending) succeeds, second call (removing failed) fails
+      if (callCount === 2) {
+        throw new Mock500Error();
+      }
+      return origRemove(n, label);
+    };
+
+    const q = new Queue(api, "queue", false, nop);
+    await expect(
+      q.activate([
+        { number: 1, headRef: "", headSHA: "", title: "", createdAt: 0 },
+      ]),
+    ).rejects.toThrow("server error");
+  });
 });
 
 describe("MarkFailed", () => {
@@ -256,6 +278,20 @@ describe("MarkFailed", () => {
     expect(api.comments.size).toBe(0);
   });
 
+  it("does nothing in dry-run mode", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:active"]);
+
+    const q = new Queue(api, "queue", true, nop);
+    await q.markFailed(
+      { number: 1, headRef: "", headSHA: "", title: "", createdAt: 0 },
+      "test",
+    );
+
+    // Labels should not change in dry-run
+    expect(api.labels.get(1)).toEqual(["queue:active"]);
+  });
+
   it("ignores RemoveLabel 404", async () => {
     const api = newMockAPI();
     api.labels.set(1, ["queue:active"]);
@@ -269,7 +305,7 @@ describe("MarkFailed", () => {
     // Should not throw
   });
 
-  it("propagates non-404 RemoveLabel error", async () => {
+  it("throws on non-404 RemoveLabel error when removing active label", async () => {
     const api = newMockAPI();
     api.labels.set(1, ["queue:active"]);
     api.removeLabelErr = new Mock500Error();
@@ -280,20 +316,21 @@ describe("MarkFailed", () => {
         { number: 1, headRef: "", headSHA: "", title: "", createdAt: 0 },
         "test",
       ),
-    ).rejects.toThrow();
+    ).rejects.toThrow("server error");
   });
 
-  it("propagates non-404 error when removing pending label", async () => {
+  it("throws on non-404 RemoveLabel error when removing pending label", async () => {
     const api = newMockAPI();
-    api.labels.set(1, ["queue:active", "queue"]);
-
-    // Override removeLabel to throw error only for the pending label
-    const origRemoveLabel = api.removeLabel.bind(api);
-    api.removeLabel = async (prNumber: number, label: string) => {
-      if (label === "queue") {
+    api.labels.set(1, ["queue"]);
+    let callCount = 0;
+    const origRemove = api.removeLabel.bind(api);
+    api.removeLabel = async (n: number, label: string) => {
+      callCount++;
+      // First call (removing active) succeeds, second call (removing pending) fails
+      if (callCount === 2) {
         throw new Mock500Error();
       }
-      return origRemoveLabel(prNumber, label);
+      return origRemove(n, label);
     };
 
     const q = new Queue(api, "queue", false, nop);
@@ -302,7 +339,7 @@ describe("MarkFailed", () => {
         { number: 1, headRef: "", headSHA: "", title: "", createdAt: 0 },
         "test",
       ),
-    ).rejects.toThrow();
+    ).rejects.toThrow("server error");
   });
 
   it("does not modify labels in dry run", async () => {
@@ -338,6 +375,23 @@ describe("Requeue", () => {
     expect(api.comments.size).toBe(0);
   });
 
+  it("does nothing in dry-run mode", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:active"]);
+
+    const q = new Queue(api, "queue", true, nop);
+    await q.requeue({
+      number: 1,
+      headRef: "",
+      headSHA: "",
+      title: "",
+      createdAt: 0,
+    });
+
+    // Labels should not change in dry-run
+    expect(api.labels.get(1)).toEqual(["queue:active"]);
+  });
+
   it("ignores RemoveLabel 404", async () => {
     const api = newMockAPI();
     api.labels.set(1, ["queue:active"]);
@@ -354,7 +408,7 @@ describe("Requeue", () => {
     expect(api.labels.get(1)).toContain("queue");
   });
 
-  it("propagates non-404 RemoveLabel error", async () => {
+  it("throws on non-404 RemoveLabel error when removing active label", async () => {
     const api = newMockAPI();
     api.labels.set(1, ["queue:active"]);
     api.removeLabelErr = new Mock500Error();
@@ -368,20 +422,21 @@ describe("Requeue", () => {
         title: "",
         createdAt: 0,
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow("server error");
   });
 
-  it("propagates non-404 error when removing failed label", async () => {
+  it("throws on non-404 RemoveLabel error when removing failed label", async () => {
     const api = newMockAPI();
-    api.labels.set(1, ["queue:active", "queue:failed"]);
-
-    // Override removeLabel to throw error only for the failed label
-    const origRemoveLabel = api.removeLabel.bind(api);
-    api.removeLabel = async (prNumber: number, label: string) => {
-      if (label === "queue:failed") {
+    api.labels.set(1, ["queue:failed"]);
+    let callCount = 0;
+    const origRemove = api.removeLabel.bind(api);
+    api.removeLabel = async (n: number, label: string) => {
+      callCount++;
+      // First call (removing active) succeeds, second call (removing failed) fails
+      if (callCount === 2) {
         throw new Mock500Error();
       }
-      return origRemoveLabel(prNumber, label);
+      return origRemove(n, label);
     };
 
     const q = new Queue(api, "queue", false, nop);
@@ -393,24 +448,7 @@ describe("Requeue", () => {
         title: "",
         createdAt: 0,
       }),
-    ).rejects.toThrow();
-  });
-
-  it("does not modify labels in dry run", async () => {
-    const api = newMockAPI();
-    api.labels.set(3, ["queue:active"]);
-
-    const q = new Queue(api, "queue", true, nop);
-    await q.requeue({
-      number: 3,
-      headRef: "",
-      headSHA: "",
-      title: "",
-      createdAt: 0,
-    });
-
-    // In dry run, labels should not be modified
-    expect(api.labels.get(3)).toEqual(["queue:active"]);
+    ).rejects.toThrow("server error");
   });
 });
 
@@ -455,18 +493,18 @@ describe("SetupLabels", () => {
     await expect(q.setupLabels()).rejects.toThrow();
   });
 
-  it("does not create labels in dry run", async () => {
+  it("does not create labels in dry-run mode", async () => {
     const api = newMockAPI();
     const q = new Queue(api, "queue", true, nop);
     await q.setupLabels();
-    // In dry run, no labels should be created
+
     expect(api.createdLabels).toHaveLength(0);
   });
 
   it("handles createLabel error with non-object", async () => {
     const api = newMockAPI();
     api.createLabel = async () => {
-      throw "string error";  // Non-object error
+      throw "string error";
     };
     const q = new Queue(api, "queue", false, nop);
     await expect(q.setupLabels()).rejects.toThrow();
@@ -475,7 +513,7 @@ describe("SetupLabels", () => {
   it("handles createLabel error with null", async () => {
     const api = newMockAPI();
     api.createLabel = async () => {
-      throw null;  // null error
+      throw null;
     };
     const q = new Queue(api, "queue", false, nop);
     await expect(q.setupLabels()).rejects.toThrow();
@@ -525,4 +563,116 @@ describe("queueLabel", () => {
       expect(queueLabel(tt.base, tt.state)).toBe(tt.want);
     });
   }
+});
+
+describe("Constructor defaults", () => {
+  it("uses default log function when not provided", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [
+      { number: 1, headRef: "", headSHA: "", title: "", createdAt: 100 },
+    ]);
+    // Create Queue without log parameter to test default
+    const q = new Queue(api, "queue", false);
+    const prs = await q.collect(0);
+    // Should succeed without errors even though no log function provided
+    expect(prs).toHaveLength(1);
+  });
+});
+
+describe("isAlreadyExistsError edge cases", () => {
+  it("returns false for null", async () => {
+    const api = newMockAPI();
+    const origCreate = api.createLabel.bind(api);
+    api.createLabel = async (name: string, color: string, desc: string) => {
+      if (name === "queue") {
+        const err = null as unknown as Error;
+        throw err;
+      }
+      return origCreate(name, color, desc);
+    };
+
+    const q = new Queue(api, "queue", false, nop);
+    await expect(q.setupLabels()).rejects.toBeNull();
+  });
+
+  it("returns false for error without response field", async () => {
+    const api = newMockAPI();
+    const origCreate = api.createLabel.bind(api);
+    api.createLabel = async (name: string, color: string, desc: string) => {
+      if (name === "queue") {
+        const err = new Error("test") as Error & { status: number };
+        err.status = 422;
+        throw err;
+      }
+      return origCreate(name, color, desc);
+    };
+
+    const q = new Queue(api, "queue", false, nop);
+    await expect(q.setupLabels()).rejects.toThrow();
+  });
+
+  it("returns false for error with non-array errors field", async () => {
+    const api = newMockAPI();
+    const origCreate = api.createLabel.bind(api);
+    api.createLabel = async (name: string, color: string, desc: string) => {
+      if (name === "queue") {
+        const err = new Error("test") as Error & {
+          status: number;
+          response: { data: { errors: string } };
+        };
+        err.status = 422;
+        err.response = { data: { errors: "not an array" } };
+        throw err;
+      }
+      return origCreate(name, color, desc);
+    };
+
+    const q = new Queue(api, "queue", false, nop);
+    await expect(q.setupLabels()).rejects.toThrow();
+  });
+
+  it("returns false when errors array has no already_exists code", async () => {
+    const api = newMockAPI();
+    const origCreate = api.createLabel.bind(api);
+    api.createLabel = async (name: string, color: string, desc: string) => {
+      if (name === "queue") {
+        const err = new Error("test") as Error & {
+          status: number;
+          response: { data: { errors: { code: string }[] } };
+        };
+        err.status = 422;
+        err.response = { data: { errors: [{ code: "other_error" }] } };
+        throw err;
+      }
+      return origCreate(name, color, desc);
+    };
+
+    const q = new Queue(api, "queue", false, nop);
+    await expect(q.setupLabels()).rejects.toThrow();
+  });
+
+  it("returns true when already_exists is in second position of errors array", async () => {
+    const api = newMockAPI();
+    const origCreate = api.createLabel.bind(api);
+    api.createLabel = async (name: string, color: string, desc: string) => {
+      if (name === "queue") {
+        const err = new Error("Validation Failed") as Error & {
+          status: number;
+          response: { data: { errors: { code: string }[] } };
+        };
+        err.status = 422;
+        err.response = {
+          data: {
+            errors: [{ code: "other_error" }, { code: "already_exists" }],
+          },
+        };
+        throw err;
+      }
+      return origCreate(name, color, desc);
+    };
+
+    const q = new Queue(api, "queue", false, nop);
+    await q.setupLabels(); // should not throw
+    expect(api.createdLabels).toHaveLength(2); // queue:active and queue:failed created
+  });
 });

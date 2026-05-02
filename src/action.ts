@@ -1014,7 +1014,6 @@ export async function runBisect(
           });
         } catch (err) {
           for (const n of right) {
-            if (excluded.has(n)) continue;
             try {
               await q.requeue(prMap.get(n)!);
             } catch (reqErr) {
@@ -1064,13 +1063,12 @@ export async function runBisect(
           log,
         );
       }
-      // Requeue right half (skip any already marked failed)
+      // Requeue right half (not yet tested)
       for (const n of right) {
-        if (excluded.has(n)) continue;
         try {
           await q.requeue(prMap.get(n)!);
         } catch (err) {
-          log(`Warning: failed to requeue PR #${n}: ${err}`);
+          log(`Warning: failed to requeue PR #${n}: ${errorMessage(err)}`);
         }
       }
     } else {
@@ -1107,6 +1105,14 @@ export async function runBisect(
           throw new Error(
             `dispatching follow-up bisect: ${formatErrorForComment(err)}`,
           );
+        }
+      }
+      // Requeue right half since it hasn't been tested yet
+      for (const n of right) {
+        try {
+          await q.requeue(prMap.get(n)!);
+        } catch (err) {
+          log(`Warning: failed to requeue PR #${n}: ${errorMessage(err)}`);
         }
       }
     }
