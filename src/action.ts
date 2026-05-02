@@ -1064,13 +1064,13 @@ export async function runBisect(
           log,
         );
       }
-      // Requeue right half (skip any already marked failed)
+      // Requeue right half (skip conflicted PRs)
       for (const n of right) {
         if (excluded.has(n)) continue;
         try {
           await q.requeue(prMap.get(n)!);
         } catch (err) {
-          log(`Warning: failed to requeue PR #${n}: ${err}`);
+          log(`Warning: failed to requeue PR #${n}: ${errorMessage(err)}`);
         }
       }
     } else {
@@ -1109,13 +1109,13 @@ export async function runBisect(
           );
         }
       }
-      // Requeue right half (skip any already marked failed) since it hasn't been tested yet
+      // Requeue right half (skip conflicted PRs) since it hasn't been tested yet
       for (const n of right) {
         if (excluded.has(n)) continue;
         try {
           await q.requeue(prMap.get(n)!);
         } catch (err) {
-          log(`Warning: failed to requeue PR #${n}: ${err}`);
+          log(`Warning: failed to requeue PR #${n}: ${errorMessage(err)}`);
         }
       }
     }

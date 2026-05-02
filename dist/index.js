@@ -38396,7 +38396,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
             if (!cfg.dryRun) {
                 await postComment(api, pr.number, commentCIFailed(ctx, ciRunUrl, true), log);
             }
-            // Requeue right half (skip any already marked failed)
+            // Requeue right half (skip conflicted PRs)
             for (const n of right) {
                 if (excluded.has(n))
                     continue;
@@ -38404,7 +38404,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
                     await q.requeue(prMap.get(n));
                 }
                 catch (err) {
-                    log(`Warning: failed to requeue PR #${n}: ${err}`);
+                    log(`Warning: failed to requeue PR #${n}: ${errorMessage(err)}`);
                 }
             }
         }
@@ -38437,7 +38437,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
                     throw new Error(`dispatching follow-up bisect: ${formatErrorForComment(err)}`);
                 }
             }
-            // Requeue right half (skip any already marked failed) since it hasn't been tested yet
+            // Requeue right half (skip conflicted PRs) since it hasn't been tested yet
             for (const n of right) {
                 if (excluded.has(n))
                     continue;
@@ -38445,7 +38445,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
                     await q.requeue(prMap.get(n));
                 }
                 catch (err) {
-                    log(`Warning: failed to requeue PR #${n}: ${err}`);
+                    log(`Warning: failed to requeue PR #${n}: ${errorMessage(err)}`);
                 }
             }
         }

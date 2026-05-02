@@ -2448,6 +2448,11 @@ describe("runBisect", () => {
     const cfg = baseCfg({ batchPrs: "[1,2,3,4]", dryRun: false });
     const logs: string[] = [];
 
+    // Initialize PRs with queue:active labels to verify state transition
+    for (const n of [1, 2, 3, 4]) {
+      api.labels.set(n, ["queue:active"]);
+    }
+
     process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
     try {
       await runBisect(api, git, cfg, (m) => logs.push(m));
@@ -2465,7 +2470,39 @@ describe("runBisect", () => {
     expect(api.labels.get(3)).toContain("queue");
     expect(api.labels.get(4)).toContain("queue");
 
+    // Verify queue:active was removed during requeue
+    expect(api.labels.get(3)).not.toContain("queue:active");
+    expect(api.labels.get(4)).not.toContain("queue:active");
+
     expect(logs.some((l) => l.includes("Left half failed, splitting further"))).toBe(true);
+  });
+
+  it("warns when requeue fails for right half after left fails with multiple PRs", async () => {
+    const api = newMockAPI();
+    // 4 PRs: left=[1,2], right=[3,4]
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3), makePR(4)]);
+    api.ciConclusion = "failure"; // Left half [1,2] fails
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2,3,4]", dryRun: false });
+    const logs: string[] = [];
+
+    // Make requeue fail for right-half PRs
+    api.addLabel = async (n, label) => {
+      if (label === "queue" && (n === 3 || n === 4)) {
+        throw new Error("addLabel failed");
+      }
+    };
+
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await runBisect(api, git, cfg, (m) => logs.push(m));
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
+
+    // Should log warnings for failed requeues
+    expect(logs.some((l) => l.includes("Warning: failed to requeue PR #3"))).toBe(true);
+    expect(logs.some((l) => l.includes("Warning: failed to requeue PR #4"))).toBe(true);
   });
 });
 
