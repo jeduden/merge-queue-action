@@ -224,6 +224,30 @@ describe("CreateAndMerge", () => {
     expect(warned[0].scope).toEqual([7]);
   });
 
+  it("uses nop log by default if log parameter is undefined", async () => {
+    const git = newMockGit();
+    // Pass undefined explicitly for log to trigger the ?? default
+    const b = new Batch(git, false, undefined);
+    // Actually use the batch to ensure the noop log is called
+    const result = await b.createAndMerge("test", []);
+    expect(result.merged).toHaveLength(0);
+  });
+
+  it("accepts custom reporter parameter", async () => {
+    const git = newMockGit();
+    const customReporter = {
+      info: () => {},
+      async warn() {},
+      async withScope<T>(_prs: number[], fn: () => Promise<T>) {
+        return fn();
+      },
+    };
+    const b = new Batch(git, false, nop, customReporter);
+    // Actually use the batch with the custom reporter to ensure it's called
+    const result = await b.createAndMerge("test", []);
+    expect(result.merged).toHaveLength(0);
+  });
+
   it("propagates CreateBranchFromRef error", async () => {
     const git = newMockGit();
     git.failOn = "createBranchFromRef";

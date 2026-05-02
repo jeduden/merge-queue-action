@@ -384,6 +384,43 @@ export class GitOps implements GitOperator {
     return hookResult;
   }
 
+  /**
+   * Cleans up a conflicted merge by running `git merge --abort`, falling back
+   * to `git reset --hard HEAD` if abort fails. Returns false to indicate a
+   * merge conflict.
+   */
+  private async cleanupConflictedMergeAndReturnFalse(): Promise<false> {
+    const abort = await this.git(["merge", "--abort"]);
+    if (abort.code !== 0) {
+      const reset = await this.git(["reset", "--hard", "HEAD"]);
+      if (reset.code !== 0) {
+        throw new Error(
+          `failed to clean up conflicted merge: both \`git merge --abort\` and \`git reset --hard HEAD\` failed; worktree is in an unknown state. abort stderr: ${abort.stderr.trim()}; reset stderr: ${reset.stderr.trim()}`,
+        );
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Cleans up a failed merge by running `git merge --abort`, falling back
+   * to `git reset --hard HEAD` if abort fails. Returns cleanup details for
+   * inclusion in an error message.
+   */
+  private async cleanupFailedMergeAndGetDetail(): Promise<string> {
+    const abort = await this.git(["merge", "--abort"]);
+    let cleanupDetail = "";
+    if (abort.code !== 0) {
+      const reset = await this.git(["reset", "--hard", "HEAD"]);
+      if (reset.code !== 0) {
+        cleanupDetail = ` Cleanup failed: git merge --abort (exit ${abort.code}): ${abort.stderr.trim() || abort.stdout.trim()}; git reset --hard HEAD (exit ${reset.code}): ${reset.stderr.trim() || reset.stdout.trim()}`;
+      } else {
+        cleanupDetail = ` Cleanup fallback succeeded after git merge --abort failed (exit ${abort.code}): ${abort.stderr.trim() || abort.stdout.trim()}`;
+      }
+    }
+    return cleanupDetail;
+  }
+
   async mergeBranch(
     branch: string,
     sourceRef: string,
@@ -503,32 +540,14 @@ export class GitOps implements GitOperator {
         this.log(
           `pre-merge-commit hook failed to resolve conflicts (exit ${hookResult.code}). Unresolved files:\n${checkConflicts.stdout.trim()}`,
         );
-        const abort = await this.git(["merge", "--abort"]);
-        if (abort.code !== 0) {
-          const reset = await this.git(["reset", "--hard", "HEAD"]);
-          if (reset.code !== 0) {
-            throw new Error(
-              `failed to clean up conflicted merge: both \`git merge --abort\` and \`git reset --hard HEAD\` failed; worktree is in an unknown state. abort stderr: ${abort.stderr.trim()}; reset stderr: ${reset.stderr.trim()}`,
-            );
-          }
-        }
-        return false;
+        return await this.cleanupConflictedMergeAndReturnFalse();
       }
 
       // No conflicts, but hook still failed. This is an unexpected error.
       this.log(
         `pre-merge-commit hook rejected merge (exit ${hookResult.code})`,
       );
-      const abort = await this.git(["merge", "--abort"]);
-      let cleanupDetail = "";
-      if (abort.code !== 0) {
-        const reset = await this.git(["reset", "--hard", "HEAD"]);
-        if (reset.code !== 0) {
-          cleanupDetail = ` Cleanup failed: git merge --abort (exit ${abort.code}): ${abort.stderr.trim() || abort.stdout.trim()}; git reset --hard HEAD (exit ${reset.code}): ${reset.stderr.trim() || reset.stdout.trim()}`;
-        } else {
-          cleanupDetail = ` Cleanup fallback succeeded after git merge --abort failed (exit ${abort.code}): ${abort.stderr.trim() || abort.stdout.trim()}`;
-        }
-      }
+      const cleanupDetail = await this.cleanupFailedMergeAndGetDetail();
       throw new Error(
         `pre-merge-commit hook failed (exit ${hookResult.code}): ${hookResult.stderr.trim() || hookResult.stdout.trim()}${cleanupDetail}`,
       );
@@ -551,16 +570,7 @@ export class GitOps implements GitOperator {
         this.log(
           `Merge conflicts remain unresolved after pre-merge-commit hook. Unresolved files:\n${checkConflicts.stdout.trim()}`,
         );
-        const abort = await this.git(["merge", "--abort"]);
-        if (abort.code !== 0) {
-          const reset = await this.git(["reset", "--hard", "HEAD"]);
-          if (reset.code !== 0) {
-            throw new Error(
-              `failed to clean up conflicted merge: both \`git merge --abort\` and \`git reset --hard HEAD\` failed; worktree is in an unknown state. abort stderr: ${abort.stderr.trim()}; reset stderr: ${reset.stderr.trim()}`,
-            );
-          }
-        }
-        return false;
+        return await this.cleanupConflictedMergeAndReturnFalse();
       }
 
       // Conflicts were resolved by merge drivers and/or hook!
@@ -601,16 +611,7 @@ export class GitOps implements GitOperator {
         this.log(
           `git commit failed due to unresolved conflicts (exit ${commit.code}). Unresolved files:\n${checkConflicts.stdout.trim()}`,
         );
-        const abort = await this.git(["merge", "--abort"]);
-        if (abort.code !== 0) {
-          const reset = await this.git(["reset", "--hard", "HEAD"]);
-          if (reset.code !== 0) {
-            throw new Error(
-              `failed to clean up conflicted merge: both \`git merge --abort\` and \`git reset --hard HEAD\` failed; worktree is in an unknown state. abort stderr: ${abort.stderr.trim()}; reset stderr: ${reset.stderr.trim()}`,
-            );
-          }
-        }
-        return false;
+        return await this.cleanupConflictedMergeAndReturnFalse();
       }
 
       // No conflicts, but commit still failed. This is an unexpected error
@@ -620,16 +621,7 @@ export class GitOps implements GitOperator {
       this.log(
         `git commit rejected merge (exit ${commit.code})`,
       );
-      const abort = await this.git(["merge", "--abort"]);
-      let cleanupDetail = "";
-      if (abort.code !== 0) {
-        const reset = await this.git(["reset", "--hard", "HEAD"]);
-        if (reset.code !== 0) {
-          cleanupDetail = ` Cleanup failed: git merge --abort (exit ${abort.code}): ${abort.stderr.trim() || abort.stdout.trim()}; git reset --hard HEAD (exit ${reset.code}): ${reset.stderr.trim() || reset.stdout.trim()}`;
-        } else {
-          cleanupDetail = ` Cleanup fallback succeeded after git merge --abort failed (exit ${abort.code}): ${abort.stderr.trim() || abort.stdout.trim()}`;
-        }
-      }
+      const cleanupDetail = await this.cleanupFailedMergeAndGetDetail();
       throw new Error(
         `git commit after successful merge failed (exit ${commit.code}): ${commit.stderr.trim() || commit.stdout.trim()}${cleanupDetail}`,
       );
