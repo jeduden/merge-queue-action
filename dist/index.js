@@ -37326,11 +37326,36 @@ class GitOps {
             commitMsg,
         ]);
         if (commit.code !== 0) {
-            // Hook failure, empty commit, or other commit-time error. Unlike
-            // a merge conflict (exit 1 from merge), this is unexpected and
-            // indicates misconfiguration or a broken hook. Best-effort clean
-            // up any in-progress merge state before surfacing the error so
-            // later steps do not inherit a dirty worktree.
+            // Commit failed. This could be due to:
+            // 1. Unresolved conflicts that weren't caught earlier (rare, but possible
+            //    if git commit hooks add conflicting changes)
+            // 2. Hook failure (e.g., pre-commit hook rejects the commit)
+            // 3. Empty commit or other commit-time error
+            //
+            // Check if conflicts exist in the index. If so, this is a legitimate
+            // merge conflict (return false). If not, it's an unexpected error (throw).
+            const checkConflicts = await this.git(["ls-files", "-u"]);
+            if (checkConflicts.code !== 0) {
+                throw new Error(`git ls-files -u failed (exit ${checkConflicts.code}): ${checkConflicts.stderr.trim() || checkConflicts.stdout.trim()}`);
+            }
+            const hasUnresolvedConflicts = checkConflicts.stdout.trim().length > 0;
+            if (hasUnresolvedConflicts) {
+                // Conflicts exist. Clean up and return false (treat as merge conflict).
+                this.log(`git commit failed due to unresolved conflicts (exit ${commit.code}). Unresolved files:\n${checkConflicts.stdout.trim()}`);
+                const abort = await this.git(["merge", "--abort"]);
+                if (abort.code !== 0) {
+                    const reset = await this.git(["reset", "--hard", "HEAD"]);
+                    if (reset.code !== 0) {
+                        throw new Error(`failed to clean up conflicted merge: both \`git merge --abort\` and \`git reset --hard HEAD\` failed; worktree is in an unknown state. abort stderr: ${abort.stderr.trim()}; reset stderr: ${reset.stderr.trim()}`);
+                    }
+                }
+                return false;
+            }
+            // No conflicts, but commit still failed. This is an unexpected error
+            // indicating misconfiguration or a broken hook. Best-effort clean up
+            // any in-progress merge state before surfacing the error so later
+            // steps do not inherit a dirty worktree.
+            this.log(`git commit rejected merge (exit ${commit.code})`);
             const abort = await this.git(["merge", "--abort"]);
             let cleanupDetail = "";
             if (abort.code !== 0) {
