@@ -99,17 +99,17 @@ describe("Queue", () => {
     expect(q).toBeDefined();
   });
 
-  it("accepts custom log function", async () => {
+  it("routes log output through custom log function", async () => {
     const api = newMockAPI();
     const logged: string[] = [];
     const customLog = (msg: string) => logged.push(msg);
     const q = new Queue(api, "queue", false, customLog);
-    // Actually use the queue to trigger log calls
-    api.prs.set("queue", [
+    // activate() logs label transitions, so it exercises the custom log.
+    api.labels.set(1, ["queue"]);
+    await q.activate([
       { number: 1, headRef: "", headSHA: "", title: "", createdAt: 100 },
     ]);
-    await q.collect(10);
-    expect(q).toBeDefined();
+    expect(logged.length).toBeGreaterThan(0);
   });
 });
 
@@ -188,19 +188,6 @@ describe("Activate", () => {
       { number: 1, headRef: "", headSHA: "", title: "", createdAt: 0 },
     ]);
     expect(api.labels.get(1)).toContain("queue:active");
-  });
-
-  it("returns non-404 RemoveLabel error", async () => {
-    const api = newMockAPI();
-    api.labels.set(1, ["queue"]);
-    api.removeLabelErr = new Mock500Error();
-
-    const q = new Queue(api, "queue", false, nop);
-    await expect(
-      q.activate([
-        { number: 1, headRef: "", headSHA: "", title: "", createdAt: 0 },
-      ]),
-    ).rejects.toThrow();
   });
 
   it("returns non-404 RemoveLabel error", async () => {

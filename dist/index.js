@@ -37177,7 +37177,7 @@ class GitOps {
         if (abort.code !== 0) {
             const reset = await this.git(["reset", "--hard", "HEAD"]);
             if (reset.code !== 0) {
-                throw new Error(`failed to clean up conflicted merge: both \`git merge --abort\` and \`git reset --hard HEAD\` failed; worktree is in an unknown state. abort stderr: ${abort.stderr.trim()}; reset stderr: ${reset.stderr.trim()}`);
+                throw new Error(`failed to clean up conflicted merge: both \`git merge --abort\` and \`git reset --hard HEAD\` failed; worktree is in an unknown state. abort: ${abort.stderr.trim() || abort.stdout.trim()}; reset: ${reset.stderr.trim() || reset.stdout.trim()}`);
             }
         }
         return false;
@@ -37346,7 +37346,10 @@ class GitOps {
             // merge conflict (return false). If not, it's an unexpected error (throw).
             const checkConflicts = await this.git(["ls-files", "-u"]);
             if (checkConflicts.code !== 0) {
-                throw new Error(`git ls-files -u failed (exit ${checkConflicts.code}): ${checkConflicts.stderr.trim() || checkConflicts.stdout.trim()}`);
+                // ls-files itself failed; we can't classify the failure. Best-effort
+                // cleanup so later steps don't inherit a dirty worktree, then throw.
+                const cleanupDetail = await this.cleanupFailedMergeAndGetDetail();
+                throw new Error(`git ls-files -u failed (exit ${checkConflicts.code}): ${checkConflicts.stderr.trim() || checkConflicts.stdout.trim()}${cleanupDetail}`);
             }
             const hasUnresolvedConflicts = checkConflicts.stdout.trim().length > 0;
             if (hasUnresolvedConflicts) {

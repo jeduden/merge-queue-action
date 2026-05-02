@@ -224,28 +224,40 @@ describe("CreateAndMerge", () => {
     expect(warned[0].scope).toEqual([7]);
   });
 
-  it("uses nop log by default if log parameter is undefined", async () => {
+  it("defaults log to a nop when undefined and still exercises log call sites", async () => {
     const git = newMockGit();
-    // Pass undefined explicitly for log to trigger the ?? default
+    // Passing undefined for log must not throw when Batch internally calls
+    // this.log (e.g. "Creating batch branch ..."). A real merge path forces
+    // those log calls to execute.
     const b = new Batch(git, false, undefined);
-    // Actually use the batch to ensure the noop log is called
-    const result = await b.createAndMerge("test", []);
-    expect(result.merged).toHaveLength(0);
+    const result = await b.createAndMerge("test", [
+      { number: 1, headRef: "f", headSHA: "sha-f", title: "T" },
+    ]);
+    expect(result.merged.map((p) => p.number)).toEqual([1]);
   });
 
-  it("accepts custom reporter parameter", async () => {
+  it("routes status through a custom Reporter (withScope + info)", async () => {
     const git = newMockGit();
+    const scopes: number[][] = [];
+    const infos: string[] = [];
     const customReporter = {
-      info: () => {},
+      info: (msg: string) => infos.push(msg),
       async warn() {},
-      async withScope<T>(_prs: number[], fn: () => Promise<T>) {
+      async withScope<T>(prs: number[], fn: () => Promise<T>) {
+        scopes.push(prs);
         return fn();
       },
     };
-    const b = new Batch(git, false, nop, customReporter);
-    // Actually use the batch with the custom reporter to ensure it's called
-    const result = await b.createAndMerge("test", []);
-    expect(result.merged).toHaveLength(0);
+    const logs: string[] = [];
+    const b = new Batch(git, false, (m: string) => logs.push(m), customReporter);
+    const result = await b.createAndMerge("test", [
+      { number: 11, headRef: "f", headSHA: "sha-f", title: "T" },
+    ]);
+    expect(result.merged.map((p) => p.number)).toEqual([11]);
+    // Reporter.withScope was invoked with the batch's PR numbers.
+    expect(scopes).toEqual([[11]]);
+    // Custom log received output.
+    expect(logs.length).toBeGreaterThan(0);
   });
 
   it("propagates CreateBranchFromRef error", async () => {
