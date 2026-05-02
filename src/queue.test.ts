@@ -499,10 +499,10 @@ describe("SetupLabels", () => {
     api.createLabel = async () => {
       const err = new Error("Validation Failed") as Error & {
         status: number;
-        response: { data: { errors: string } };
+        response: { data: { errors: unknown } };
       };
       err.status = 422;
-      err.response = { data: { errors: "not an array" as any } };
+      err.response = { data: { errors: "not an array" } };
       throw err;
     };
     const q = new Queue(api, "queue", false, nop);
