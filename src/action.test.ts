@@ -4,6 +4,7 @@ import {
   hasWritePermission,
   selfWorkflowFile,
   parseBatchPrs,
+  isHttpConfigError,
   runProcess,
   runBisect,
   runSetup,
@@ -77,7 +78,9 @@ function newMockAPI(): FullAPI & {
     },
     async addLabel(prNumber: number, label: string): Promise<void> {
       const labels = mock.labels.get(prNumber) ?? [];
-      labels.push(label);
+      // GitHub's add-labels is idempotent; mirror that so repeated
+      // requeues/attempt-label bumps don't accumulate duplicates.
+      if (!labels.includes(label)) labels.push(label);
       mock.labels.set(prNumber, labels);
     },
     async removeLabel(prNumber: number, label: string): Promise<void> {
@@ -206,6 +209,62 @@ describe("hasWritePermission", () => {
     ["", false],
   ])("%s -> %s", (perm, want) => {
     expect(hasWritePermission(perm)).toBe(want);
+  });
+});
+
+describe("isHttpConfigError", () => {
+  const withStatus = (status: number, extra: object = {}) =>
+    Object.assign(new Error("x"), { status, ...extra });
+
+  it.each([
+    [404, true],
+    [422, true],
+    [401, true],
+    [403, true], // plain 403 = missing permission = permanent
+    [429, false],
+    [500, false],
+    [502, false],
+  ])("status %s → permanent=%s", (status, want) => {
+    expect(isHttpConfigError(withStatus(status))).toBe(want);
+  });
+
+  it("treats a secondary-rate-limit 403 as transient (retry-after header)", () => {
+    expect(
+      isHttpConfigError(
+        withStatus(403, { response: { headers: { "retry-after": "60" } } }),
+      ),
+    ).toBe(false);
+  });
+
+  it("treats an exhausted-quota 403 as transient (x-ratelimit-remaining: 0)", () => {
+    expect(
+      isHttpConfigError(
+        withStatus(403, {
+          response: { headers: { "x-ratelimit-remaining": "0" } },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("treats a rate-limit-message 403 as transient", () => {
+    expect(
+      isHttpConfigError(
+        Object.assign(new Error("You have exceeded a secondary rate limit"), {
+          status: 403,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("returns false for non-object / status-less errors", () => {
+    expect(isHttpConfigError("nope")).toBe(false);
+    expect(isHttpConfigError(null)).toBe(false);
+    expect(isHttpConfigError(new Error("no status"))).toBe(false);
+  });
+
+  it("treats a 403 with a non-string message as permanent (not rate-limited)", () => {
+    // Guards the non-string-message path in the rate-limit check.
+    expect(isHttpConfigError({ status: 403, message: 123 })).toBe(true);
   });
 });
 
@@ -995,6 +1054,41 @@ describe("runProcess", () => {
     }
   });
 
+  it("marks PRs failed (no requeue) when pushBranch throws ConfigurationError", async () => {
+    // Regression for the retry loop: a batch whose PR edits a workflow
+    // file is rejected by GitHub because the token lacks `workflow`
+    // scope. That push can never succeed, so the PR must be marked
+    // failed — NOT requeued, which re-adds the `queue` label and
+    // re-fires the `pull_request: labeled` trigger in a tight loop.
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+
+    git.pushBranch = async () => {
+      throw new ConfigurationError(
+        "merge-queue-action could not push the batch branch because the token lacks the GitHub Actions workflow scope",
+      );
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow();
+
+    // Marked failed, not requeued — the loop stops.
+    expect(api.labels.get(1)).toContain("queue:failed");
+    expect(api.labels.get(1)).not.toContain("queue");
+    // Leaked batch branch cleaned up.
+    expect(git.deleted.length).toBeGreaterThan(0);
+    // Operator gets an actionable config-error comment.
+    const c = api.comments.get(1) ?? [];
+    expect(
+      c.find(
+        (s) =>
+          s.includes("action misconfigured") &&
+          s.includes("workflow scope"),
+      ),
+    ).toBeDefined();
+  });
+
   it("cleans up and requeues on CI trigger failure with a transient error", async () => {
     const api = newMockAPI();
     api.prs.set("queue", [makePR(1)]);
@@ -1008,9 +1102,92 @@ describe("runProcess", () => {
     await expect(runProcess(api, git, cfg, nop)).rejects.toThrow(
       "triggering CI",
     );
-    // Transient error → branch cleaned up, PR requeued
+    // Transient error → branch cleaned up, PR requeued with attempt counter
     expect(git.deleted.length).toBeGreaterThan(0);
     expect(api.labels.get(1)).toContain("queue");
+    expect(api.labels.get(1)).toContain("queue:attempt-1");
+  });
+
+  it("gives up (marks failed, no requeue) once a PR hits the requeue cap", async () => {
+    // Backstop for the infinite-retry class: a stuck failure that error
+    // classification treats as transient must still stop after the cap,
+    // instead of re-adding the `queue` label and re-firing forever.
+    const api = newMockAPI();
+    const pr = { ...makePR(1), labels: ["queue:active", "queue:attempt-2"] };
+    api.prs.set("queue", [pr]);
+    api.labels.set(1, ["queue:active", "queue:attempt-2"]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false, maxRequeues: 2 }); // already at the cap
+    api.triggerWorkflow = async () => {
+      throw new Error("dispatch failed"); // transient-classified, but permanent here
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow();
+
+    // Cap reached → terminal failed state, NOT requeued → loop stops.
+    expect(api.labels.get(1)).toContain("queue:failed");
+    expect(api.labels.get(1)).not.toContain("queue");
+    expect(api.labels.get(1)).not.toContain("queue:attempt-2");
+    const c = api.comments.get(1) ?? [];
+    expect(c.find((s) => s.includes("gave up after 2 attempts"))).toBeDefined();
+  });
+
+  it("marks PR failed (fast, not requeued) when CI dispatch is forbidden (403)", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    api.triggerWorkflow = async () => {
+      throw Object.assign(new Error("Resource not accessible by integration"), {
+        status: 403,
+      });
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow("triggering CI");
+    // 403 permission is permanent → marked failed in one run, not requeued.
+    expect(api.labels.get(1)).toContain("queue:failed");
+    expect(api.labels.get(1)).not.toContain("queue");
+    const c = api.comments.get(1) ?? [];
+    expect(c.some((s) => s.includes("action misconfigured"))).toBe(true);
+    expect(c.some((s) => s.includes("actions: write"))).toBe(true);
+  });
+
+  it("requeues (not failed) on a secondary-rate-limit 403 during CI dispatch", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    api.triggerWorkflow = async () => {
+      throw Object.assign(
+        new Error("You have exceeded a secondary rate limit"),
+        { status: 403, response: { headers: { "retry-after": "60" } } },
+      );
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow("triggering CI");
+    // Rate-limit 403 is transient → requeued, not failed.
+    expect(api.labels.get(1)).toContain("queue");
+    expect(api.labels.get(1)).not.toContain("queue:failed");
+  });
+
+  it("marks PR failed when the fast-forward of main is rejected (branch protection)", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    git.fastForwardMain = async () => {
+      throw new ConfigurationError(
+        "merge-queue-action could not fast-forward `main` (HTTP 403)",
+      );
+    };
+    const cfg = baseCfg({ dryRun: false });
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow();
+    // Permanent ref-update rejection → marked failed, not requeued forever.
+    expect(api.labels.get(1)).toContain("queue:failed");
+    expect(api.labels.get(1)).not.toContain("queue");
+    const c = api.comments.get(1) ?? [];
+    expect(c.some((s) => s.includes("action misconfigured"))).toBe(true);
   });
 
   it("warns when markFailed throws during CI trigger 404 handling in runProcess", async () => {
@@ -1696,6 +1873,41 @@ describe("runBisect", () => {
     await runBisect(api, git, cfg, (m) => logs.push(m));
     expect(logs.some((l) => l.includes("Bisecting"))).toBe(true);
     expect(logs.some((l) => l.includes("Left half passed"))).toBe(true);
+  });
+
+  it("marks tested PRs failed (not stranded) when bisect fast-forward is rejected", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    git.fastForwardMain = async () => {
+      throw new ConfigurationError(
+        "merge-queue-action could not fast-forward `main` (HTTP 403)",
+      );
+    };
+    const cfg = baseCfg({ batchPrs: "[1]", dryRun: false });
+
+    await expect(runBisect(api, git, cfg, nop)).rejects.toThrow();
+    // Permanent rejection → marked failed, not left stranded in queue:active.
+    expect(api.labels.get(1)).toContain("queue:failed");
+    const c = api.comments.get(1) ?? [];
+    expect(c.some((s) => s.includes("action misconfigured"))).toBe(true);
+  });
+
+  it("requeues tested PRs (cap-bounded) when bisect fast-forward fails transiently", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    git.fastForwardMain = async () => {
+      throw new Error("transient ff failure");
+    };
+    const cfg = baseCfg({ batchPrs: "[1]", dryRun: false });
+
+    await expect(runBisect(api, git, cfg, nop)).rejects.toThrow();
+    // Transient → requeued with the attempt counter, not stranded or failed.
+    expect(api.labels.get(1)).toContain("queue");
+    expect(api.labels.get(1)).toContain("queue:attempt-1");
   });
 
   it("tolerates failures when posting the bisection status comment", async () => {

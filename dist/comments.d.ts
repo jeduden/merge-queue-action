@@ -21,6 +21,15 @@ export declare function commentBisecting(ctx: CommentCtx, batchBranch: string, l
 export declare function commentOperatorWarning(ctx: CommentCtx, msg: string): string;
 export declare function commentRequeued(ctx: CommentCtx, reason: string): string;
 /**
+ * Posted when the queue stops retrying a PR because it has been requeued the
+ * maximum number of times without succeeding. This is the circuit-breaker
+ * backstop: it fires for any failure — permanent or stubbornly transient —
+ * that survived `maxAttempts` requeues, so the queue can never retry a PR
+ * forever. Unlike `commentRequeued`, the operator must act before the PR is
+ * retried.
+ */
+export declare function commentGaveUp(ctx: CommentCtx, maxAttempts: number, lastReason?: string): string;
+/**
  * Posted when the merge queue action cannot proceed because the workflow is
  * misconfigured (e.g. missing `actions/checkout`, shallow clone, wrong CI
  * workflow name).  Unlike `commentRequeued`, this error will NOT resolve by

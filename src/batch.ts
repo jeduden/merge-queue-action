@@ -112,7 +112,23 @@ export class Batch {
 
       if (result.merged.length > 0 && !this.dryRun) {
         this.log(`Pushing batch branch ${branch}`);
-        await this.git.pushBranch(branch);
+        try {
+          await this.git.pushBranch(branch);
+        } catch (err) {
+          // Best-effort cleanup so a failed push doesn't leak the
+          // `merge-queue/batch-*` ref. Rethrow the ORIGINAL error so its
+          // type is preserved: a ConfigurationError (e.g. the token lacks
+          // `workflow` scope) must reach the orchestrator unchanged so it
+          // marks the PR failed instead of requeueing it.
+          try {
+            await this.git.deleteBranch(branch);
+          } catch (delErr) {
+            await this.reporter.warn(
+              `failed to delete batch branch \`${branch}\` after a push error: ${errorMessage(delErr)}`,
+            );
+          }
+          throw err;
+        }
         // Capture the head SHA for reliable workflow run lookup.
         // This is best-effort: the batch branch has already been
         // pushed successfully, so a SHA lookup failure should not

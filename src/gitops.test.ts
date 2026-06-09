@@ -619,6 +619,104 @@ describe("GitOps with injected exec", () => {
     await expect(ops.pushBranch("batch")).rejects.toThrow("remote rejected");
   });
 
+  it.each([
+    [
+      "classic PAT lacking workflow scope",
+      "refusing to allow a Personal Access Token to create or update workflow `.github/workflows/ci.yml` without `workflow` scope",
+    ],
+    [
+      "GitHub App lacking workflows permission",
+      "refusing to allow a GitHub App to create or update workflow `.github/workflows/ci.yml` without `workflows` permission",
+    ],
+  ])(
+    "pushBranch throws ConfigurationError when the push is rejected (%s)",
+    async (_label, reason) => {
+      const { octokit } = makeFakeOctokit();
+      const exec: Exec = async (args) => {
+        if (args[0] === "push") {
+          return {
+            code: 1,
+            stdout: "",
+            stderr:
+              "To https://github.com/o/r.git\n" +
+              ` ! [remote rejected]   batch -> batch (${reason})\n` +
+              "error: failed to push some refs to 'https://github.com/o/r.git'",
+          };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      };
+      // biome-ignore lint/suspicious/noExplicitAny: test double
+      const ops = new GitOps(octokit as any, "o", "r", { exec });
+      const err = await ops.pushBranch("batch").catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ConfigurationError);
+      expect((err as Error).message).toMatch(/workflow/i);
+    },
+  );
+
+  it("pushBranch throws a plain (retryable) error on a non-scope rejection", async () => {
+    const { octokit } = makeFakeOctokit();
+    const exec: Exec = async (args) => {
+      if (args[0] === "push") {
+        return {
+          code: 1,
+          stdout: "",
+          stderr:
+            " ! [remote rejected] batch -> batch (protected branch hook declined)",
+        };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    const err = await ops.pushBranch("batch").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(ConfigurationError);
+  });
+
+  it("pushBranch surfaces stdout when a failed push wrote nothing to stderr", async () => {
+    const { octokit } = makeFakeOctokit();
+    const exec: Exec = async (args) => {
+      if (args[0] === "push") {
+        return { code: 1, stdout: "remote: error pushing refs", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    const err = await ops.pushBranch("batch").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain("remote: error pushing refs");
+  });
+
+  it.each([401, 403, 404])(
+    "fastForwardMain throws ConfigurationError when updateRef is rejected (%s)",
+    async (status) => {
+      const { octokit } = makeFakeOctokit([{ ref: "heads/batch", sha: "abc123" }]);
+      octokit.rest.git.updateRef = async () => {
+        throw Object.assign(new Error("rejected"), { status });
+      };
+      // biome-ignore lint/suspicious/noExplicitAny: test double
+      const ops = new GitOps(octokit as any, "o", "r");
+      const err = await ops.fastForwardMain("batch").catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ConfigurationError);
+      expect((err as Error).message).toMatch(/main/i);
+    },
+  );
+
+  it("fastForwardMain rethrows a transient 422 (main advanced, not a fast-forward)", async () => {
+    const { octokit } = makeFakeOctokit([{ ref: "heads/batch", sha: "abc123" }]);
+    octokit.rest.git.updateRef = async () => {
+      throw Object.assign(new Error("Update is not a fast forward"), {
+        status: 422,
+      });
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r");
+    const err = await ops.fastForwardMain("batch").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(ConfigurationError);
+  });
+
   it("fastForwardMain uses refs API with force=false and returns SHA", async () => {
     const { octokit, calls } = makeFakeOctokit([
       { ref: "heads/batch", sha: "abc123" },

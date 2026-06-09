@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Batch, type GitOperator, type BatchPR } from "./batch.js";
+import { ConfigurationError } from "./errors.js";
 
 function newMockGit(): GitOperator & {
   branches: string[];
@@ -173,6 +174,27 @@ describe("CreateAndMerge", () => {
     expect(git.deleted).toContain("merge-queue/batch-err");
   });
 
+  it("cleans up the batch branch and preserves the error type on a push failure", async () => {
+    // A push rejected because the token lacks `workflow` scope is a
+    // permanent ConfigurationError. createAndMerge must delete the leaked
+    // batch branch AND rethrow the SAME error instance, so its type
+    // survives and the orchestrator marks the PR failed instead of
+    // requeueing it (which would re-fire the `labeled` trigger forever).
+    const pushErr = new ConfigurationError("token lacks workflow scope");
+    const git = newMockGit();
+    git.pushBranch = async () => {
+      throw pushErr;
+    };
+    const b = new Batch(git, false, nop);
+    const err = await b
+      .createAndMerge("push", [
+        { number: 1, headRef: "f", headSHA: "sha-f", title: "T" },
+      ])
+      .catch((e: unknown) => e);
+    expect(err).toBe(pushErr);
+    expect(git.deleted).toContain("merge-queue/batch-push");
+  });
+
   it("warns via Reporter when the cleanup deleteBranch also fails", async () => {
     // Two-level failure: mergeBranch throws (triggers cleanup), and
     // the deleteBranch teardown itself throws. The Reporter.warn call
@@ -222,6 +244,62 @@ describe("CreateAndMerge", () => {
     // fires — confirming Batch.createAndMerge set scope via
     // reporter.withScope before calling GitOps.
     expect(warned[0].scope).toEqual([7]);
+  });
+
+  it("warns via Reporter when deleteBranch also fails on the PUSH cleanup path", async () => {
+    // Twin of the merge-path cleanup test, but for the push branch: pushBranch
+    // throws (triggers cleanup) and the deleteBranch teardown ALSO throws. The
+    // Reporter.warn surfaces the teardown failure with an "after a push error"
+    // message, and the ORIGINAL push error still propagates (type preserved).
+    const pushErr = new ConfigurationError("token lacks workflow scope");
+    const git: GitOperator = {
+      async createBranchFromRef() {},
+      async mergeBranch() {
+        return true;
+      },
+      async pushBranch() {
+        throw pushErr;
+      },
+      async getHeadSHA() {
+        return "sha";
+      },
+      async fastForwardMain() {
+        return "sha";
+      },
+      async deleteBranch() {
+        throw new Error("boom-delete");
+      },
+    };
+    const warned: Array<{ msg: string; scope: number[] }> = [];
+    let scope: number[] = [];
+    const reporter = {
+      info: () => {},
+      async warn(msg: string) {
+        warned.push({ msg, scope: [...scope] });
+      },
+      async withScope<T>(prs: number[], fn: () => Promise<T>) {
+        const prev = scope;
+        scope = prs;
+        try {
+          return await fn();
+        } finally {
+          scope = prev;
+        }
+      },
+    };
+    const b = new Batch(git, false, nop, reporter);
+    const err = await b
+      .createAndMerge("push", [
+        { number: 9, headRef: "f", headSHA: "sha-f", title: "T" },
+      ])
+      .catch((e: unknown) => e);
+
+    // Original error instance (and its type) preserved.
+    expect(err).toBe(pushErr);
+    expect(warned).toHaveLength(1);
+    expect(warned[0].msg).toContain("after a push error");
+    expect(warned[0].msg).toContain("boom-delete");
+    expect(warned[0].scope).toEqual([9]);
   });
 
   it("defaults log to a nop when undefined and still exercises log call sites", async () => {

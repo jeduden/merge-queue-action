@@ -8,6 +8,13 @@ export interface Config {
     queueLabel: string;
     dryRun: boolean;
     batchPrs: string;
+    /**
+     * Max times a single PR may be requeued before the queue gives up and
+     * marks it failed. Bounds every retry path so a deterministic failure
+     * cannot re-trigger the workflow forever. Defaults to
+     * `MAX_REQUEUE_ATTEMPTS` when unset.
+     */
+    maxRequeues?: number;
     /** Required by runProcess/runBisect; unused by runSetup. */
     commentCtx?: CommentCtx;
     /**
@@ -29,6 +36,19 @@ export interface Config {
  * Throws a descriptive error for any other input.
  */
 export declare function parseBatchPrs(input: string): number[];
+/**
+ * Returns true for GitHub API errors that indicate a PERMANENT problem an
+ * operator must fix — never resolved by a retry, so the PR must be marked
+ * failed rather than requeued:
+ *   - 404: the resource (e.g. a workflow file) doesn't exist
+ *   - 422: the request is structurally invalid (e.g. no `workflow_dispatch`)
+ *   - 401: the token is missing/expired
+ *   - 403: the token lacks a required permission (e.g. `actions: write`)
+ *
+ * A secondary-rate-limit 403 is excluded — that is transient (see
+ * `isRateLimited`).
+ */
+export declare function isHttpConfigError(err: unknown): boolean;
 export type { CommentCtx };
 /** FullAPI combines all GitHub API interfaces needed by the orchestration. */
 export interface FullAPI extends GitHubAPI, WorkflowAPI {

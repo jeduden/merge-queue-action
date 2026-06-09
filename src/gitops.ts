@@ -56,6 +56,41 @@ export function defaultExec(cwd?: string): Exec {
 }
 
 /**
+ * Detects the GitHub push rejection emitted when the authenticating token
+ * is not allowed to create or update a file under `.github/workflows/`.
+ * The exact wording depends on the token type:
+ *
+ *   - classic PAT / OAuth app: "... without `workflow` scope"
+ *   - GitHub App / fine-grained PAT: "... without `workflows` permission"
+ *
+ * All variants share the "refusing to allow … without … workflow… scope/
+ * permission" shape. This is a permanent authorization problem — retrying
+ * the push can never succeed — so callers surface it as a
+ * ConfigurationError rather than requeueing the PR (which would re-fire the
+ * `labeled` trigger in a tight loop).
+ */
+function isWorkflowScopePushRejection(stderr: string): boolean {
+  return (
+    /refusing to allow/i.test(stderr) &&
+    /without\s+[`'"]?workflows?[`'"]?\s+(?:scope|permission)/i.test(stderr)
+  );
+}
+
+/**
+ * Detects a PERMANENT failure updating a git ref via the API: 401 (bad
+ * token), 403 (branch protection / restricted push / missing
+ * `contents: write`), or 404 (ref/branch doesn't exist). A 422 is excluded —
+ * for a `main` fast-forward it means "not a fast-forward" because `main`
+ * advanced, which is transient and should requeue.
+ */
+function isPermanentRefUpdateError(err: unknown): boolean {
+  if (typeof err !== "object" || err === null || !("status" in err))
+    return false;
+  const status = (err as { status: number }).status;
+  return status === 401 || status === 403 || status === 404;
+}
+
+/**
  * GitOps implements GitOperator using a hybrid of the GitHub Git Data
  * API (for branch creation, fast-forward and deletion) and local
  * `git merge` (for per-PR merges). Running the merge locally is what
@@ -649,7 +684,33 @@ export class GitOps implements GitOperator {
     // single-writer and disposable, so any concurrent update means
     // something has gone wrong and the push *should* fail loudly
     // rather than clobber the other writer.
-    await this.gitOrThrow(["push", "origin", `${branch}:refs/heads/${branch}`]);
+    const res = await this.git([
+      "push",
+      "origin",
+      `${branch}:refs/heads/${branch}`,
+    ]);
+    if (res.code === 0) return;
+
+    const detail = res.stderr.trim() || res.stdout.trim();
+    if (isWorkflowScopePushRejection(detail)) {
+      // Permanent: the token cannot push workflow-file changes, so no
+      // number of retries will help. Surfacing this as a
+      // ConfigurationError makes the orchestrator mark the PR failed
+      // instead of requeueing it — which is what turned a single bad PR
+      // into an unbounded run of failing merge-queue jobs.
+      throw new ConfigurationError(
+        "merge-queue-action could not push the batch branch because the " +
+          "token lacks permission to update GitHub Actions workflow files, " +
+          "and a queued PR creates or updates a file under " +
+          "`.github/workflows/`. Grant the token the `workflow` scope " +
+          "(classic PAT) or `workflows: write` permission (GitHub App or " +
+          "fine-grained PAT), or remove the workflow-file change from the " +
+          `queued PR. Git reported: ${detail}`,
+      );
+    }
+    throw new Error(
+      `git push origin ${branch}:refs/heads/${branch} failed (exit ${res.code}): ${detail}`,
+    );
   }
 
   async fastForwardMain(ref: string): Promise<string> {
@@ -662,13 +723,36 @@ export class GitOps implements GitOperator {
     });
     const sha = srcRef.object.sha;
 
-    await this.octokit.rest.git.updateRef({
-      owner: this.owner,
-      repo: this.repo,
-      ref: `heads/main`,
-      sha,
-      force: false,
-    });
+    try {
+      await this.octokit.rest.git.updateRef({
+        owner: this.owner,
+        repo: this.repo,
+        ref: `heads/main`,
+        sha,
+        force: false,
+      });
+    } catch (err) {
+      if (isPermanentRefUpdateError(err)) {
+        // 401/403/404 updating `main` will not resolve on retry: branch
+        // protection forbids the token from updating `main` (required
+        // reviews/checks or restricted push access), the token lacks
+        // `contents: write`, or the default branch isn't `main`. Surface as
+        // a ConfigurationError so the orchestrator marks the PR failed
+        // instead of requeueing it forever. A 422 (not-a-fast-forward,
+        // i.e. `main` advanced) is left transient: the next run rebuilds.
+        const status = (err as { status: number }).status;
+        throw new ConfigurationError(
+          "merge-queue-action could not fast-forward `main` (HTTP " +
+            `${status}). This usually means branch protection forbids the ` +
+            "merge-queue token from updating `main` (required reviews, " +
+            "required status checks, or restricted push access), the token " +
+            "lacks `contents: write`, or the repository's default branch is " +
+            "not `main`. Grant the token push access to `main` (or add it to " +
+            "the branch-protection bypass/allow list).",
+        );
+      }
+      throw err;
+    }
 
     return sha;
   }
