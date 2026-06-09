@@ -1298,7 +1298,7 @@ export async function runBisect(
           gitOps,
           reporter,
           prMap,
-          prNumbers,
+          openNumbers,
           excluded,
           result.branch,
           err,
@@ -1327,7 +1327,7 @@ export async function runBisect(
           gitOps,
           reporter,
           prMap,
-          prNumbers,
+          openNumbers,
           excluded,
           result.branch,
           err,
@@ -1344,8 +1344,11 @@ export async function runBisect(
     // Post bisection status comment to each still-candidate PR as soon as
     // the run is known. Skip any PR already failed via merge conflict in
     // this bisect run, and report the actually-tested count.
-    for (const n of prNumbers) {
-      if (excluded.has(n)) continue;
+    // Only still-open candidates: a closed-at-fetch PR was dropped from
+    // prMap and must get neither the status comment (its "you'll be
+    // notified" promise can't be kept) nor a seat in the total.
+    const liveCandidates = openNumbers.filter((n) => !excluded.has(n));
+    for (const n of liveCandidates) {
       await postComment(
         api,
         n,
@@ -1353,7 +1356,7 @@ export async function runBisect(
           ctx,
           result.branch,
           mergedLeft.length,
-          prNumbers.length - excluded.size,
+          liveCandidates.length,
           ciRunUrl,
         ),
         log,
@@ -1371,7 +1374,7 @@ export async function runBisect(
         gitOps,
         reporter,
         prMap,
-        prNumbers,
+        openNumbers,
         excluded,
         result.branch,
         err,
@@ -1408,7 +1411,7 @@ export async function runBisect(
           gitOps,
           reporter,
           prMap,
-          prNumbers,
+          openNumbers,
           excluded,
           result.branch,
           err,
@@ -1446,7 +1449,7 @@ export async function runBisect(
         try {
           await gitOps.deleteBranch(result.branch);
         } catch (delErr) {
-          const candidateNums = prNumbers.filter((n) => !excluded.has(n));
+          const candidateNums = openNumbers.filter((n) => !excluded.has(n));
           await reporter.withScope(candidateNums, () =>
             reporter.warn(
               `failed to delete stale bisect branch \`${result.branch}\`: ${errorMessage(delErr)}`,
@@ -1498,7 +1501,7 @@ export async function runBisect(
         try {
           await gitOps.deleteBranch(result.branch);
         } catch (delErr) {
-          const candidates = prNumbers.filter((n) => !excluded.has(n));
+          const candidates = openNumbers.filter((n) => !excluded.has(n));
           await reporter.withScope(candidates, () =>
             reporter.warn(
               `failed to delete bisect branch \`${result.branch}\` after a fast-forward failure: ${errorMessage(delErr)}`,
@@ -1599,7 +1602,7 @@ export async function runBisect(
       await gitOps.deleteBranch(result.branch);
     } catch (err) {
       const detail = errorMessage(err);
-      const candidates = prNumbers.filter((n) => !excluded.has(n));
+      const candidates = openNumbers.filter((n) => !excluded.has(n));
       await reporter.withScope(candidates, () =>
         reporter.warn(
           `failed to delete bisect branch \`${result.branch}\` after left-half CI failure: ${detail}`,

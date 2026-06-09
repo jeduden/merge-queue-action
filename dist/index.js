@@ -39149,7 +39149,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
             else {
                 // Transient error — requeue all still-candidate PRs so they don't get stuck
                 // in queue:active with no path forward (same recovery as findWorkflowRun failures).
-                await handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prMap, prNumbers, excluded, result.branch, err, `failed to trigger bisect CI: ${formatErrorForComment(err)}`, log);
+                await handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prMap, openNumbers, excluded, result.branch, err, `failed to trigger bisect CI: ${formatErrorForComment(err)}`, log);
             }
             throw new Error(`triggering CI for bisect: ${formatErrorForComment(err)}`);
         }
@@ -39158,7 +39158,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
                 return await api.findWorkflowRun(cfg.ciWorkflow, result.branch, dispatchedAt, result.headSHA);
             }
             catch (err) {
-                await handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prMap, prNumbers, excluded, result.branch, err, `failed to locate bisect CI run: ${formatErrorForComment(err)}`, log);
+                await handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prMap, openNumbers, excluded, result.branch, err, `failed to locate bisect CI run: ${formatErrorForComment(err)}`, log);
                 throw new Error(`locating bisect CI run: ${formatErrorForComment(err)}`);
             }
         })();
@@ -39166,17 +39166,19 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
         // Post bisection status comment to each still-candidate PR as soon as
         // the run is known. Skip any PR already failed via merge conflict in
         // this bisect run, and report the actually-tested count.
-        for (const n of prNumbers) {
-            if (excluded.has(n))
-                continue;
-            await postComment(api, n, commentBisecting(ctx, result.branch, mergedLeft.length, prNumbers.length - excluded.size, ciRunUrl), log);
+        // Only still-open candidates: a closed-at-fetch PR was dropped from
+        // prMap and must get neither the status comment (its "you'll be
+        // notified" promise can't be kept) nor a seat in the total.
+        const liveCandidates = openNumbers.filter((n) => !excluded.has(n));
+        for (const n of liveCandidates) {
+            await postComment(api, n, commentBisecting(ctx, result.branch, mergedLeft.length, liveCandidates.length, ciRunUrl), log);
         }
         let runResult;
         try {
             runResult = await api.waitForWorkflowRun(runHandle.runId);
         }
         catch (err) {
-            await handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prMap, prNumbers, excluded, result.branch, err, `failed to read bisect CI status: ${formatErrorForComment(err)}`, log);
+            await handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prMap, openNumbers, excluded, result.branch, err, `failed to read bisect CI status: ${formatErrorForComment(err)}`, log);
             throw new Error(`getting bisect CI status: ${formatErrorForComment(err)}`);
         }
         conclusion = runResult.conclusion;
@@ -39199,7 +39201,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
                 }
             }
             catch (err) {
-                await handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prMap, prNumbers, excluded, result.branch, err, `failed to verify PR state after bisect CI: ${formatErrorForComment(err)}`, log);
+                await handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prMap, openNumbers, excluded, result.branch, err, `failed to verify PR state after bisect CI: ${formatErrorForComment(err)}`, log);
                 throw new Error(`checking PR state after bisect CI: ${formatErrorForComment(err)}`);
             }
             if (driftedLeft.length > 0 || closedLeft.length > 0) {
@@ -39229,7 +39231,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
                     await gitOps.deleteBranch(result.branch);
                 }
                 catch (delErr) {
-                    const candidateNums = prNumbers.filter((n) => !excluded.has(n));
+                    const candidateNums = openNumbers.filter((n) => !excluded.has(n));
                     await reporter.withScope(candidateNums, () => reporter.warn(`failed to delete stale bisect branch \`${result.branch}\`: ${errorMessage(delErr)}`));
                 }
                 // The whole bisection chain is stale: reset budgets (progress, not
@@ -39267,7 +39269,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
                     await gitOps.deleteBranch(result.branch);
                 }
                 catch (delErr) {
-                    const candidates = prNumbers.filter((n) => !excluded.has(n));
+                    const candidates = openNumbers.filter((n) => !excluded.has(n));
                     await reporter.withScope(candidates, () => reporter.warn(`failed to delete bisect branch \`${result.branch}\` after a fast-forward failure: ${errorMessage(delErr)}`));
                 }
                 const affected = resolvePRs([...mergedLeft, ...right], prMap, excluded);
@@ -39338,7 +39340,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
         }
         catch (err) {
             const detail = errorMessage(err);
-            const candidates = prNumbers.filter((n) => !excluded.has(n));
+            const candidates = openNumbers.filter((n) => !excluded.has(n));
             await reporter.withScope(candidates, () => reporter.warn(`failed to delete bisect branch \`${result.branch}\` after left-half CI failure: ${detail}`));
         }
         if (mergedLeft.length === 1) {

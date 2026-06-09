@@ -1687,6 +1687,32 @@ describe("runProcess", () => {
     expect(api.labels.get(1) ?? []).not.toContain("queue");
   });
 
+  it("never posts the bisecting status comment to a closed-at-fetch candidate", async () => {
+    // [1,2,3]: PR 1 is already closed when the bisect run fetches it — it
+    // is dropped from the candidate set, so it must get no "you'll be
+    // notified" promise, and the live total must not count it.
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1, "b-1", "closed"), makePR(2), makePR(3)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2,3]", dryRun: false });
+
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await runBisect(api, git, cfg, nop);
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
+
+    const c1 = api.comments.get(1) ?? [];
+    expect(c1.some((s) => s.includes("— bisecting"))).toBe(false);
+    // The live candidates see the correct total (2, not 3).
+    const c2 = api.comments.get(2) ?? [];
+    const bisecting = c2.find((s) => s.includes("— bisecting"));
+    expect(bisecting).toBeDefined();
+    expect(bisecting!).toContain("of 2");
+  });
+
   it("returns cleanly when every bisect candidate is closed", async () => {
     const api = newMockAPI();
     api.prs.set("queue:active", [makePR(1, "b-1", "closed")]);
