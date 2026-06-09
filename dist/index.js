@@ -36435,7 +36435,12 @@ function commentGaveUp(ctx, maxAttempts, lastReason) {
     if (lastReason) {
         lines.push("", "Most recent error:", "", `> ${lastReason}`);
     }
-    lines.push("", `[View merge queue run](${ctx.actionRunUrl}).`, "", `**Next:** Investigate the failure above, fix the underlying problem, then re-add the \`${ctx.queueLabel}\` label to try again with a fresh retry budget.`);
+    // Without a captured reason there is no "failure above" to point at —
+    // send the reader to the run log instead.
+    const investigate = lastReason
+        ? "Investigate the failure above"
+        : "Investigate via the merge queue run linked above";
+    lines.push("", `[View merge queue run](${ctx.actionRunUrl}).`, "", `**Next:** ${investigate}, fix the underlying problem, then re-add the \`${ctx.queueLabel}\` label to try again with a fresh retry budget.`);
     return lines.join("\n");
 }
 /**
@@ -36674,11 +36679,17 @@ function isRetryableHttpError(err) {
  * (which rebuilds the batch branch, making the orphan run harmless).
  */
 function isThrottleError(err) {
-    if (typeof err !== "object" || err === null)
+    if (typeof err !== "object" || err === null || !("status" in err))
         return false;
-    if ("status" in err && err.status === 429)
+    const status = err.status;
+    if (status === 429)
         return true;
-    return isRateLimitedError(err);
+    // Rate-limit signals only count on a 403 — a 5xx whose headers happen to
+    // show an exhausted quota may still have been PROCESSED before failing,
+    // so it is not safe to resend a non-idempotent request.
+    if (status === 403)
+        return isRateLimitedError(err);
+    return false;
 }
 /**
  * Runs `fn`, retrying transient GitHub API errors with exponential backoff.
@@ -37073,11 +37084,18 @@ function isPermanentRefUpdateError(err) {
         if (msg.includes("not a fast forward"))
             return false;
         return (msg.includes("reference does not exist") ||
+            // Classic branch protection (GH006).
             msg.includes("protected branch") ||
             msg.includes("required status check") ||
             msg.includes("changes must be made through a pull request") ||
             msg.includes("approving review") ||
-            msg.includes("gh006"));
+            msg.includes("gh006") ||
+            // Repository rulesets (GH013) — the successor to classic branch
+            // protection — reject with their own wordings.
+            msg.includes("repository rule") ||
+            msg.includes("protected ref") ||
+            msg.includes("verified signatures") ||
+            msg.includes("gh013"));
     }
     return false;
 }
@@ -38094,6 +38112,19 @@ function parseBatchPrs(input) {
     }
     return [...new Set(parsed)];
 }
+/**
+ * Parses the max_requeues input: "" → the default; canonical digits → the
+ * number; anything else → NaN. Strict on purpose — parseInt would silently
+ * accept numeric-prefix garbage ("1O" → 1) and change the cap, while NaN
+ * makes the Queue constructor warn loudly and use the default, matching
+ * the documented invalid-input behavior.
+ */
+function parseMaxRequeues(raw) {
+    const trimmed = raw.trim();
+    if (trimmed === "")
+        return MAX_REQUEUE_ATTEMPTS;
+    return /^\d+$/.test(trimmed) ? parseInt(trimmed, 10) : Number.NaN;
+}
 function action_sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -38120,6 +38151,20 @@ function isHttpConfigError(err) {
     if (status === 403)
         return !isRateLimitedError(err);
     return false;
+}
+/**
+ * Wraps an error thrown by the merge queue's SELF-dispatch (the
+ * `workflow_dispatch` that starts a bisection run), so callers can
+ * distinguish a rejected dispatch from other failures raised inside the
+ * same handling path and attribute the config-error diagnosis precisely.
+ */
+class SelfDispatchError extends Error {
+    inner;
+    constructor(inner) {
+        super(`dispatching bisection: ${errorMessage(inner)}`);
+        this.name = "SelfDispatchError";
+        this.inner = inner;
+    }
 }
 function hasWritePermission(perm) {
     return perm === "write" || perm === "maintain" || perm === "admin";
@@ -38281,10 +38326,19 @@ async function handleCIFailure(api, cfg, ctx, q, gitOps, reporter, prs, result, 
     log(`CI failed for batch, triggering bisection for PRs: ${prNumbers}`);
     if (!cfg.dryRun) {
         const wf = selfWorkflowFile();
-        await api.triggerWorkflow(wf, "main", {
-            batch_prs: prJSON,
-            bisect: "true",
-        });
+        try {
+            await api.triggerWorkflow(wf, "main", {
+                batch_prs: prJSON,
+                bisect: "true",
+            });
+        }
+        catch (err) {
+            // Tag the failure so the caller can attribute a permanent HTTP error
+            // to the SELF-DISPATCH specifically — other throws from this function
+            // (e.g. a label-API error inside markFailed) must not be blamed on a
+            // bisection-dispatch misconfiguration.
+            throw new SelfDispatchError(err);
+        }
     }
 }
 async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
@@ -38531,13 +38585,16 @@ async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
                 await handleCIFailure(api, cfg, ctx, q, gitOps, reporter, prs, result, ciRunUrl, log);
             }
             catch (err) {
-                if (isHttpConfigError(err)) {
+                if (err instanceof SelfDispatchError && isHttpConfigError(err.inner)) {
                     // The bisect self-dispatch is permanently rejected (404/422: the
                     // merge-queue workflow on `main` is missing or lacks a
                     // `workflow_dispatch` trigger; 403: token can't dispatch).
                     // Requeueing would re-run the whole failing batch each cycle.
+                    // Only SelfDispatchError carries this diagnosis — a label-API
+                    // error from markFailed inside the same handler must not be
+                    // blamed on the dispatch configuration.
                     const detail = `the merge queue could not dispatch its own bisection run` +
-                        ` (${err.status}): ${formatErrorForComment(err)}.` +
+                        ` (${err.inner.status}): ${formatErrorForComment(err.inner)}.` +
                         ` Check that the merge-queue workflow on \`main\` has a \`workflow_dispatch\` trigger with \`batch_prs\`/\`bisect\` inputs and the token has \`actions: write\`.`;
                     await failAllWithConfigError(api, q, ctx, prs, excluded, detail, log);
                 }
@@ -38572,18 +38629,21 @@ async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
         if (drifted.length > 0) {
             for (const d of drifted) {
                 log(`PR #${d.number} head changed while CI ran (${d.snapshot} -> ${d.current}); skipping stale batch`);
-                // A new head means the author pushed — that's progress, not a
-                // failure, so the drifted PR's requeue budget starts fresh.
-                // (resetAttempts also strips the in-memory snapshot, so the
-                // requeue below stamps attempt-1 rather than resuming the count.)
-                const pr = prs.find((p) => p.number === d.number);
-                if (pr) {
-                    try {
-                        await q.resetAttempts(pr);
-                    }
-                    catch (resetErr) {
-                        log(`Warning: failed to reset attempt counter for PR #${d.number}: ${resetErr}`);
-                    }
+            }
+            // A new head means an author pushed — that's progress, not a failure,
+            // so the requeue budget starts fresh for EVERY batch member: the
+            // non-drifted PRs didn't fail either, and each drift cycle requires a
+            // fresh external push, so the reset cannot sustain a loop by itself.
+            // (resetAttempts also strips the in-memory snapshot, so the requeue
+            // below stamps attempt-1 rather than resuming the count.)
+            for (const pr of prs) {
+                if (excluded.has(pr.number))
+                    continue;
+                try {
+                    await q.resetAttempts(pr);
+                }
+                catch (resetErr) {
+                    log(`Warning: failed to reset attempt counter for PR #${pr.number}: ${resetErr}`);
                 }
             }
             await cleanupBranch(result.branch);
@@ -38656,8 +38716,9 @@ async function handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prM
             .filter((n) => !excluded.has(n))
             .map((n) => prMap.get(n))
             .filter((pr) => pr !== undefined);
-        const detail = `${reason}.` +
-            ` Check the merge-queue token's Actions permissions (\`actions: read\`/\`actions: write\`).`;
+        // The advice goes on its own line (commentConfigError blockquotes each
+        // line) so it doesn't glue punctuation onto the formatted error text.
+        const detail = `${reason}\nCheck the merge-queue token's Actions permissions (\`actions: read\` / \`actions: write\`).`;
         await failAllWithConfigError(api, q, ctx, candidates, new Set(), detail, log);
         return;
     }
@@ -38772,6 +38833,23 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
             }
             catch {
                 /* best effort */
+            }
+            // Every left PR conflicted (marked failed above) — but the RIGHT half
+            // is untested and still `queue:active`. Returning without requeueing
+            // it would strand those PRs: no base label, so neither the trigger
+            // nor collect() would ever see them again.
+            for (const n of right) {
+                if (excluded.has(n))
+                    continue;
+                const pr = prMap.get(n);
+                if (!pr)
+                    continue;
+                try {
+                    await requeueOrGiveUp(api, q, ctx, pr, undefined, log);
+                }
+                catch (reqErr) {
+                    log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
+                }
             }
         }
         return;
@@ -38962,9 +39040,17 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
             // Single PR is the culprit
             const pr = prMap.get(mergedLeft[0]);
             log(`PR #${mergedLeft[0]} is the culprit`);
-            await q.markFailed(pr, "CI failed (identified via bisection)");
-            if (!cfg.dryRun) {
-                await postComment(api, pr.number, commentCIFailed(ctx, ciRunUrl, true), log);
+            // Guarded so a label-API failure here cannot abort the function
+            // before the right-half requeue below — that would strand every
+            // untested PR in `queue:active`.
+            try {
+                await q.markFailed(pr, "CI failed (identified via bisection)");
+                if (!cfg.dryRun) {
+                    await postComment(api, pr.number, commentCIFailed(ctx, ciRunUrl, true), log);
+                }
+            }
+            catch (markErr) {
+                log(`Warning: failed to mark culprit PR #${pr.number} as failed: ${markErr}`);
             }
             // Requeue right half (not yet tested)
             for (const n of right) {
@@ -39038,7 +39124,6 @@ async function runSetup(api, cfg, log) {
 
 
 
-
 function loadInputs() {
     return {
         token: getInput("token", { required: true }),
@@ -39051,7 +39136,11 @@ function loadInputs() {
         gitUserEmail: getInput("git_user_email") ||
             "merge-queue@users.noreply.github.com",
         gitUserName: getInput("git_user_name") || "merge-queue-bot",
-        maxRequeues: parseInt(getInput("max_requeues") || String(MAX_REQUEUE_ATTEMPTS), 10),
+        // Strict parse: parseInt would silently accept numeric-prefix garbage
+        // ("1O" → 1), contradicting the documented invalid-input fallback.
+        // Anything non-canonical becomes NaN, which Queue's constructor
+        // rejects loudly and replaces with the default.
+        maxRequeues: parseMaxRequeues(getInput("max_requeues")),
     };
 }
 function buildCommentCtx(owner, repo, queueLabel) {

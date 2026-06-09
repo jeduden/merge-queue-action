@@ -37,6 +37,14 @@ export interface Config {
  */
 export declare function parseBatchPrs(input: string): number[];
 /**
+ * Parses the max_requeues input: "" → the default; canonical digits → the
+ * number; anything else → NaN. Strict on purpose — parseInt would silently
+ * accept numeric-prefix garbage ("1O" → 1) and change the cap, while NaN
+ * makes the Queue constructor warn loudly and use the default, matching
+ * the documented invalid-input behavior.
+ */
+export declare function parseMaxRequeues(raw: string): number;
+/**
  * Returns true for GitHub API errors that indicate a PERMANENT problem an
  * operator must fix — never resolved by a retry, so the PR must be marked
  * failed rather than requeued:

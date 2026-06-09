@@ -699,6 +699,10 @@ describe("GitOps with injected exec", () => {
     [422, 'Required status check "ci" is expected.'],
     [422, "At least 1 approving review is required"],
     [422, "5 of 5 required status checks are expected (protected branch)"],
+    // Repository rulesets (GH013) use their own wordings.
+    [422, "Repository rule violations found"],
+    [422, "Cannot update this protected ref"],
+    [422, "Commits must have verified signatures. (GH013)"],
   ])(
     "fastForwardMain throws ConfigurationError when updateRef is rejected (%s %s)",
     async (status, message) => {

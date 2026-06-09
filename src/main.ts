@@ -2,11 +2,11 @@ import * as core from "@actions/core";
 import * as github from "@actions/github";
 import { GitHubClient } from "./github.js";
 import { GitOps } from "./gitops.js";
-import { MAX_REQUEUE_ATTEMPTS } from "./queue.js";
 import { PRReporter } from "./reporter.js";
 import {
   eventTriggerLabeledPR,
   hasWritePermission,
+  parseMaxRequeues,
   runProcess,
   runBisect,
   type Config,
@@ -39,10 +39,11 @@ function loadInputs(): EntryInputs {
       core.getInput("git_user_email") ||
       "merge-queue@users.noreply.github.com",
     gitUserName: core.getInput("git_user_name") || "merge-queue-bot",
-    maxRequeues: parseInt(
-      core.getInput("max_requeues") || String(MAX_REQUEUE_ATTEMPTS),
-      10,
-    ),
+    // Strict parse: parseInt would silently accept numeric-prefix garbage
+    // ("1O" → 1), contradicting the documented invalid-input fallback.
+    // Anything non-canonical becomes NaN, which Queue's constructor
+    // rejects loudly and replaces with the default.
+    maxRequeues: parseMaxRequeues(core.getInput("max_requeues")),
   };
 }
 

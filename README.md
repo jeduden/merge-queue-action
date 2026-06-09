@@ -159,9 +159,9 @@ permission, branch protection rejecting the bot, a check that always
 fails), every requeue is bounded by a per-PR attempt cap:
 
 - Each requeue stamps the PR with a `queue:attempt-N` label. These
-  labels are created on the fly (with a default color) — they don't need
-  pre-creating, and deleting one from a PR that is still queued resets
-  that PR's counter.
+  labels are created on the fly (GitHub assigns each a random color) —
+  they don't need pre-creating, and deleting one from a PR that is still
+  queued resets that PR's counter.
 - Once a PR has been requeued **`max_requeues`** times (default **10**;
   must be a positive integer — invalid values fall back to the default
   with a run-log warning) without succeeding, the queue stops retrying

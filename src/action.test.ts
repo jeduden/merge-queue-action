@@ -1168,6 +1168,60 @@ describe("runProcess", () => {
     expect(c.some((s) => s.includes("head changed while batch CI"))).toBe(true);
   });
 
+  it("resets the attempt counter of non-drifted batch-mates too on drift", async () => {
+    // Drift is nobody's failure: PR 2 didn't push, but it didn't fail
+    // either — its budget must not burn down because PR 1's author pushed.
+    const api = newMockAPI();
+    const pr1 = { ...makePR(1), labels: ["queue"] };
+    const pr2 = { ...makePR(2), labels: ["queue", "queue:attempt-3"] };
+    api.prs.set("queue", [pr1, pr2]);
+    api.labels.set(1, ["queue"]);
+    api.labels.set(2, ["queue", "queue:attempt-3"]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    // Only PR 1 drifted.
+    api.getPR = async (n) =>
+      n === 1
+        ? { ...makePR(1), headSHA: "sha-moved" }
+        : { ...makePR(2), labels: ["queue", "queue:attempt-3"] };
+
+    await runProcess(api, git, cfg, nop);
+
+    for (const n of [1, 2]) {
+      expect(api.labels.get(n)).toContain("queue");
+      expect(api.labels.get(n)).toContain("queue:attempt-1");
+    }
+    expect(api.labels.get(2)).not.toContain("queue:attempt-3");
+    expect(api.labels.get(2)).not.toContain("queue:attempt-4");
+  });
+
+  it("does not blame the bisect dispatch when markFailed throws inside CI-failure handling", async () => {
+    // Single merged PR fails CI → handleCIFailure marks it failed; the
+    // label API 403s. That error must NOT produce the "could not dispatch
+    // its own bisection run" config comment — it isn't a dispatch problem.
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    api.ciConclusion = "failure";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    const origAdd = api.addLabel.bind(api);
+    api.addLabel = async (n, label) => {
+      if (label === "queue:failed")
+        throw Object.assign(new Error("Forbidden"), { status: 403 });
+      return origAdd(n, label);
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow();
+
+    const c = api.comments.get(1) ?? [];
+    expect(
+      c.some((s) => s.includes("could not dispatch its own bisection run")),
+    ).toBe(false);
+    // Generic transient treatment instead: requeued.
+    expect(api.labels.get(1)).toContain("queue");
+  });
+
   it("clears the attempt counter when a PR merges", async () => {
     const api = newMockAPI();
     const pr = { ...makePR(1), labels: ["queue", "queue:attempt-2"] };
@@ -2154,6 +2208,87 @@ describe("runBisect", () => {
     }
   });
 
+  it("requeues the untested right half when every left PR conflicts", async () => {
+    // Left [1] conflicts → nothing to test → early return. Without the
+    // rescue, right [2] would be stranded in queue:active forever.
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    const git = newMockGit();
+    git.conflictOn = "sha-1";
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+
+    await runBisect(api, git, cfg, nop);
+
+    // Conflicted left PR is failed; untested right PR is requeued.
+    expect(api.labels.get(1)).toContain("queue:failed");
+    expect(api.labels.get(2)).toContain("queue");
+    expect(api.labels.get(2)).toContain("queue:attempt-1");
+  });
+
+  it("gives up on a right-half PR at the cap during the all-conflicted rescue", async () => {
+    // The rescue requeues with no reason; at the cap the gave-up comment
+    // must point at the run log, not a nonexistent "failure above".
+    const api = newMockAPI();
+    const pr2 = { ...makePR(2), labels: ["queue:active", "queue:attempt-2"] };
+    api.prs.set("queue:active", [makePR(1), pr2]);
+    api.labels.set(2, ["queue:active", "queue:attempt-2"]);
+    const git = newMockGit();
+    git.conflictOn = "sha-1";
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false, maxRequeues: 2 });
+
+    await runBisect(api, git, cfg, nop);
+
+    expect(api.labels.get(2)).toContain("queue:failed");
+    const c = api.comments.get(2) ?? [];
+    const gaveUp = c.find((s) => s.includes("retry limit reached"));
+    expect(gaveUp).toBeDefined();
+    expect(gaveUp!).toContain("Investigate via the merge queue run linked above");
+    expect(gaveUp!).not.toContain("Most recent error");
+  });
+
+  it("warns and continues when the all-conflicted rescue requeue fails", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    const git = newMockGit();
+    git.conflictOn = "sha-1";
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+    const origAdd = api.addLabel.bind(api);
+    api.addLabel = async (n, label) => {
+      if (n === 2 && label === "queue:attempt-1")
+        throw Object.assign(new Error("boom"), { status: 500 });
+      return origAdd(n, label);
+    };
+    const logs: string[] = [];
+
+    await runBisect(api, git, cfg, (m) => logs.push(m));
+
+    expect(logs.some((l) => l.includes("failed to requeue PR #2"))).toBe(true);
+  });
+
+  it("still requeues the right half when marking the culprit fails", async () => {
+    // Left [1] fails CI (single culprit); marking it failed throws. The
+    // right half [2] must still be requeued, not stranded.
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    api.ciConclusion = "failure";
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+    const origAdd = api.addLabel.bind(api);
+    api.addLabel = async (n, label) => {
+      if (n === 1 && label === "queue:failed")
+        throw Object.assign(new Error("boom"), { status: 500 });
+      return origAdd(n, label);
+    };
+    const logs: string[] = [];
+
+    await runBisect(api, git, cfg, (m) => logs.push(m));
+
+    expect(
+      logs.some((l) => l.includes("failed to mark culprit PR #1")),
+    ).toBe(true);
+    expect(api.labels.get(2)).toContain("queue");
+  });
+
   it("fails bisect candidates fast when locating the bisect CI run is forbidden (403)", async () => {
     const api = newMockAPI();
     api.prs.set("queue:active", [makePR(1), makePR(2)]);
@@ -2741,7 +2876,14 @@ describe("runBisect", () => {
       return { runId: 1234567, htmlUrl: CI_RUN_URL };
     };
 
-    await runBisect(api, git, cfg, nop);
+    // The right-half dispatch calls selfWorkflowFile(); pin the override so
+    // the test doesn't depend on the runner's GITHUB_WORKFLOW_REF.
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await runBisect(api, git, cfg, nop);
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
 
     // The mock git returns `mock-sha-<branch>` from getHeadSHA; confirm
     // that value is threaded through to findWorkflowRun.

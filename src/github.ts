@@ -45,10 +45,15 @@ export function isRetryableHttpError(err: unknown): boolean {
  * (which rebuilds the batch branch, making the orphan run harmless).
  */
 export function isThrottleError(err: unknown): boolean {
-  if (typeof err !== "object" || err === null) return false;
-  if ("status" in err && (err as { status: number }).status === 429)
-    return true;
-  return isRateLimitedError(err);
+  if (typeof err !== "object" || err === null || !("status" in err))
+    return false;
+  const status = (err as { status: number }).status;
+  if (status === 429) return true;
+  // Rate-limit signals only count on a 403 — a 5xx whose headers happen to
+  // show an exhausted quota may still have been PROCESSED before failing,
+  // so it is not safe to resend a non-idempotent request.
+  if (status === 403) return isRateLimitedError(err);
+  return false;
 }
 
 /**

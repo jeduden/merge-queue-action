@@ -223,11 +223,16 @@ export function commentGaveUp(
   if (lastReason) {
     lines.push("", "Most recent error:", "", `> ${lastReason}`);
   }
+  // Without a captured reason there is no "failure above" to point at —
+  // send the reader to the run log instead.
+  const investigate = lastReason
+    ? "Investigate the failure above"
+    : "Investigate via the merge queue run linked above";
   lines.push(
     "",
     `[View merge queue run](${ctx.actionRunUrl}).`,
     "",
-    `**Next:** Investigate the failure above, fix the underlying problem, then re-add the \`${ctx.queueLabel}\` label to try again with a fresh retry budget.`,
+    `**Next:** ${investigate}, fix the underlying problem, then re-add the \`${ctx.queueLabel}\` label to try again with a fresh retry budget.`,
   );
   return lines.join("\n");
 }

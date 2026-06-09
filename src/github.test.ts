@@ -82,9 +82,17 @@ describe("isThrottleError", () => {
         withStatus(403, { response: { headers: { "retry-after": "1" } } }),
       ),
     ).toBe(true);
-    // A 5xx is ambiguous (the dispatch may have been processed) — NOT safe.
+    // A 5xx is ambiguous (the dispatch may have been processed) — NOT safe,
+    // even when its headers happen to show an exhausted rate-limit quota.
     expect(isThrottleError(withStatus(500))).toBe(false);
     expect(isThrottleError(withStatus(502))).toBe(false);
+    expect(
+      isThrottleError(
+        withStatus(500, {
+          response: { headers: { "x-ratelimit-remaining": "0" } },
+        }),
+      ),
+    ).toBe(false);
     // Plain permission 403 / permanent errors are not throttles.
     expect(isThrottleError(withStatus(403))).toBe(false);
     expect(isThrottleError(withStatus(404))).toBe(false);

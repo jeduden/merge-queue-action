@@ -104,11 +104,18 @@ function isPermanentRefUpdateError(err: unknown): boolean {
     if (msg.includes("not a fast forward")) return false;
     return (
       msg.includes("reference does not exist") ||
+      // Classic branch protection (GH006).
       msg.includes("protected branch") ||
       msg.includes("required status check") ||
       msg.includes("changes must be made through a pull request") ||
       msg.includes("approving review") ||
-      msg.includes("gh006")
+      msg.includes("gh006") ||
+      // Repository rulesets (GH013) — the successor to classic branch
+      // protection — reject with their own wordings.
+      msg.includes("repository rule") ||
+      msg.includes("protected ref") ||
+      msg.includes("verified signatures") ||
+      msg.includes("gh013")
     );
   }
   return false;

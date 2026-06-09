@@ -2,6 +2,7 @@ import {
   Queue,
   queueLabel,
   STATE_ACTIVE,
+  MAX_REQUEUE_ATTEMPTS,
   type PR,
   type GitHubAPI,
   type WorkflowAPI,
@@ -104,6 +105,19 @@ export function parseBatchPrs(input: string): number[] {
   return [...new Set(parsed as number[])];
 }
 
+/**
+ * Parses the max_requeues input: "" → the default; canonical digits → the
+ * number; anything else → NaN. Strict on purpose — parseInt would silently
+ * accept numeric-prefix garbage ("1O" → 1) and change the cap, while NaN
+ * makes the Queue constructor warn loudly and use the default, matching
+ * the documented invalid-input behavior.
+ */
+export function parseMaxRequeues(raw: string): number {
+  const trimmed = raw.trim();
+  if (trimmed === "") return MAX_REQUEUE_ATTEMPTS;
+  return /^\d+$/.test(trimmed) ? parseInt(trimmed, 10) : Number.NaN;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -129,6 +143,21 @@ export function isHttpConfigError(err: unknown): boolean {
   if (status === 404 || status === 422) return true;
   if (status === 403) return !isRateLimitedError(err);
   return false;
+}
+
+/**
+ * Wraps an error thrown by the merge queue's SELF-dispatch (the
+ * `workflow_dispatch` that starts a bisection run), so callers can
+ * distinguish a rejected dispatch from other failures raised inside the
+ * same handling path and attribute the config-error diagnosis precisely.
+ */
+class SelfDispatchError extends Error {
+  readonly inner: unknown;
+  constructor(inner: unknown) {
+    super(`dispatching bisection: ${errorMessage(inner)}`);
+    this.name = "SelfDispatchError";
+    this.inner = inner;
+  }
 }
 
 export type { CommentCtx };
@@ -357,10 +386,18 @@ async function handleCIFailure(
 
   if (!cfg.dryRun) {
     const wf = selfWorkflowFile();
-    await api.triggerWorkflow(wf, "main", {
-      batch_prs: prJSON,
-      bisect: "true",
-    });
+    try {
+      await api.triggerWorkflow(wf, "main", {
+        batch_prs: prJSON,
+        bisect: "true",
+      });
+    } catch (err) {
+      // Tag the failure so the caller can attribute a permanent HTTP error
+      // to the SELF-DISPATCH specifically — other throws from this function
+      // (e.g. a label-API error inside markFailed) must not be blamed on a
+      // bisection-dispatch misconfiguration.
+      throw new SelfDispatchError(err);
+    }
   }
 }
 
@@ -670,14 +707,17 @@ export async function runProcess(
           log,
         );
       } catch (err) {
-        if (isHttpConfigError(err)) {
+        if (err instanceof SelfDispatchError && isHttpConfigError(err.inner)) {
           // The bisect self-dispatch is permanently rejected (404/422: the
           // merge-queue workflow on `main` is missing or lacks a
           // `workflow_dispatch` trigger; 403: token can't dispatch).
           // Requeueing would re-run the whole failing batch each cycle.
+          // Only SelfDispatchError carries this diagnosis — a label-API
+          // error from markFailed inside the same handler must not be
+          // blamed on the dispatch configuration.
           const detail =
             `the merge queue could not dispatch its own bisection run` +
-            ` (${(err as { status: number }).status}): ${formatErrorForComment(err)}.` +
+            ` (${(err.inner as { status: number }).status}): ${formatErrorForComment(err.inner)}.` +
             ` Check that the merge-queue workflow on \`main\` has a \`workflow_dispatch\` trigger with \`batch_prs\`/\`bisect\` inputs and the token has \`actions: write\`.`;
           await failAllWithConfigError(api, q, ctx, prs, excluded, detail, log);
         } else {
@@ -719,19 +759,21 @@ export async function runProcess(
         log(
           `PR #${d.number} head changed while CI ran (${d.snapshot} -> ${d.current}); skipping stale batch`,
         );
-        // A new head means the author pushed — that's progress, not a
-        // failure, so the drifted PR's requeue budget starts fresh.
-        // (resetAttempts also strips the in-memory snapshot, so the
-        // requeue below stamps attempt-1 rather than resuming the count.)
-        const pr = prs.find((p) => p.number === d.number);
-        if (pr) {
-          try {
-            await q.resetAttempts(pr);
-          } catch (resetErr) {
-            log(
-              `Warning: failed to reset attempt counter for PR #${d.number}: ${resetErr}`,
-            );
-          }
+      }
+      // A new head means an author pushed — that's progress, not a failure,
+      // so the requeue budget starts fresh for EVERY batch member: the
+      // non-drifted PRs didn't fail either, and each drift cycle requires a
+      // fresh external push, so the reset cannot sustain a loop by itself.
+      // (resetAttempts also strips the in-memory snapshot, so the requeue
+      // below stamps attempt-1 rather than resuming the count.)
+      for (const pr of prs) {
+        if (excluded.has(pr.number)) continue;
+        try {
+          await q.resetAttempts(pr);
+        } catch (resetErr) {
+          log(
+            `Warning: failed to reset attempt counter for PR #${pr.number}: ${resetErr}`,
+          );
         }
       }
       await cleanupBranch(result.branch);
@@ -829,9 +871,9 @@ async function handleBisectObservationFailure(
       .filter((n) => !excluded.has(n))
       .map((n) => prMap.get(n))
       .filter((pr): pr is PR => pr !== undefined);
-    const detail =
-      `${reason}.` +
-      ` Check the merge-queue token's Actions permissions (\`actions: read\`/\`actions: write\`).`;
+    // The advice goes on its own line (commentConfigError blockquotes each
+    // line) so it doesn't glue punctuation onto the formatted error text.
+    const detail = `${reason}\nCheck the merge-queue token's Actions permissions (\`actions: read\` / \`actions: write\`).`;
     await failAllWithConfigError(api, q, ctx, candidates, new Set(), detail, log);
     return;
   }
@@ -969,6 +1011,20 @@ export async function runBisect(
         await gitOps.deleteBranch(result.branch);
       } catch {
         /* best effort */
+      }
+      // Every left PR conflicted (marked failed above) — but the RIGHT half
+      // is untested and still `queue:active`. Returning without requeueing
+      // it would strand those PRs: no base label, so neither the trigger
+      // nor collect() would ever see them again.
+      for (const n of right) {
+        if (excluded.has(n)) continue;
+        const pr = prMap.get(n);
+        if (!pr) continue;
+        try {
+          await requeueOrGiveUp(api, q, ctx, pr, undefined, log);
+        } catch (reqErr) {
+          log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
+        }
       }
     }
     return;
@@ -1260,13 +1316,22 @@ export async function runBisect(
       // Single PR is the culprit
       const pr = prMap.get(mergedLeft[0])!;
       log(`PR #${mergedLeft[0]} is the culprit`);
-      await q.markFailed(pr, "CI failed (identified via bisection)");
-      if (!cfg.dryRun) {
-        await postComment(
-          api,
-          pr.number,
-          commentCIFailed(ctx, ciRunUrl, true),
-          log,
+      // Guarded so a label-API failure here cannot abort the function
+      // before the right-half requeue below — that would strand every
+      // untested PR in `queue:active`.
+      try {
+        await q.markFailed(pr, "CI failed (identified via bisection)");
+        if (!cfg.dryRun) {
+          await postComment(
+            api,
+            pr.number,
+            commentCIFailed(ctx, ciRunUrl, true),
+            log,
+          );
+        }
+      } catch (markErr) {
+        log(
+          `Warning: failed to mark culprit PR #${pr.number} as failed: ${markErr}`,
         );
       }
       // Requeue right half (not yet tested)
