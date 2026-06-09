@@ -36595,6 +36595,60 @@ class PRReporter {
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
+/**
+ * Classifies a thrown value as a TRANSIENT GitHub API error worth retrying
+ * in-process (before the caller falls back to a full workflow re-run):
+ * 429 / 5xx, or a secondary-rate-limit 403 (retry-after, exhausted quota, or
+ * a rate-limit message). Permanent errors (401/403-permission/404/422) are
+ * NOT retryable — they propagate immediately so the orchestrator can mark
+ * the PR failed.
+ */
+function isRetryableHttpError(err) {
+    if (typeof err !== "object" || err === null || !("status" in err))
+        return false;
+    const status = err.status;
+    if (status === 429)
+        return true;
+    if (status >= 500 && status < 600)
+        return true;
+    if (status === 403) {
+        const e = err;
+        const headers = e.response?.headers ?? {};
+        if (headers["retry-after"] != null)
+            return true;
+        if (String(headers["x-ratelimit-remaining"]) === "0")
+            return true;
+        const msg = typeof e.message === "string" ? e.message.toLowerCase() : "";
+        return (msg.includes("rate limit") ||
+            msg.includes("secondary rate") ||
+            msg.includes("abuse"));
+    }
+    return false;
+}
+/**
+ * Runs `fn`, retrying transient GitHub API errors with exponential backoff.
+ * A transient blip is absorbed in-run instead of failing the job and forcing
+ * a full requeue; a permanent error (or one past `attempts`) propagates so
+ * the caller classifies/requeues. `sleepFn` is injectable for tests.
+ */
+async function withRetry(fn, opts = {}) {
+    const attempts = opts.attempts ?? 4;
+    const baseMs = opts.baseMs ?? 1000;
+    const log = opts.log ?? (() => { });
+    const sleepFn = opts.sleepFn ?? sleep;
+    for (let i = 0;; i++) {
+        try {
+            return await fn();
+        }
+        catch (err) {
+            if (i >= attempts - 1 || !isRetryableHttpError(err))
+                throw err;
+            const delay = baseMs * 2 ** i;
+            log(`Transient GitHub API error; retrying in ${delay}ms (attempt ${i + 1}/${attempts}): ${errorMessage(err)}`);
+            await sleepFn(delay);
+        }
+    }
+}
 /** GitHubClient implements GitHubAPI and WorkflowAPI using the GitHub REST API. */
 class GitHubClient {
     octokit;
@@ -36694,13 +36748,16 @@ class GitHubClient {
         });
     }
     async triggerWorkflow(workflowFile, ref, inputs) {
-        await this.octokit.rest.actions.createWorkflowDispatch({
+        // Retry transient blips (429/5xx/rate-limit) in-run so a momentary glitch
+        // doesn't fail the dispatch and force a whole requeue cycle. A permanent
+        // error (404/422/403-permission) propagates immediately to be classified.
+        await withRetry(() => this.octokit.rest.actions.createWorkflowDispatch({
             owner: this.owner,
             repo: this.repo,
             workflow_id: workflowFile,
             ref,
             inputs,
-        });
+        }), { log: this.log });
     }
     async findWorkflowRun(workflowFile, ref, dispatchedAt, headSha) {
         const createdAfter = new Date(dispatchedAt.getTime() - 5000);
@@ -36782,11 +36839,16 @@ class GitHubClient {
         const maxAttempts = 360;
         // Poll up to ~1h for completion.
         for (let i = 0; i < maxAttempts; i++) {
-            const { data: run } = await this.octokit.rest.actions.getWorkflowRun({
-                owner: this.owner,
-                repo: this.repo,
-                run_id: runId,
-            });
+            // Retry transient errors so a blip mid-poll doesn't abort the wait
+            // (and strand the batch); a permanent error still propagates.
+            const run = await withRetry(async () => {
+                const { data } = await this.octokit.rest.actions.getWorkflowRun({
+                    owner: this.owner,
+                    repo: this.repo,
+                    run_id: runId,
+                });
+                return data;
+            }, { log: this.log });
             if (run.status === "completed") {
                 return {
                     conclusion: run.conclusion ?? "unknown",
@@ -38614,7 +38676,26 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
     if (conclusion === "success") {
         // Left half passes — merge it to main
         log("Left half passed, merging to main");
-        const mergeSha = await b.completeMerge(result.branch);
+        let mergeSha = "";
+        try {
+            mergeSha = await b.completeMerge(result.branch);
+        }
+        catch (err) {
+            // Without this, a failed fast-forward here propagates straight to
+            // `setFailed`, stranding the tested PRs in `queue:active`. Mark them
+            // failed on a permanent rejection (branch protection) or requeue them
+            // (cap-bounded) on a transient one, mirroring runProcess.
+            const leftPRs = mergedLeft.map((n) => prMap.get(n));
+            if (err instanceof ConfigurationError && !cfg.dryRun) {
+                await failAllWithConfigError(api, q, ctx, leftPRs, new Set(), err.message, log);
+            }
+            else if (!cfg.dryRun) {
+                for (const pr of leftPRs) {
+                    await requeueOrGiveUp(api, q, ctx, pr, `failed to fast-forward main after bisect: ${formatErrorForComment(err)}`, log);
+                }
+            }
+            throw err;
+        }
         for (const n of mergedLeft) {
             log(`PR #${n} merged successfully`);
             if (!cfg.dryRun) {

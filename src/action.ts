@@ -1059,7 +1059,39 @@ export async function runBisect(
   if (conclusion === "success") {
     // Left half passes — merge it to main
     log("Left half passed, merging to main");
-    const mergeSha = await b.completeMerge(result.branch);
+    let mergeSha = "";
+    try {
+      mergeSha = await b.completeMerge(result.branch);
+    } catch (err) {
+      // Without this, a failed fast-forward here propagates straight to
+      // `setFailed`, stranding the tested PRs in `queue:active`. Mark them
+      // failed on a permanent rejection (branch protection) or requeue them
+      // (cap-bounded) on a transient one, mirroring runProcess.
+      const leftPRs = mergedLeft.map((n) => prMap.get(n)!);
+      if (err instanceof ConfigurationError && !cfg.dryRun) {
+        await failAllWithConfigError(
+          api,
+          q,
+          ctx,
+          leftPRs,
+          new Set(),
+          err.message,
+          log,
+        );
+      } else if (!cfg.dryRun) {
+        for (const pr of leftPRs) {
+          await requeueOrGiveUp(
+            api,
+            q,
+            ctx,
+            pr,
+            `failed to fast-forward main after bisect: ${formatErrorForComment(err)}`,
+            log,
+          );
+        }
+      }
+      throw err;
+    }
 
     for (const n of mergedLeft) {
       log(`PR #${n} merged successfully`);

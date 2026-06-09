@@ -16,6 +16,71 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/**
+ * Classifies a thrown value as a TRANSIENT GitHub API error worth retrying
+ * in-process (before the caller falls back to a full workflow re-run):
+ * 429 / 5xx, or a secondary-rate-limit 403 (retry-after, exhausted quota, or
+ * a rate-limit message). Permanent errors (401/403-permission/404/422) are
+ * NOT retryable — they propagate immediately so the orchestrator can mark
+ * the PR failed.
+ */
+export function isRetryableHttpError(err: unknown): boolean {
+  if (typeof err !== "object" || err === null || !("status" in err))
+    return false;
+  const status = (err as { status: number }).status;
+  if (status === 429) return true;
+  if (status >= 500 && status < 600) return true;
+  if (status === 403) {
+    const e = err as {
+      response?: { headers?: Record<string, unknown> };
+      message?: unknown;
+    };
+    const headers = e.response?.headers ?? {};
+    if (headers["retry-after"] != null) return true;
+    if (String(headers["x-ratelimit-remaining"]) === "0") return true;
+    const msg = typeof e.message === "string" ? e.message.toLowerCase() : "";
+    return (
+      msg.includes("rate limit") ||
+      msg.includes("secondary rate") ||
+      msg.includes("abuse")
+    );
+  }
+  return false;
+}
+
+/**
+ * Runs `fn`, retrying transient GitHub API errors with exponential backoff.
+ * A transient blip is absorbed in-run instead of failing the job and forcing
+ * a full requeue; a permanent error (or one past `attempts`) propagates so
+ * the caller classifies/requeues. `sleepFn` is injectable for tests.
+ */
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  opts: {
+    attempts?: number;
+    baseMs?: number;
+    log?: LogFunc;
+    sleepFn?: (ms: number) => Promise<void>;
+  } = {},
+): Promise<T> {
+  const attempts = opts.attempts ?? 4;
+  const baseMs = opts.baseMs ?? 1000;
+  const log = opts.log ?? (() => {});
+  const sleepFn = opts.sleepFn ?? sleep;
+  for (let i = 0; ; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (i >= attempts - 1 || !isRetryableHttpError(err)) throw err;
+      const delay = baseMs * 2 ** i;
+      log(
+        `Transient GitHub API error; retrying in ${delay}ms (attempt ${i + 1}/${attempts}): ${errorMessage(err)}`,
+      );
+      await sleepFn(delay);
+    }
+  }
+}
+
 /** GitHubClient implements GitHubAPI and WorkflowAPI using the GitHub REST API. */
 export class GitHubClient implements GitHubAPI, WorkflowAPI {
   public readonly octokit: Octokit;
@@ -150,13 +215,20 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
     ref: string,
     inputs?: Record<string, string>,
   ): Promise<void> {
-    await this.octokit.rest.actions.createWorkflowDispatch({
-      owner: this.owner,
-      repo: this.repo,
-      workflow_id: workflowFile,
-      ref,
-      inputs,
-    });
+    // Retry transient blips (429/5xx/rate-limit) in-run so a momentary glitch
+    // doesn't fail the dispatch and force a whole requeue cycle. A permanent
+    // error (404/422/403-permission) propagates immediately to be classified.
+    await withRetry(
+      () =>
+        this.octokit.rest.actions.createWorkflowDispatch({
+          owner: this.owner,
+          repo: this.repo,
+          workflow_id: workflowFile,
+          ref,
+          inputs,
+        }),
+      { log: this.log },
+    );
   }
 
   async findWorkflowRun(
@@ -270,11 +342,19 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
 
     // Poll up to ~1h for completion.
     for (let i = 0; i < maxAttempts; i++) {
-      const { data: run } = await this.octokit.rest.actions.getWorkflowRun({
-        owner: this.owner,
-        repo: this.repo,
-        run_id: runId,
-      });
+      // Retry transient errors so a blip mid-poll doesn't abort the wait
+      // (and strand the batch); a permanent error still propagates.
+      const run = await withRetry(
+        async () => {
+          const { data } = await this.octokit.rest.actions.getWorkflowRun({
+            owner: this.owner,
+            repo: this.repo,
+            run_id: runId,
+          });
+          return data;
+        },
+        { log: this.log },
+      );
 
       if (run.status === "completed") {
         return {

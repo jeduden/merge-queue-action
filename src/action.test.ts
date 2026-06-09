@@ -1875,6 +1875,41 @@ describe("runBisect", () => {
     expect(logs.some((l) => l.includes("Left half passed"))).toBe(true);
   });
 
+  it("marks tested PRs failed (not stranded) when bisect fast-forward is rejected", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    git.fastForwardMain = async () => {
+      throw new ConfigurationError(
+        "merge-queue-action could not fast-forward `main` (HTTP 403)",
+      );
+    };
+    const cfg = baseCfg({ batchPrs: "[1]", dryRun: false });
+
+    await expect(runBisect(api, git, cfg, nop)).rejects.toThrow();
+    // Permanent rejection → marked failed, not left stranded in queue:active.
+    expect(api.labels.get(1)).toContain("queue:failed");
+    const c = api.comments.get(1) ?? [];
+    expect(c.some((s) => s.includes("action misconfigured"))).toBe(true);
+  });
+
+  it("requeues tested PRs (cap-bounded) when bisect fast-forward fails transiently", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    git.fastForwardMain = async () => {
+      throw new Error("transient ff failure");
+    };
+    const cfg = baseCfg({ batchPrs: "[1]", dryRun: false });
+
+    await expect(runBisect(api, git, cfg, nop)).rejects.toThrow();
+    // Transient → requeued with the attempt counter, not stranded or failed.
+    expect(api.labels.get(1)).toContain("queue");
+    expect(api.labels.get(1)).toContain("queue:attempt-1");
+  });
+
   it("tolerates failures when posting the bisection status comment", async () => {
     const api = newMockAPI();
     api.prs.set("queue:active", [makePR(1), makePR(2)]);
