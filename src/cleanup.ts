@@ -23,7 +23,7 @@ export function tokenlessOriginUrl(
   return `${server.replace(/\/+$/, "")}/${repository}.git`;
 }
 
-function run(): void {
+export function runCleanup(): void {
   const url = tokenlessOriginUrl(
     process.env.GITHUB_SERVER_URL,
     process.env.GITHUB_REPOSITORY,
@@ -52,10 +52,4 @@ function run(): void {
       `cleanup: failed to reset origin (exit ${result.status}): ${(result.stderr || "").trim()}`,
     );
   }
-}
-
-// Only execute when running as the action's post step — importing this
-// module from tests must not touch git.
-if (process.env.GITHUB_ACTIONS === "true") {
-  run();
 }

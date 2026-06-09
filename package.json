@@ -6,7 +6,7 @@
   "description": "Bors-style merge queue with batching and bisection",
   "main": "dist/index.js",
   "scripts": {
-    "build": "ncc build src/main.ts -o dist --source-map --license licenses.txt && ncc build src/cleanup.ts -o dist-cleanup-tmp && cp dist-cleanup-tmp/index.js dist/cleanup.js && rm -rf dist-cleanup-tmp",
+    "build": "ncc build src/main.ts -o dist --source-map --license licenses.txt && ncc build src/cleanup-main.ts -o dist-cleanup-tmp && cp dist-cleanup-tmp/index.js dist/cleanup.js && rm -rf dist-cleanup-tmp",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc --noEmit",
