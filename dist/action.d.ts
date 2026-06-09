@@ -36,6 +36,19 @@ export interface Config {
  * Throws a descriptive error for any other input.
  */
 export declare function parseBatchPrs(input: string): number[];
+/**
+ * Returns true for GitHub API errors that indicate a PERMANENT problem an
+ * operator must fix — never resolved by a retry, so the PR must be marked
+ * failed rather than requeued:
+ *   - 404: the resource (e.g. a workflow file) doesn't exist
+ *   - 422: the request is structurally invalid (e.g. no `workflow_dispatch`)
+ *   - 401: the token is missing/expired
+ *   - 403: the token lacks a required permission (e.g. `actions: write`)
+ *
+ * A secondary-rate-limit 403 is excluded — that is transient (see
+ * `isRateLimited`).
+ */
+export declare function isHttpConfigError(err: unknown): boolean;
 export type { CommentCtx };
 /** FullAPI combines all GitHub API interfaces needed by the orchestration. */
 export interface FullAPI extends GitHubAPI, WorkflowAPI {

@@ -36925,6 +36925,19 @@ function isWorkflowScopePushRejection(stderr) {
         /without\s+[`'"]?workflows?[`'"]?\s+(?:scope|permission)/i.test(stderr));
 }
 /**
+ * Detects a PERMANENT failure updating a git ref via the API: 401 (bad
+ * token), 403 (branch protection / restricted push / missing
+ * `contents: write`), or 404 (ref/branch doesn't exist). A 422 is excluded —
+ * for a `main` fast-forward it means "not a fast-forward" because `main`
+ * advanced, which is transient and should requeue.
+ */
+function isPermanentRefUpdateError(err) {
+    if (typeof err !== "object" || err === null || !("status" in err))
+        return false;
+    const status = err.status;
+    return status === 401 || status === 403 || status === 404;
+}
+/**
  * GitOps implements GitOperator using a hybrid of the GitHub Git Data
  * API (for branch creation, fast-forward and deletion) and local
  * `git merge` (for per-PR merges). Running the merge locally is what
@@ -37453,13 +37466,35 @@ class GitOps {
             ref: `heads/${ref}`,
         });
         const sha = srcRef.object.sha;
-        await this.octokit.rest.git.updateRef({
-            owner: this.owner,
-            repo: this.repo,
-            ref: `heads/main`,
-            sha,
-            force: false,
-        });
+        try {
+            await this.octokit.rest.git.updateRef({
+                owner: this.owner,
+                repo: this.repo,
+                ref: `heads/main`,
+                sha,
+                force: false,
+            });
+        }
+        catch (err) {
+            if (isPermanentRefUpdateError(err)) {
+                // 401/403/404 updating `main` will not resolve on retry: branch
+                // protection forbids the token from updating `main` (required
+                // reviews/checks or restricted push access), the token lacks
+                // `contents: write`, or the default branch isn't `main`. Surface as
+                // a ConfigurationError so the orchestrator marks the PR failed
+                // instead of requeueing it forever. A 422 (not-a-fast-forward,
+                // i.e. `main` advanced) is left transient: the next run rebuilds.
+                const status = err.status;
+                throw new ConfigurationError("merge-queue-action could not fast-forward `main` (HTTP " +
+                    `${status}). This usually means branch protection forbids the ` +
+                    "merge-queue token from updating `main` (required reviews, " +
+                    "required status checks, or restricted push access), the token " +
+                    "lacks `contents: write`, or the repository's default branch is " +
+                    "not `main`. Grant the token push access to `main` (or add it to " +
+                    "the branch-protection bypass/allow list).");
+            }
+            throw err;
+        }
         return sha;
     }
     async deleteBranch(branch) {
@@ -37874,17 +37909,46 @@ function action_sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
 }
 /**
- * Returns true for GitHub API errors that indicate a permanent configuration
- * problem: 404 means the resource (e.g. a workflow file) doesn't exist, and
- * 422 means the request is structurally invalid (e.g. the workflow has no
- * `workflow_dispatch` trigger).  Both require an operator fix and must not
- * trigger a requeue.
+ * Detects a GitHub secondary-rate-limit / abuse response. These arrive as a
+ * 403 (occasionally 429) but are TRANSIENT — they carry a `retry-after`
+ * header, an exhausted `x-ratelimit-remaining`, or a rate-limit message — so
+ * they must NOT be treated as a permanent config error.
+ */
+function isRateLimited(err) {
+    // Only ever called from isHttpConfigError, which has already established
+    // `err` is a non-null object — optional chaining keeps property access safe.
+    const e = err;
+    const headers = e.response?.headers ?? {};
+    if (headers["retry-after"] != null)
+        return true;
+    if (String(headers["x-ratelimit-remaining"]) === "0")
+        return true;
+    const msg = typeof e.message === "string" ? e.message.toLowerCase() : "";
+    return (msg.includes("rate limit") ||
+        msg.includes("secondary rate") ||
+        msg.includes("abuse"));
+}
+/**
+ * Returns true for GitHub API errors that indicate a PERMANENT problem an
+ * operator must fix — never resolved by a retry, so the PR must be marked
+ * failed rather than requeued:
+ *   - 404: the resource (e.g. a workflow file) doesn't exist
+ *   - 422: the request is structurally invalid (e.g. no `workflow_dispatch`)
+ *   - 401: the token is missing/expired
+ *   - 403: the token lacks a required permission (e.g. `actions: write`)
+ *
+ * A secondary-rate-limit 403 is excluded — that is transient (see
+ * `isRateLimited`).
  */
 function isHttpConfigError(err) {
     if (typeof err !== "object" || err === null || !("status" in err))
         return false;
     const status = err.status;
-    return status === 404 || status === 422;
+    if (status === 404 || status === 422 || status === 401)
+        return true;
+    if (status === 403)
+        return !isRateLimited(err);
+    return false;
 }
 function hasWritePermission(perm) {
     return perm === "write" || perm === "maintain" || perm === "admin";
@@ -37946,6 +38010,25 @@ async function postComment(api, prNumber, body, log) {
     }
     catch (err) {
         log(`Warning: failed to comment on PR #${prNumber}: ${err}`);
+    }
+}
+/**
+ * Marks every non-excluded PR failed and posts an actionable config-error
+ * comment carrying `detail`. Shared by the permanent-failure handlers (batch
+ * creation, CI dispatch, fast-forward) so a misconfiguration stops the queue
+ * with one consistent treatment instead of requeueing.
+ */
+async function failAllWithConfigError(api, q, ctx, prs, excluded, detail, log) {
+    for (const pr of prs) {
+        if (excluded.has(pr.number))
+            continue;
+        try {
+            await q.markFailed(pr, "action misconfigured");
+        }
+        catch (markErr) {
+            log(`Warning: failed to mark PR #${pr.number} as failed: ${markErr}`);
+        }
+        await postComment(api, pr.number, commentConfigError(ctx, detail), log);
     }
 }
 /**
@@ -38165,15 +38248,7 @@ async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
         if (err instanceof ConfigurationError && !cfg.dryRun) {
             // Permanent misconfiguration — mark all PRs failed so the queue
             // stops looping, and post an actionable comment.
-            for (const pr of prs) {
-                try {
-                    await q.markFailed(pr, "action misconfigured");
-                }
-                catch (markErr) {
-                    log(`Warning: failed to mark PR #${pr.number} as failed: ${markErr}`);
-                }
-                await postComment(api, pr.number, commentConfigError(ctx, err.message), log);
-            }
+            await failAllWithConfigError(api, q, ctx, prs, excluded, err.message, log);
         }
         else {
             await requeueAll(`batch creation failed: ${formatErrorForComment(err)}`);
@@ -38226,18 +38301,8 @@ async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
                 // of requeueing them indefinitely.
                 const detail = `CI workflow \`${cfg.ciWorkflow}\` could not be triggered` +
                     ` (${err.status}): ${formatErrorForComment(err)}.` +
-                    ` Check that the \`ci_workflow\` input names a workflow with a \`workflow_dispatch\` trigger.`;
-                for (const pr of prs) {
-                    if (excluded.has(pr.number))
-                        continue;
-                    try {
-                        await q.markFailed(pr, "CI workflow misconfigured");
-                    }
-                    catch (markErr) {
-                        log(`Warning: failed to mark PR #${pr.number} as failed: ${markErr}`);
-                    }
-                    await postComment(api, pr.number, commentConfigError(ctx, detail), log);
-                }
+                    ` Check that the \`ci_workflow\` input names a workflow with a \`workflow_dispatch\` trigger, and that the merge-queue token has \`actions: write\` permission.`;
+                await failAllWithConfigError(api, q, ctx, prs, excluded, detail, log);
             }
             else {
                 await requeueAll(`failed to trigger CI: ${formatErrorForComment(err)}`);
@@ -38317,7 +38382,15 @@ async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
     }
     catch (err) {
         await cleanupBranch(result.branch);
-        await requeueAll(`failed to fast-forward main: ${formatErrorForComment(err)}`);
+        if (err instanceof ConfigurationError && !cfg.dryRun) {
+            // Permanent: e.g. branch protection forbids the token from updating
+            // `main`. Retrying re-runs CI and fails the same way, so mark failed
+            // instead of requeueing.
+            await failAllWithConfigError(api, q, ctx, prs, excluded, err.message, log);
+        }
+        else {
+            await requeueAll(`failed to fast-forward main: ${formatErrorForComment(err)}`);
+        }
         throw err;
     }
     // Clean up labels and comment on merged PRs
@@ -38487,7 +38560,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
                 }
                 const detail = `CI workflow \`${cfg.ciWorkflow}\` could not be triggered` +
                     ` (${err.status}): ${formatErrorForComment(err)}.` +
-                    ` Check that the \`ci_workflow\` input names a workflow with a \`workflow_dispatch\` trigger.`;
+                    ` Check that the \`ci_workflow\` input names a workflow with a \`workflow_dispatch\` trigger, and that the merge-queue token has \`actions: write\` permission.`;
                 for (const n of prNumbers) {
                     if (excluded.has(n))
                         continue;

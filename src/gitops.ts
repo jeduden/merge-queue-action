@@ -77,6 +77,20 @@ function isWorkflowScopePushRejection(stderr: string): boolean {
 }
 
 /**
+ * Detects a PERMANENT failure updating a git ref via the API: 401 (bad
+ * token), 403 (branch protection / restricted push / missing
+ * `contents: write`), or 404 (ref/branch doesn't exist). A 422 is excluded —
+ * for a `main` fast-forward it means "not a fast-forward" because `main`
+ * advanced, which is transient and should requeue.
+ */
+function isPermanentRefUpdateError(err: unknown): boolean {
+  if (typeof err !== "object" || err === null || !("status" in err))
+    return false;
+  const status = (err as { status: number }).status;
+  return status === 401 || status === 403 || status === 404;
+}
+
+/**
  * GitOps implements GitOperator using a hybrid of the GitHub Git Data
  * API (for branch creation, fast-forward and deletion) and local
  * `git merge` (for per-PR merges). Running the merge locally is what
@@ -709,13 +723,36 @@ export class GitOps implements GitOperator {
     });
     const sha = srcRef.object.sha;
 
-    await this.octokit.rest.git.updateRef({
-      owner: this.owner,
-      repo: this.repo,
-      ref: `heads/main`,
-      sha,
-      force: false,
-    });
+    try {
+      await this.octokit.rest.git.updateRef({
+        owner: this.owner,
+        repo: this.repo,
+        ref: `heads/main`,
+        sha,
+        force: false,
+      });
+    } catch (err) {
+      if (isPermanentRefUpdateError(err)) {
+        // 401/403/404 updating `main` will not resolve on retry: branch
+        // protection forbids the token from updating `main` (required
+        // reviews/checks or restricted push access), the token lacks
+        // `contents: write`, or the default branch isn't `main`. Surface as
+        // a ConfigurationError so the orchestrator marks the PR failed
+        // instead of requeueing it forever. A 422 (not-a-fast-forward,
+        // i.e. `main` advanced) is left transient: the next run rebuilds.
+        const status = (err as { status: number }).status;
+        throw new ConfigurationError(
+          "merge-queue-action could not fast-forward `main` (HTTP " +
+            `${status}). This usually means branch protection forbids the ` +
+            "merge-queue token from updating `main` (required reviews, " +
+            "required status checks, or restricted push access), the token " +
+            "lacks `contents: write`, or the repository's default branch is " +
+            "not `main`. Grant the token push access to `main` (or add it to " +
+            "the branch-protection bypass/allow list).",
+        );
+      }
+      throw err;
+    }
 
     return sha;
   }

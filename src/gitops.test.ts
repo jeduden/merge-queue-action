@@ -688,6 +688,35 @@ describe("GitOps with injected exec", () => {
     expect((err as Error).message).toContain("remote: error pushing refs");
   });
 
+  it.each([401, 403, 404])(
+    "fastForwardMain throws ConfigurationError when updateRef is rejected (%s)",
+    async (status) => {
+      const { octokit } = makeFakeOctokit([{ ref: "heads/batch", sha: "abc123" }]);
+      octokit.rest.git.updateRef = async () => {
+        throw Object.assign(new Error("rejected"), { status });
+      };
+      // biome-ignore lint/suspicious/noExplicitAny: test double
+      const ops = new GitOps(octokit as any, "o", "r");
+      const err = await ops.fastForwardMain("batch").catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ConfigurationError);
+      expect((err as Error).message).toMatch(/main/i);
+    },
+  );
+
+  it("fastForwardMain rethrows a transient 422 (main advanced, not a fast-forward)", async () => {
+    const { octokit } = makeFakeOctokit([{ ref: "heads/batch", sha: "abc123" }]);
+    octokit.rest.git.updateRef = async () => {
+      throw Object.assign(new Error("Update is not a fast forward"), {
+        status: 422,
+      });
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r");
+    const err = await ops.fastForwardMain("batch").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect(err).not.toBeInstanceOf(ConfigurationError);
+  });
+
   it("fastForwardMain uses refs API with force=false and returns SHA", async () => {
     const { octokit, calls } = makeFakeOctokit([
       { ref: "heads/batch", sha: "abc123" },

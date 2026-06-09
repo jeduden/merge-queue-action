@@ -4,6 +4,7 @@ import {
   hasWritePermission,
   selfWorkflowFile,
   parseBatchPrs,
+  isHttpConfigError,
   runProcess,
   runBisect,
   runSetup,
@@ -208,6 +209,62 @@ describe("hasWritePermission", () => {
     ["", false],
   ])("%s -> %s", (perm, want) => {
     expect(hasWritePermission(perm)).toBe(want);
+  });
+});
+
+describe("isHttpConfigError", () => {
+  const withStatus = (status: number, extra: object = {}) =>
+    Object.assign(new Error("x"), { status, ...extra });
+
+  it.each([
+    [404, true],
+    [422, true],
+    [401, true],
+    [403, true], // plain 403 = missing permission = permanent
+    [429, false],
+    [500, false],
+    [502, false],
+  ])("status %s → permanent=%s", (status, want) => {
+    expect(isHttpConfigError(withStatus(status))).toBe(want);
+  });
+
+  it("treats a secondary-rate-limit 403 as transient (retry-after header)", () => {
+    expect(
+      isHttpConfigError(
+        withStatus(403, { response: { headers: { "retry-after": "60" } } }),
+      ),
+    ).toBe(false);
+  });
+
+  it("treats an exhausted-quota 403 as transient (x-ratelimit-remaining: 0)", () => {
+    expect(
+      isHttpConfigError(
+        withStatus(403, {
+          response: { headers: { "x-ratelimit-remaining": "0" } },
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("treats a rate-limit-message 403 as transient", () => {
+    expect(
+      isHttpConfigError(
+        Object.assign(new Error("You have exceeded a secondary rate limit"), {
+          status: 403,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("returns false for non-object / status-less errors", () => {
+    expect(isHttpConfigError("nope")).toBe(false);
+    expect(isHttpConfigError(null)).toBe(false);
+    expect(isHttpConfigError(new Error("no status"))).toBe(false);
+  });
+
+  it("treats a 403 with a non-string message as permanent (not rate-limited)", () => {
+    // Guards the non-string-message path in the rate-limit check.
+    expect(isHttpConfigError({ status: 403, message: 123 })).toBe(true);
   });
 });
 
@@ -1073,6 +1130,64 @@ describe("runProcess", () => {
     expect(api.labels.get(1)).not.toContain("queue:attempt-2");
     const c = api.comments.get(1) ?? [];
     expect(c.find((s) => s.includes("gave up after 2 attempts"))).toBeDefined();
+  });
+
+  it("marks PR failed (fast, not requeued) when CI dispatch is forbidden (403)", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    api.triggerWorkflow = async () => {
+      throw Object.assign(new Error("Resource not accessible by integration"), {
+        status: 403,
+      });
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow("triggering CI");
+    // 403 permission is permanent → marked failed in one run, not requeued.
+    expect(api.labels.get(1)).toContain("queue:failed");
+    expect(api.labels.get(1)).not.toContain("queue");
+    const c = api.comments.get(1) ?? [];
+    expect(c.some((s) => s.includes("action misconfigured"))).toBe(true);
+    expect(c.some((s) => s.includes("actions: write"))).toBe(true);
+  });
+
+  it("requeues (not failed) on a secondary-rate-limit 403 during CI dispatch", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    api.triggerWorkflow = async () => {
+      throw Object.assign(
+        new Error("You have exceeded a secondary rate limit"),
+        { status: 403, response: { headers: { "retry-after": "60" } } },
+      );
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow("triggering CI");
+    // Rate-limit 403 is transient → requeued, not failed.
+    expect(api.labels.get(1)).toContain("queue");
+    expect(api.labels.get(1)).not.toContain("queue:failed");
+  });
+
+  it("marks PR failed when the fast-forward of main is rejected (branch protection)", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    git.fastForwardMain = async () => {
+      throw new ConfigurationError(
+        "merge-queue-action could not fast-forward `main` (HTTP 403)",
+      );
+    };
+    const cfg = baseCfg({ dryRun: false });
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow();
+    // Permanent ref-update rejection → marked failed, not requeued forever.
+    expect(api.labels.get(1)).toContain("queue:failed");
+    expect(api.labels.get(1)).not.toContain("queue");
+    const c = api.comments.get(1) ?? [];
+    expect(c.some((s) => s.includes("action misconfigured"))).toBe(true);
   });
 
   it("warns when markFailed throws during CI trigger 404 handling in runProcess", async () => {
