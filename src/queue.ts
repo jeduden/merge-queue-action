@@ -42,7 +42,11 @@ export function attemptLabel(base: string, n: number): string {
  * Reads the highest requeue-attempt count encoded in a PR's labels
  * (`<base>:attempt-N`), returning 0 when none is present, alongside the
  * concrete attempt-label names found so callers can clear them. Tolerates
- * multiple/stale attempt labels by taking the max.
+ * multiple/stale attempt labels by taking the max. Only canonical
+ * `attemptLabel` forms count — a strictly numeric suffix — so a stray
+ * human label like `queue:attempt-2-old` (or an exotic numeral like
+ * `queue:attempt-1e9`) neither inflates the count nor gets deleted by
+ * the cleanup that consumes `labels`.
  */
 export function readAttemptCount(
   base: string,
@@ -53,9 +57,11 @@ export function readAttemptCount(
   const found: string[] = [];
   for (const l of labels ?? []) {
     if (!l.startsWith(prefix)) continue;
+    const suffix = l.slice(prefix.length);
+    if (!/^\d+$/.test(suffix)) continue;
     found.push(l);
-    const n = Number(l.slice(prefix.length));
-    if (Number.isInteger(n) && n > count) count = n;
+    const n = Number(suffix);
+    if (n > count) count = n;
   }
   return { count, labels: found };
 }
@@ -149,12 +155,16 @@ export class Queue {
     this.label = label;
     this.dryRun = dryRun;
     this.log = log ?? (() => {});
-    // Guard against a misconfigured 0/negative cap silently disabling the
-    // backstop; fall back to the default so the loop stays bounded.
-    this.maxAttempts =
-      Number.isInteger(maxAttempts) && maxAttempts > 0
-        ? maxAttempts
-        : MAX_REQUEUE_ATTEMPTS;
+    // Guard against a misconfigured 0/negative/NaN cap silently disabling
+    // the backstop; fall back to the default so the loop stays bounded,
+    // and say so — the operator asked for something else.
+    const valid = Number.isInteger(maxAttempts) && maxAttempts > 0;
+    this.maxAttempts = valid ? maxAttempts : MAX_REQUEUE_ATTEMPTS;
+    if (!valid) {
+      this.log(
+        `Invalid max requeue attempts (${maxAttempts}); must be a positive integer — using default ${MAX_REQUEUE_ATTEMPTS}`,
+      );
+    }
   }
 
   /** The effective requeue cap (after validation), for comment text. */
@@ -171,6 +181,24 @@ export class Queue {
       } catch (err) {
         if (!isNotFoundError(err)) throw err;
       }
+    }
+  }
+
+  /**
+   * Resets a PR's requeue-attempt counter. Called when the PR makes real
+   * progress — it merged, or its head changed (the author pushed) — so the
+   * budget never penalises progress-driven retries. Also strips the attempt
+   * labels from the in-memory `pr.labels` snapshot, so a `requeue` later in
+   * the same run starts counting from zero instead of the stale snapshot.
+   */
+  async resetAttempts(pr: PR): Promise<void> {
+    const { labels } = readAttemptCount(this.label, pr.labels);
+    if (labels.length === 0) return;
+    this.log(`Resetting requeue-attempt counter for PR #${pr.number}`);
+    if (this.dryRun) return;
+    await this.clearAttemptLabels(pr);
+    if (pr.labels) {
+      pr.labels = pr.labels.filter((l) => !labels.includes(l));
     }
   }
 
@@ -217,6 +245,14 @@ export class Queue {
   async markFailed(pr: PR, reason: string): Promise<void> {
     this.log(`Marking PR #${pr.number} as failed: ${reason}`);
     if (this.dryRun) return;
+    // Terminal label FIRST: if any later cleanup call fails, the PR is
+    // already visibly failed (and stale attempt labels merely over-count,
+    // which is safe) — instead of being stripped of every queue label with
+    // its budget erased, invisible to both the trigger and `collect`.
+    await this.api.addLabel(
+      pr.number,
+      queueLabel(this.label, STATE_FAILED),
+    );
     try {
       await this.api.removeLabel(
         pr.number,
@@ -236,10 +272,6 @@ export class Queue {
     // Reset the requeue-attempt counter: a PR leaving the queue (failed or,
     // later, re-added by the author) must start from a fresh budget.
     await this.clearAttemptLabels(pr);
-    await this.api.addLabel(
-      pr.number,
-      queueLabel(this.label, STATE_FAILED),
-    );
   }
 
   /**
@@ -270,11 +302,16 @@ export class Queue {
       `Requeuing PR #${pr.number} (attempt ${next}/${this.maxAttempts})`,
     );
     if (this.dryRun) return true;
-    // Bump the attempt counter: drop any prior attempt labels, add the new
-    // one. Done before re-adding the base label so the count is durable the
-    // moment the PR re-enters the queue.
-    await this.clearAttemptLabels(pr);
+    // Stamp the NEW attempt label before any other label change. The order
+    // is load-bearing: `readAttemptCount` takes the max over attempt labels,
+    // so add-then-clear is monotone — an API failure mid-sequence can only
+    // leave the count over-stated (self-correcting), never erased. The
+    // reverse order (clear-then-add) would let a single failed call reset
+    // the budget and re-arm the unbounded-retry loop the cap exists to stop.
+    // The just-added label is not in the `pr.labels` snapshot, so the clear
+    // below removes only the stale lower-numbered ones.
     await this.api.addLabel(pr.number, attemptLabel(this.label, next));
+    await this.clearAttemptLabels(pr);
     try {
       await this.api.removeLabel(
         pr.number,

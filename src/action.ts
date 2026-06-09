@@ -28,7 +28,7 @@ import {
   commentConfigError,
   commentGaveUp,
 } from "./comments.js";
-import { ConfigurationError } from "./errors.js";
+import { ConfigurationError, isRateLimitedError } from "./errors.js";
 
 export interface Config {
   ciWorkflow: string;
@@ -109,47 +109,25 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * Detects a GitHub secondary-rate-limit / abuse response. These arrive as a
- * 403 (occasionally 429) but are TRANSIENT — they carry a `retry-after`
- * header, an exhausted `x-ratelimit-remaining`, or a rate-limit message — so
- * they must NOT be treated as a permanent config error.
- */
-function isRateLimited(err: unknown): boolean {
-  // Only ever called from isHttpConfigError, which has already established
-  // `err` is a non-null object — optional chaining keeps property access safe.
-  const e = err as {
-    response?: { headers?: Record<string, unknown> };
-    message?: unknown;
-  };
-  const headers = e.response?.headers ?? {};
-  if (headers["retry-after"] != null) return true;
-  if (String(headers["x-ratelimit-remaining"]) === "0") return true;
-  const msg = typeof e.message === "string" ? e.message.toLowerCase() : "";
-  return (
-    msg.includes("rate limit") ||
-    msg.includes("secondary rate") ||
-    msg.includes("abuse")
-  );
-}
-
-/**
  * Returns true for GitHub API errors that indicate a PERMANENT problem an
  * operator must fix — never resolved by a retry, so the PR must be marked
  * failed rather than requeued:
  *   - 404: the resource (e.g. a workflow file) doesn't exist
  *   - 422: the request is structurally invalid (e.g. no `workflow_dispatch`)
- *   - 401: the token is missing/expired
  *   - 403: the token lacks a required permission (e.g. `actions: write`)
  *
- * A secondary-rate-limit 403 is excluded — that is transient (see
- * `isRateLimited`).
+ * Deliberately transient:
+ *   - a rate-limited 403 (see `isRateLimitedError`);
+ *   - 401 — an expired GitHub App installation token 401s after a long CI
+ *     wait, and the next run mints a fresh token; the requeue cap bounds
+ *     the genuinely-dead-credential case.
  */
 export function isHttpConfigError(err: unknown): boolean {
   if (typeof err !== "object" || err === null || !("status" in err))
     return false;
   const status = (err as { status: number }).status;
-  if (status === 404 || status === 422 || status === 401) return true;
-  if (status === 403) return !isRateLimited(err);
+  if (status === 404 || status === 422) return true;
+  if (status === 403) return !isRateLimitedError(err);
   return false;
 }
 
@@ -626,9 +604,20 @@ export async function runProcess(
       );
     } catch (err) {
       await cleanupBranch(result.branch);
-      await requeueAll(
-        `failed to locate CI run: ${formatErrorForComment(err)}`,
-      );
+      if (isHttpConfigError(err)) {
+        // e.g. a 403 listing workflow runs: the token lost `actions: read`.
+        // Retrying would dispatch a fresh CI run each cycle whose result is
+        // never observed — fail fast instead of burning the requeue budget.
+        const detail =
+          `the dispatched CI run could not be located` +
+          ` (${(err as { status: number }).status}): ${formatErrorForComment(err)}.` +
+          ` Check that the merge-queue token can read Actions runs (\`actions: read\`).`;
+        await failAllWithConfigError(api, q, ctx, prs, excluded, detail, log);
+      } else {
+        await requeueAll(
+          `failed to locate CI run: ${formatErrorForComment(err)}`,
+        );
+      }
       throw new Error(`locating CI run: ${formatErrorForComment(err)}`);
     }
     ciRunUrl = runHandle.htmlUrl;
@@ -652,9 +641,17 @@ export async function runProcess(
       runResult = await api.waitForWorkflowRun(runHandle.runId);
     } catch (err) {
       await cleanupBranch(result.branch);
-      await requeueAll(
-        `failed to read CI status: ${formatErrorForComment(err)}`,
-      );
+      if (isHttpConfigError(err)) {
+        const detail =
+          `the CI run's status could not be read` +
+          ` (${(err as { status: number }).status}): ${formatErrorForComment(err)}.` +
+          ` Check that the merge-queue token can read Actions runs (\`actions: read\`).`;
+        await failAllWithConfigError(api, q, ctx, prs, excluded, detail, log);
+      } else {
+        await requeueAll(
+          `failed to read CI status: ${formatErrorForComment(err)}`,
+        );
+      }
       throw new Error(`getting CI status: ${formatErrorForComment(err)}`);
     }
 
@@ -673,9 +670,21 @@ export async function runProcess(
           log,
         );
       } catch (err) {
-        await requeueAll(
-          `error handling CI failure: ${formatErrorForComment(err)}`,
-        );
+        if (isHttpConfigError(err)) {
+          // The bisect self-dispatch is permanently rejected (404/422: the
+          // merge-queue workflow on `main` is missing or lacks a
+          // `workflow_dispatch` trigger; 403: token can't dispatch).
+          // Requeueing would re-run the whole failing batch each cycle.
+          const detail =
+            `the merge queue could not dispatch its own bisection run` +
+            ` (${(err as { status: number }).status}): ${formatErrorForComment(err)}.` +
+            ` Check that the merge-queue workflow on \`main\` has a \`workflow_dispatch\` trigger with \`batch_prs\`/\`bisect\` inputs and the token has \`actions: write\`.`;
+          await failAllWithConfigError(api, q, ctx, prs, excluded, detail, log);
+        } else {
+          await requeueAll(
+            `error handling CI failure: ${formatErrorForComment(err)}`,
+          );
+        }
         throw err;
       }
       return;
@@ -710,11 +719,23 @@ export async function runProcess(
         log(
           `PR #${d.number} head changed while CI ran (${d.snapshot} -> ${d.current}); skipping stale batch`,
         );
+        // A new head means the author pushed — that's progress, not a
+        // failure, so the drifted PR's requeue budget starts fresh.
+        // (resetAttempts also strips the in-memory snapshot, so the
+        // requeue below stamps attempt-1 rather than resuming the count.)
+        const pr = prs.find((p) => p.number === d.number);
+        if (pr) {
+          try {
+            await q.resetAttempts(pr);
+          } catch (resetErr) {
+            log(
+              `Warning: failed to reset attempt counter for PR #${d.number}: ${resetErr}`,
+            );
+          }
+        }
       }
       await cleanupBranch(result.branch);
-      await requeueAll(
-        "PR head changed while batch CI was running; queue will retry with a fresh batch",
-      );
+      await requeueAll("PR head changed while batch CI was running");
       return;
     }
   }
@@ -750,6 +771,13 @@ export async function runProcess(
       } catch {
         /* best effort */
       }
+      // The PR left the queue successfully — drop its requeue counter so
+      // the merged (closed) PR doesn't wear a stale bookkeeping label.
+      try {
+        await q.resetAttempts(pr);
+      } catch {
+        /* best effort */
+      }
       await ensurePRClosedAfterMerge(api, pr.number, log);
       await postComment(
         api,
@@ -764,10 +792,12 @@ export async function runProcess(
 }
 
 /**
- * Cleans up a bisect batch branch and requeues the still-candidate PRs with
- * an explanatory comment. Used when the bisect CI run cannot be located or
- * observed (timeout/API error) — without this, the batch branch would leak
- * and the PRs would be stuck in `queue:active`.
+ * Cleans up a bisect batch branch and routes the still-candidate PRs out of
+ * `queue:active` after the bisect CI run could not be observed (dispatch,
+ * locate, or status failure). A permanent HTTP error (`isHttpConfigError`)
+ * marks them failed with an actionable comment; anything else requeues them
+ * (cap-bounded). Without this, the batch branch would leak and the PRs
+ * would be stranded.
  */
 async function handleBisectObservationFailure(
   api: FullAPI,
@@ -779,6 +809,7 @@ async function handleBisectObservationFailure(
   prNumbers: number[],
   excluded: Set<number>,
   branch: string,
+  cause: unknown,
   reason: string,
   log: (msg: string) => void,
 ): Promise<void> {
@@ -792,6 +823,17 @@ async function handleBisectObservationFailure(
         `failed to delete bisect branch \`${branch}\` during observation-failure cleanup: ${detail}`,
       ),
     );
+  }
+  if (isHttpConfigError(cause)) {
+    const candidates = prNumbers
+      .filter((n) => !excluded.has(n))
+      .map((n) => prMap.get(n))
+      .filter((pr): pr is PR => pr !== undefined);
+    const detail =
+      `${reason}.` +
+      ` Check the merge-queue token's Actions permissions (\`actions: read\`/\`actions: write\`).`;
+    await failAllWithConfigError(api, q, ctx, candidates, new Set(), detail, log);
+    return;
   }
   for (const n of prNumbers) {
     if (excluded.has(n)) continue;
@@ -975,6 +1017,7 @@ export async function runBisect(
           prNumbers,
           excluded,
           result.branch,
+          err,
           `failed to trigger bisect CI: ${formatErrorForComment(err)}`,
           log,
         );
@@ -1003,6 +1046,7 @@ export async function runBisect(
           prNumbers,
           excluded,
           result.branch,
+          err,
           `failed to locate bisect CI run: ${formatErrorForComment(err)}`,
           log,
         );
@@ -1046,6 +1090,7 @@ export async function runBisect(
         prNumbers,
         excluded,
         result.branch,
+        err,
         `failed to read bisect CI status: ${formatErrorForComment(err)}`,
         log,
       );
@@ -1064,30 +1109,55 @@ export async function runBisect(
       mergeSha = await b.completeMerge(result.branch);
     } catch (err) {
       // Without this, a failed fast-forward here propagates straight to
-      // `setFailed`, stranding the tested PRs in `queue:active`. Mark them
-      // failed on a permanent rejection (branch protection) or requeue them
-      // (cap-bounded) on a transient one, mirroring runProcess.
-      const leftPRs = mergedLeft.map((n) => prMap.get(n)!);
-      if (err instanceof ConfigurationError && !cfg.dryRun) {
-        await failAllWithConfigError(
-          api,
-          q,
-          ctx,
-          leftPRs,
-          new Set(),
-          err.message,
-          log,
-        );
-      } else if (!cfg.dryRun) {
-        for (const pr of leftPRs) {
-          await requeueOrGiveUp(
+      // `setFailed`, stranding the candidate PRs in `queue:active`. The
+      // rescue must cover BOTH halves: the tested left PRs and the
+      // untested right ones — the right-half dispatch below is never
+      // reached, and a PR stuck in `queue:active` has no base label, so
+      // neither the trigger nor `collect` would ever see it again.
+      if (!cfg.dryRun) {
+        // completeMerge deletes the branch only after a successful
+        // fast-forward; clean up the leaked ref (mirrors runProcess).
+        try {
+          await gitOps.deleteBranch(result.branch);
+        } catch (delErr) {
+          const candidates = prNumbers.filter((n) => !excluded.has(n));
+          await reporter.withScope(candidates, () =>
+            reporter.warn(
+              `failed to delete bisect branch \`${result.branch}\` after a fast-forward failure: ${errorMessage(delErr)}`,
+            ),
+          );
+        }
+        const affected = [...mergedLeft, ...right]
+          .filter((n) => !excluded.has(n))
+          .map((n) => prMap.get(n))
+          .filter((pr): pr is PR => pr !== undefined);
+        if (err instanceof ConfigurationError) {
+          await failAllWithConfigError(
             api,
             q,
             ctx,
-            pr,
-            `failed to fast-forward main after bisect: ${formatErrorForComment(err)}`,
+            affected,
+            new Set(),
+            err.message,
             log,
           );
+        } else {
+          for (const pr of affected) {
+            try {
+              await requeueOrGiveUp(
+                api,
+                q,
+                ctx,
+                pr,
+                `failed to fast-forward main after bisect: ${formatErrorForComment(err)}`,
+                log,
+              );
+            } catch (reqErr) {
+              log(
+                `Warning: failed to requeue PR #${pr.number}: ${reqErr}`,
+              );
+            }
+          }
         }
       }
       throw err;
@@ -1103,6 +1173,16 @@ export async function runBisect(
           );
         } catch {
           /* best effort */
+        }
+        // The PR left the queue successfully — drop its requeue counter so
+        // the merged (closed) PR doesn't wear a stale bookkeeping label.
+        const mergedPR = prMap.get(n);
+        if (mergedPR) {
+          try {
+            await q.resetAttempts(mergedPR);
+          } catch {
+            /* best effort */
+          }
         }
         await postComment(
           api,
@@ -1125,18 +1205,35 @@ export async function runBisect(
             bisect: "true",
           });
         } catch (err) {
-          for (const n of right) {
-            try {
-              await requeueOrGiveUp(
-                api,
-                q,
-                ctx,
-                prMap.get(n)!,
-                `failed to dispatch bisect for right half: ${formatErrorForComment(err)}`,
-                log,
-              );
-            } catch (reqErr) {
-              log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
+          if (isHttpConfigError(err)) {
+            // The self-dispatch is permanently rejected — retrying the
+            // right half would re-fail identically every cycle.
+            const detail =
+              `the merge queue could not dispatch its own bisection run for the remaining PRs: ${formatErrorForComment(err)}.` +
+              ` Check that the merge-queue workflow on \`main\` has a \`workflow_dispatch\` trigger with \`batch_prs\`/\`bisect\` inputs and the token has \`actions: write\`.`;
+            await failAllWithConfigError(
+              api,
+              q,
+              ctx,
+              right.map((n) => prMap.get(n)!),
+              excluded,
+              detail,
+              log,
+            );
+          } else {
+            for (const n of right) {
+              try {
+                await requeueOrGiveUp(
+                  api,
+                  q,
+                  ctx,
+                  prMap.get(n)!,
+                  `failed to dispatch bisect for right half: ${formatErrorForComment(err)}`,
+                  log,
+                );
+              } catch (reqErr) {
+                log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
+              }
             }
           }
           throw new Error(
@@ -1199,6 +1296,27 @@ export async function runBisect(
             bisect: "true",
           });
         } catch (err) {
+          if (isHttpConfigError(err)) {
+            // Permanently rejected self-dispatch: requeueing would re-run
+            // the identical failing batch each cycle.
+            const detail =
+              `the merge queue could not dispatch its own follow-up bisection run: ${formatErrorForComment(err)}.` +
+              ` Check that the merge-queue workflow on \`main\` has a \`workflow_dispatch\` trigger with \`batch_prs\`/\`bisect\` inputs and the token has \`actions: write\`.`;
+            await failAllWithConfigError(
+              api,
+              q,
+              ctx,
+              prNumbers
+                .filter((n) => !excluded.has(n))
+                .map((n) => prMap.get(n)!),
+              new Set(),
+              detail,
+              log,
+            );
+            throw new Error(
+              `dispatching follow-up bisect: ${formatErrorForComment(err)}`,
+            );
+          }
           // Requeue non-excluded PRs on dispatch failure
           for (const n of prNumbers) {
             if (excluded.has(n)) continue;

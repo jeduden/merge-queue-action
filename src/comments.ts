@@ -198,12 +198,17 @@ export function commentRequeued(ctx: CommentCtx, reason: string): string {
 }
 
 /**
- * Posted when the queue stops retrying a PR because it has been requeued the
- * maximum number of times without succeeding. This is the circuit-breaker
+ * Posted when the queue stops retrying a PR because it has reached the
+ * requeue-attempt limit without succeeding. This is the circuit-breaker
  * backstop: it fires for any failure — permanent or stubbornly transient —
- * that survived `maxAttempts` requeues, so the queue can never retry a PR
+ * that survived the retry budget, so the queue can never retry a PR
  * forever. Unlike `commentRequeued`, the operator must act before the PR is
  * retried.
+ *
+ * `lastReason` is rendered raw in a blockquote, exactly like
+ * `commentRequeued` renders the same string — callers (requeueOrGiveUp)
+ * already pass a one-line, `formatErrorForComment`-sanitised reason, and
+ * re-formatting here would truncate it a second time.
  */
 export function commentGaveUp(
   ctx: CommentCtx,
@@ -211,18 +216,18 @@ export function commentGaveUp(
   lastReason?: string,
 ): string {
   const lines = [
-    `🔴 ${BRAND} — gave up after ${maxAttempts} attempts`,
+    `🔴 ${BRAND} — retry limit reached`,
     "",
-    `The merge queue requeued this PR ${maxAttempts} times without success and has stopped retrying to avoid an endless loop.`,
+    `This PR reached the merge queue's retry limit (${maxAttempts} requeue attempts) without succeeding, so the queue has stopped retrying it.`,
   ];
   if (lastReason) {
-    lines.push("", "Most recent error:", "", `> ${formatErrorForComment(lastReason)}`);
+    lines.push("", "Most recent error:", "", `> ${lastReason}`);
   }
   lines.push(
     "",
     `[View merge queue run](${ctx.actionRunUrl}).`,
     "",
-    `**Next:** Investigate the failure above, fix the underlying problem, then re-add the \`${ctx.queueLabel}\` label to try again.`,
+    `**Next:** Investigate the failure above, fix the underlying problem, then re-add the \`${ctx.queueLabel}\` label to try again with a fresh retry budget.`,
   );
   return lines.join("\n");
 }

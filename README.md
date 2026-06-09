@@ -100,10 +100,10 @@ for detailed setup.
 
 ### 4. Create the queue labels (one-time)
 
-The action uses three labels based on the `queue_label` input (default
-`queue`): `<base>`, `<base>:active`, and `<base>:failed`. Create them in
-your repository from the GitHub UI under **Issues → Labels** or with the
-GitHub CLI:
+The action's state labels derive from the `queue_label` input (default
+`queue`): `<base>`, `<base>:active`, and `<base>:failed`. Create those
+three in your repository from the GitHub UI under **Issues → Labels** or
+with the GitHub CLI:
 
 ```bash
 # Using the default queue_label ("queue"):
@@ -111,6 +111,11 @@ gh label create queue --repo owner/repo
 gh label create queue:active --repo owner/repo
 gh label create queue:failed --repo owner/repo
 ```
+
+The retry counter labels (`<base>:attempt-N` — see
+[Bounded retries](#bounded-retries-no-infinite-loops)) are created
+automatically as needed; don't pre-create them, and don't prune one from
+a PR that is still queued — removing it resets that PR's retry budget.
 
 ### 5. Use it
 
@@ -153,14 +158,19 @@ re-adds the `queue` label, and the next run retries. To guarantee a
 permission, branch protection rejecting the bot, a check that always
 fails), every requeue is bounded by a per-PR attempt cap:
 
-- Each requeue stamps the PR with a `queue:attempt-N` label.
-- Once a PR has been requeued **`max_requeues`** times (default **10**)
-  without succeeding, the queue stops retrying it, moves it to
-  `queue:failed`, and posts a "gave up after N attempts" comment instead
-  of re-adding the `queue` label.
-- The counter resets when the PR leaves the queue (merged, or marked
-  failed and then re-added by you), so a genuinely transient failure that
-  later succeeds is never penalised.
+- Each requeue stamps the PR with a `queue:attempt-N` label. These
+  labels are created on the fly (with a default color) — they don't need
+  pre-creating, and deleting one from a PR that is still queued resets
+  that PR's counter.
+- Once a PR has been requeued **`max_requeues`** times (default **10**;
+  must be a positive integer — invalid values fall back to the default
+  with a run-log warning) without succeeding, the queue stops retrying
+  it, moves it to `queue:failed`, and posts a "retry limit reached"
+  comment instead of re-adding the `queue` label.
+- The counter resets whenever the PR makes real progress: it merges, its
+  head changes while batch CI runs (the author pushed), or it is marked
+  failed and later re-added by you — so a genuinely transient failure
+  that later succeeds is never penalised.
 
 This backstop bounds *every* failure path, including ones the action does
 not yet classify as permanent. Tune it with the `max_requeues` input.
@@ -540,7 +550,7 @@ tested together in a single batch, reducing total CI runs.
 | `ci_workflow` | yes | — | Workflow file supporting `workflow_dispatch` (e.g. `.github/workflows/ci.yml`) |
 | `batch_size` | no | `5` | Max PRs per batch |
 | `queue_label` | no | `queue` | Label that enqueues a PR |
-| `max_requeues` | no | `10` | Max times a single PR is requeued before the queue gives up and marks it `queue:failed`. Bounds every retry path so a permanent failure can't re-trigger the workflow forever. See [Bounded retries](#bounded-retries-no-infinite-loops). |
+| `max_requeues` | no | `10` | Max times a single PR is requeued before the queue gives up and marks it `queue:failed`. Bounds every retry path so a permanent failure can't re-trigger the workflow forever. Must be a positive integer; invalid values fall back to the default with a run-log warning. See [Bounded retries](#bounded-retries-no-infinite-loops). |
 | `dry_run` | no | `false` | Log intent without mutating |
 | `batch_prs` | no | `""` | PR numbers to process explicitly. Accepts a JSON array (`[187]` or `[181,187]`) or a single integer string (`187`). When provided via `workflow_dispatch` in normal mode, those PRs are fetched directly without requiring the queue label — the recommended fallback for conflicted PRs. In bisect mode the action sets this automatically. |
 | `git_user_email` | no | `merge-queue@users.noreply.github.com` | `user.email` set on the local repo before merging |

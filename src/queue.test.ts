@@ -518,11 +518,15 @@ describe("Requeue attempt cap", () => {
   it("requeues exactly cap times then fails on the next attempt", async () => {
     const api = newMockAPI();
     const q = new Queue(api, "queue", false, nop, 3);
+    // Keep the PR snapshot a SEPARATE array from the mock's server-side
+    // store — in production pr.labels is a parsed HTTP response, never an
+    // alias of GitHub's state, and aliasing them would let the mock's
+    // addLabel mutate the "snapshot" mid-requeue.
     let labels = ["queue:active"];
     const sync = () => {
       labels = (api.labels.get(1) ?? []).slice();
     };
-    api.labels.set(1, labels);
+    api.labels.set(1, ["queue:active"]);
     for (let i = 1; i <= 3; i++) {
       const ok = await q.requeue(mkPR(1, labels));
       expect(ok).toBe(true);
@@ -598,6 +602,113 @@ describe("readAttemptCount / attemptLabel", () => {
 
   it("ignores non-numeric attempt suffixes", () => {
     expect(readAttemptCount("queue", ["queue:attempt-x"]).count).toBe(0);
+  });
+
+  it("only counts canonical numeric suffixes and never claims foreign labels", () => {
+    // "1e1" would Number() to 10 and instantly trip the cap; "2-old" is a
+    // human bookkeeping label that must not be deleted by the cleanup.
+    const r = readAttemptCount("queue", [
+      "queue:attempt-1e1",
+      "queue:attempt-0x10",
+      "queue:attempt- 3",
+      "queue:attempt-2-old",
+      "queue:attempt-4",
+    ]);
+    expect(r.count).toBe(4);
+    expect(r.labels).toEqual(["queue:attempt-4"]);
+  });
+});
+
+describe("Requeue counter durability", () => {
+  const mkPR = (n: number, labels: string[]): PR => ({
+    number: n,
+    headRef: "",
+    headSHA: "",
+    title: "",
+    createdAt: 0,
+    labels,
+  });
+
+  it("stamps the new attempt label BEFORE clearing the old one, so a failure can only over-count", async () => {
+    // If the clear ran first and the add failed, the budget would be erased
+    // and the cap re-armed — the monotone order makes failures safe.
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:active", "queue:attempt-2"]);
+    const origRemove = api.removeLabel.bind(api);
+    api.removeLabel = async (n: number, label: string) => {
+      if (label === "queue:attempt-2") throw new Mock500Error();
+      return origRemove(n, label);
+    };
+    const q = new Queue(api, "queue", false, nop, 5);
+    await expect(
+      q.requeue(mkPR(1, ["queue:active", "queue:attempt-2"])),
+    ).rejects.toThrow("server error");
+    // The bumped counter survived the failure — over-counted, never reset.
+    expect(api.labels.get(1)).toContain("queue:attempt-3");
+    expect(api.labels.get(1)).toContain("queue:attempt-2");
+  });
+
+  it("markFailed adds the terminal label FIRST, so a cleanup failure cannot strip every queue label", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:active", "queue:attempt-10"]);
+    const origRemove = api.removeLabel.bind(api);
+    api.removeLabel = async (n: number, label: string) => {
+      if (label === "queue:active") throw new Mock500Error();
+      return origRemove(n, label);
+    };
+    const q = new Queue(api, "queue", false, nop);
+    await expect(
+      q.markFailed(mkPR(1, ["queue:active", "queue:attempt-10"]), "x"),
+    ).rejects.toThrow("server error");
+    // Even though cleanup failed, the PR is visibly failed — not stripped
+    // of every queue label and invisible to the trigger and collect().
+    expect(api.labels.get(1)).toContain("queue:failed");
+  });
+
+  it("resetAttempts clears the labels on GitHub AND in the in-memory snapshot", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:active", "queue:attempt-7"]);
+    const pr = mkPR(1, ["queue:active", "queue:attempt-7"]);
+    const q = new Queue(api, "queue", false, nop, 10);
+    await q.resetAttempts(pr);
+    expect(api.labels.get(1)).not.toContain("queue:attempt-7");
+    expect(pr.labels).toEqual(["queue:active"]);
+    // A requeue later in the same run starts from a fresh budget.
+    const ok = await q.requeue(pr);
+    expect(ok).toBe(true);
+    expect(api.labels.get(1)).toContain("queue:attempt-1");
+  });
+
+  it("resetAttempts is a no-op when no attempt labels are present", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:active"]);
+    const pr = mkPR(1, ["queue:active"]);
+    const q = new Queue(api, "queue", false, nop);
+    await q.resetAttempts(pr);
+    expect(api.labels.get(1)).toEqual(["queue:active"]);
+  });
+
+  it("resetAttempts does not mutate labels in dry-run", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:active", "queue:attempt-3"]);
+    const pr = mkPR(1, ["queue:active", "queue:attempt-3"]);
+    const q = new Queue(api, "queue", true, nop);
+    await q.resetAttempts(pr);
+    expect(api.labels.get(1)).toContain("queue:attempt-3");
+    expect(pr.labels).toContain("queue:attempt-3");
+  });
+
+  it("warns in the log when constructed with an invalid cap", () => {
+    const api = newMockAPI();
+    const logs: string[] = [];
+    new Queue(api, "queue", false, (m) => logs.push(m), 0);
+    expect(
+      logs.some((l) => l.includes("Invalid max requeue attempts")),
+    ).toBe(true);
+    // The default path stays silent.
+    const logs2: string[] = [];
+    new Queue(api, "queue", false, (m) => logs2.push(m));
+    expect(logs2).toEqual([]);
   });
 });
 

@@ -2,6 +2,7 @@ import * as core from "@actions/core";
 import * as github from "@actions/github";
 import { GitHubClient } from "./github.js";
 import { GitOps } from "./gitops.js";
+import { MAX_REQUEUE_ATTEMPTS } from "./queue.js";
 import { PRReporter } from "./reporter.js";
 import {
   eventTriggerLabeledPR,
@@ -38,7 +39,10 @@ function loadInputs(): EntryInputs {
       core.getInput("git_user_email") ||
       "merge-queue@users.noreply.github.com",
     gitUserName: core.getInput("git_user_name") || "merge-queue-bot",
-    maxRequeues: parseInt(core.getInput("max_requeues") || "10", 10),
+    maxRequeues: parseInt(
+      core.getInput("max_requeues") || String(MAX_REQUEUE_ATTEMPTS),
+      10,
+    ),
   };
 }
 

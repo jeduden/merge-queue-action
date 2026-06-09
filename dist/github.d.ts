@@ -5,21 +5,34 @@ type LogFunc = (msg: string) => void;
 /**
  * Classifies a thrown value as a TRANSIENT GitHub API error worth retrying
  * in-process (before the caller falls back to a full workflow re-run):
- * 429 / 5xx, or a secondary-rate-limit 403 (retry-after, exhausted quota, or
- * a rate-limit message). Permanent errors (401/403-permission/404/422) are
- * NOT retryable — they propagate immediately so the orchestrator can mark
- * the PR failed.
+ * 429 / 5xx, or a rate-limit 403 (see `isRateLimitedError`). Permanent
+ * errors (401/403-permission/404/422) are NOT retryable — they propagate
+ * immediately so the orchestrator can mark the PR failed. Note octokit
+ * wraps network-level failures (ECONNRESET, DNS, aborts) in a status-500
+ * RequestError, so they are covered by the 5xx branch.
  */
 export declare function isRetryableHttpError(err: unknown): boolean;
+/**
+ * Retry predicate for NON-IDEMPOTENT requests (workflow dispatch): only
+ * throttle responses (429 / rate-limit 403), which GitHub rejects before
+ * processing, are safe to resend. A 5xx is ambiguous — the dispatch may
+ * have been registered before the error — and re-sending it would start a
+ * duplicate workflow run, so it propagates to the requeue path instead
+ * (which rebuilds the batch branch, making the orphan run harmless).
+ */
+export declare function isThrottleError(err: unknown): boolean;
 /**
  * Runs `fn`, retrying transient GitHub API errors with exponential backoff.
  * A transient blip is absorbed in-run instead of failing the job and forcing
  * a full requeue; a permanent error (or one past `attempts`) propagates so
- * the caller classifies/requeues. `sleepFn` is injectable for tests.
+ * the caller classifies/requeues. `retryIf` narrows what counts as
+ * retryable (e.g. `isThrottleError` for non-idempotent requests);
+ * `sleepFn` is injectable for tests.
  */
 export declare function withRetry<T>(fn: () => Promise<T>, opts?: {
     attempts?: number;
     baseMs?: number;
+    retryIf?: (err: unknown) => boolean;
     log?: LogFunc;
     sleepFn?: (ms: number) => Promise<void>;
 }): Promise<T>;

@@ -219,7 +219,7 @@ describe("isHttpConfigError", () => {
   it.each([
     [404, true],
     [422, true],
-    [401, true],
+    [401, false], // expired App installation token self-heals next run
     [403, true], // plain 403 = missing permission = permanent
     [429, false],
     [500, false],
@@ -265,6 +265,14 @@ describe("isHttpConfigError", () => {
   it("treats a 403 with a non-string message as permanent (not rate-limited)", () => {
     // Guards the non-string-message path in the rate-limit check.
     expect(isHttpConfigError({ status: 403, message: 123 })).toBe(true);
+  });
+
+  it("treats a 403 with a response but no headers as permanent", () => {
+    expect(
+      isHttpConfigError(
+        Object.assign(new Error("Forbidden"), { status: 403, response: {} }),
+      ),
+    ).toBe(true);
   });
 });
 
@@ -1129,7 +1137,200 @@ describe("runProcess", () => {
     expect(api.labels.get(1)).not.toContain("queue");
     expect(api.labels.get(1)).not.toContain("queue:attempt-2");
     const c = api.comments.get(1) ?? [];
-    expect(c.find((s) => s.includes("gave up after 2 attempts"))).toBeDefined();
+    const gaveUp = c.find((s) => s.includes("retry limit reached"));
+    expect(gaveUp).toBeDefined();
+    expect(gaveUp!).toContain("(2 requeue attempts)");
+  });
+
+  it("resets the attempt counter when a PR's head drifts (the author pushed)", async () => {
+    // Drift is progress, not failure — a healthy PR in a busy queue must
+    // not burn its retry budget on someone pushing mid-CI.
+    const api = newMockAPI();
+    const pr = { ...makePR(1), labels: ["queue", "queue:attempt-5"] };
+    api.prs.set("queue", [pr]);
+    api.labels.set(1, ["queue", "queue:attempt-5"]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    // Simulate the head moving while CI runs: getPR (drift check) reports a
+    // different SHA than the activation snapshot.
+    api.getPR = async (n) => ({ ...makePR(n), headSHA: "sha-moved" });
+
+    await runProcess(api, git, cfg, nop);
+
+    // Requeued with a FRESH budget: attempt-1, not attempt-6.
+    expect(api.labels.get(1)).toContain("queue");
+    expect(api.labels.get(1)).toContain("queue:attempt-1");
+    expect(api.labels.get(1)).not.toContain("queue:attempt-5");
+    expect(api.labels.get(1)).not.toContain("queue:attempt-6");
+    // The requeued comment no longer promises a retry it might not make.
+    const c = api.comments.get(1) ?? [];
+    expect(c.some((s) => s.includes("head changed while batch CI"))).toBe(true);
+  });
+
+  it("clears the attempt counter when a PR merges", async () => {
+    const api = newMockAPI();
+    const pr = { ...makePR(1), labels: ["queue", "queue:attempt-2"] };
+    api.prs.set("queue", [pr]);
+    api.labels.set(1, ["queue", "queue:attempt-2"]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+
+    await runProcess(api, git, cfg, nop);
+
+    // Merged: no stale bookkeeping label left on the closed PR.
+    expect(api.labels.get(1)).not.toContain("queue:attempt-2");
+    const c = api.comments.get(1) ?? [];
+    expect(c.some((s) => s.includes("— merged"))).toBe(true);
+  });
+
+  it("marks PRs failed (fast) when locating the CI run is forbidden (403)", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    api.findWorkflowRun = async () => {
+      throw Object.assign(new Error("Resource not accessible by integration"), {
+        status: 403,
+      });
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow(
+      "locating CI run",
+    );
+    expect(api.labels.get(1)).toContain("queue:failed");
+    expect(api.labels.get(1)).not.toContain("queue");
+    const c = api.comments.get(1) ?? [];
+    expect(c.some((s) => s.includes("action misconfigured"))).toBe(true);
+    expect(c.some((s) => s.includes("actions: read"))).toBe(true);
+  });
+
+  it("marks PRs failed (fast) when reading the CI status is forbidden (403)", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    api.waitForWorkflowRun = async () => {
+      throw Object.assign(new Error("Resource not accessible by integration"), {
+        status: 403,
+      });
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow(
+      "getting CI status",
+    );
+    expect(api.labels.get(1)).toContain("queue:failed");
+    expect(api.labels.get(1)).not.toContain("queue");
+    const c = api.comments.get(1) ?? [];
+    expect(c.some((s) => s.includes("action misconfigured"))).toBe(true);
+  });
+
+  it("warns but still requeues when the drift-reset of the attempt counter fails", async () => {
+    const api = newMockAPI();
+    const pr = { ...makePR(1), labels: ["queue", "queue:attempt-5"] };
+    api.prs.set("queue", [pr]);
+    api.labels.set(1, ["queue", "queue:attempt-5"]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    api.getPR = async (n) => ({ ...makePR(n), headSHA: "sha-moved" });
+    // Fail only the FIRST removal of the stale attempt label (the drift
+    // reset); the requeue that follows must still succeed.
+    let failedOnce = false;
+    const origRemove = api.removeLabel.bind(api);
+    api.removeLabel = async (n, label) => {
+      if (label === "queue:attempt-5" && !failedOnce) {
+        failedOnce = true;
+        throw Object.assign(new Error("boom"), { status: 500 });
+      }
+      return origRemove(n, label);
+    };
+    const logs: string[] = [];
+
+    await runProcess(api, git, cfg, (m) => logs.push(m));
+
+    expect(
+      logs.some((l) => l.includes("failed to reset attempt counter")),
+    ).toBe(true);
+    // Reset failed, so the counter resumes from the stale snapshot — safe
+    // (over-counting), and the PR is still requeued.
+    expect(api.labels.get(1)).toContain("queue");
+    expect(api.labels.get(1)).toContain("queue:attempt-6");
+  });
+
+  it("still merges when clearing the attempt counter on merge fails", async () => {
+    const api = newMockAPI();
+    const pr = { ...makePR(1), labels: ["queue", "queue:attempt-2"] };
+    api.prs.set("queue", [pr]);
+    api.labels.set(1, ["queue", "queue:attempt-2"]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    const origRemove = api.removeLabel.bind(api);
+    api.removeLabel = async (n, label) => {
+      if (label === "queue:attempt-2")
+        throw Object.assign(new Error("boom"), { status: 500 });
+      return origRemove(n, label);
+    };
+
+    await runProcess(api, git, cfg, nop);
+
+    // Best-effort: the merge completes and the PR is announced merged.
+    const c = api.comments.get(1) ?? [];
+    expect(c.some((s) => s.includes("— merged"))).toBe(true);
+  });
+
+  it("still requeues when locating the CI run times out (transient)", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    api.findWorkflowRun = async () => {
+      throw new Error("timed out waiting for workflow run to appear");
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow(
+      "locating CI run",
+    );
+    expect(api.labels.get(1)).toContain("queue");
+    expect(api.labels.get(1)).not.toContain("queue:failed");
+  });
+
+  it("marks PRs failed (fast) when the bisect self-dispatch is permanently rejected", async () => {
+    // Multi-PR batch fails CI → handleCIFailure dispatches the bisect; if
+    // THAT dispatch 422s (merge-queue workflow lacks workflow_dispatch),
+    // requeueing would re-run the whole failing batch every cycle.
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1), makePR(2)]);
+    api.ciConclusion = "failure";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    const origTrigger = api.triggerWorkflow.bind(api);
+    api.triggerWorkflow = async (file, ref, inputs) => {
+      if (inputs?.bisect === "true") {
+        throw Object.assign(new Error("Workflow does not have 'workflow_dispatch' trigger"), {
+          status: 422,
+        });
+      }
+      return origTrigger(file, ref, inputs);
+    };
+
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await expect(runProcess(api, git, cfg, nop)).rejects.toThrow();
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
+
+    for (const n of [1, 2]) {
+      expect(api.labels.get(n)).toContain("queue:failed");
+      expect(api.labels.get(n)).not.toContain("queue");
+      const c = api.comments.get(n) ?? [];
+      expect(
+        c.some((s) => s.includes("could not dispatch its own bisection run")),
+      ).toBe(true);
+    }
   });
 
   it("marks PR failed (fast, not requeued) when CI dispatch is forbidden (403)", async () => {
@@ -1908,6 +2109,209 @@ describe("runBisect", () => {
     // Transient → requeued with the attempt counter, not stranded or failed.
     expect(api.labels.get(1)).toContain("queue");
     expect(api.labels.get(1)).toContain("queue:attempt-1");
+  });
+
+  it("rescues the untested RIGHT half too when bisect fast-forward fails", async () => {
+    // [1,2,3] splits into left [1,2] / right [3]. Left passes CI, the
+    // fast-forward throws: without rescuing the right half, PR 3 would be
+    // stranded in queue:active — no base label, invisible to collect().
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    git.fastForwardMain = async () => {
+      throw new Error("transient ff failure");
+    };
+    const cfg = baseCfg({ batchPrs: "[1,2,3]", dryRun: false });
+
+    await expect(runBisect(api, git, cfg, nop)).rejects.toThrow();
+    for (const n of [1, 2, 3]) {
+      expect(api.labels.get(n)).toContain("queue");
+      expect(api.labels.get(n)).toContain("queue:attempt-1");
+    }
+    // The leaked bisect branch is cleaned up.
+    expect(git.deleted.length).toBeGreaterThan(0);
+  });
+
+  it("fails the untested RIGHT half too on a permanent bisect fast-forward rejection", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    git.fastForwardMain = async () => {
+      throw new ConfigurationError(
+        "merge-queue-action could not fast-forward `main` (HTTP 422)",
+      );
+    };
+    const cfg = baseCfg({ batchPrs: "[1,2,3]", dryRun: false });
+
+    await expect(runBisect(api, git, cfg, nop)).rejects.toThrow();
+    for (const n of [1, 2, 3]) {
+      expect(api.labels.get(n)).toContain("queue:failed");
+      expect(api.labels.get(n)).not.toContain("queue");
+      const c = api.comments.get(n) ?? [];
+      expect(c.some((s) => s.includes("action misconfigured"))).toBe(true);
+    }
+  });
+
+  it("fails bisect candidates fast when locating the bisect CI run is forbidden (403)", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+    api.findWorkflowRun = async () => {
+      throw Object.assign(new Error("Resource not accessible by integration"), {
+        status: 403,
+      });
+    };
+
+    await expect(runBisect(api, git, cfg, nop)).rejects.toThrow(
+      "locating bisect CI run",
+    );
+    for (const n of [1, 2]) {
+      expect(api.labels.get(n)).toContain("queue:failed");
+      expect(api.labels.get(n)).not.toContain("queue");
+      const c = api.comments.get(n) ?? [];
+      expect(c.some((s) => s.includes("action misconfigured"))).toBe(true);
+    }
+  });
+
+  it("warns and continues when a rescue requeue itself fails after a bisect fast-forward error", async () => {
+    // [1,2] both rescued; PR 1's requeue blows up (label API 500) — PR 2
+    // must still be requeued and the failure logged, not propagated.
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    git.fastForwardMain = async () => {
+      throw new Error("transient ff failure");
+    };
+    const cfg = baseCfg({ batchPrs: "[1,2,3]", dryRun: false });
+    const origAdd = api.addLabel.bind(api);
+    api.addLabel = async (n, label) => {
+      if (n === 1 && label === "queue:attempt-1")
+        throw Object.assign(new Error("boom"), { status: 500 });
+      return origAdd(n, label);
+    };
+    const logs: string[] = [];
+
+    await expect(
+      runBisect(api, git, cfg, (m) => logs.push(m)),
+    ).rejects.toThrow("transient ff failure");
+    expect(
+      logs.some((l) => l.includes("failed to requeue PR #1")),
+    ).toBe(true);
+    // The remaining PRs were still rescued.
+    expect(api.labels.get(2)).toContain("queue");
+    expect(api.labels.get(3)).toContain("queue");
+  });
+
+  it("still announces a bisect merge when clearing the attempt counter fails", async () => {
+    const api = newMockAPI();
+    const pr = { ...makePR(1), labels: ["queue:active", "queue:attempt-2"] };
+    api.prs.set("queue:active", [pr]);
+    api.labels.set(1, ["queue:active", "queue:attempt-2"]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1]", dryRun: false });
+    const origRemove = api.removeLabel.bind(api);
+    api.removeLabel = async (n, label) => {
+      if (label === "queue:attempt-2")
+        throw Object.assign(new Error("boom"), { status: 500 });
+      return origRemove(n, label);
+    };
+
+    await runBisect(api, git, cfg, nop);
+
+    const c = api.comments.get(1) ?? [];
+    expect(c.some((s) => s.includes("— merged"))).toBe(true);
+  });
+
+  it("warns when deleting the bisect branch fails during the fast-forward rescue", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    git.fastForwardMain = async () => {
+      throw new Error("transient ff failure");
+    };
+    git.deleteBranch = async () => {
+      throw new Error("delete refused");
+    };
+    const cfg = baseCfg({ batchPrs: "[1]", dryRun: false });
+    const logs: string[] = [];
+
+    await expect(runBisect(api, git, cfg, (m) => logs.push(m))).rejects.toThrow();
+    expect(
+      logs.some((l) => l.includes("failed to delete bisect branch")),
+    ).toBe(true);
+    // The rescue still requeued the PR despite the cleanup failure.
+    expect(api.labels.get(1)).toContain("queue");
+  });
+
+  it("fails all candidates fast when the follow-up bisect self-dispatch is permanently rejected", async () => {
+    // [1,2,3,4]: left [1,2] fails CI → splitting further requires a
+    // self-dispatch; if that 404s, requeueing would re-run the identical
+    // failing batch every cycle.
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3), makePR(4)]);
+    api.ciConclusion = "failure";
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2,3,4]", dryRun: false });
+    const origTrigger = api.triggerWorkflow.bind(api);
+    api.triggerWorkflow = async (file, ref, inputs) => {
+      if (inputs?.bisect === "true") {
+        throw Object.assign(new Error("Not Found"), { status: 404 });
+      }
+      return origTrigger(file, ref, inputs);
+    };
+
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await expect(runBisect(api, git, cfg, nop)).rejects.toThrow(
+        "dispatching follow-up bisect",
+      );
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
+
+    for (const n of [1, 2, 3, 4]) {
+      expect(api.labels.get(n)).toContain("queue:failed");
+      expect(api.labels.get(n)).not.toContain("queue");
+    }
+  });
+
+  it("fails the right half fast when its self-dispatch is permanently rejected", async () => {
+    // Left [1,2] passes and merges; dispatching the right half [3] 404s
+    // (merge-queue workflow gone) — requeueing PR 3 would loop.
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2,3]", dryRun: false });
+    const origTrigger = api.triggerWorkflow.bind(api);
+    api.triggerWorkflow = async (file, ref, inputs) => {
+      if (inputs?.bisect === "true") {
+        throw Object.assign(new Error("Not Found"), { status: 404 });
+      }
+      return origTrigger(file, ref, inputs);
+    };
+
+    process.env.MERGE_QUEUE_WORKFLOW_FILE = ".github/workflows/mq.yml";
+    try {
+      await expect(runBisect(api, git, cfg, nop)).rejects.toThrow(
+        "dispatching bisect for right half",
+      );
+    } finally {
+      delete process.env.MERGE_QUEUE_WORKFLOW_FILE;
+    }
+
+    expect(api.labels.get(3)).toContain("queue:failed");
+    expect(api.labels.get(3)).not.toContain("queue");
+    const c = api.comments.get(3) ?? [];
+    expect(
+      c.some((s) => s.includes("could not dispatch its own bisection run")),
+    ).toBe(true);
   });
 
   it("tolerates failures when posting the bisection status comment", async () => {

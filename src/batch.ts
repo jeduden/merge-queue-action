@@ -1,4 +1,5 @@
 import { errorMessage, silentReporter, type Reporter } from "./reporter.js";
+import { ConfigurationError } from "./errors.js";
 
 /** GitOperator defines the interface for git operations. */
 export interface GitOperator {
@@ -93,6 +94,11 @@ export class Batch {
               `failed to delete batch branch \`${branch}\` after a merge error: ${errorMessage(delErr)}`,
             );
           }
+          // A ConfigurationError must reach the orchestrator with its type
+          // intact (it routes to markFailed, not requeue) — wrapping it in
+          // a plain Error would silently downgrade a permanent
+          // misconfiguration to a retried-forever transient.
+          if (err instanceof ConfigurationError) throw err;
           // `errorMessage(err)` keeps the thrown message readable
           // for non-Error rejections; `{ cause }` preserves the
           // original value for structured debuggers (Node logs the

@@ -42,11 +42,13 @@ export declare function parseBatchPrs(input: string): number[];
  * failed rather than requeued:
  *   - 404: the resource (e.g. a workflow file) doesn't exist
  *   - 422: the request is structurally invalid (e.g. no `workflow_dispatch`)
- *   - 401: the token is missing/expired
  *   - 403: the token lacks a required permission (e.g. `actions: write`)
  *
- * A secondary-rate-limit 403 is excluded — that is transient (see
- * `isRateLimited`).
+ * Deliberately transient:
+ *   - a rate-limited 403 (see `isRateLimitedError`);
+ *   - 401 — an expired GitHub App installation token 401s after a long CI
+ *     wait, and the next run mints a fresh token; the requeue cap bounds
+ *     the genuinely-dead-credential case.
  */
 export declare function isHttpConfigError(err: unknown): boolean;
 export type { CommentCtx };

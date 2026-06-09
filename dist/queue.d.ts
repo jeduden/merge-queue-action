@@ -33,7 +33,11 @@ export declare function attemptLabel(base: string, n: number): string;
  * Reads the highest requeue-attempt count encoded in a PR's labels
  * (`<base>:attempt-N`), returning 0 when none is present, alongside the
  * concrete attempt-label names found so callers can clear them. Tolerates
- * multiple/stale attempt labels by taking the max.
+ * multiple/stale attempt labels by taking the max. Only canonical
+ * `attemptLabel` forms count — a strictly numeric suffix — so a stray
+ * human label like `queue:attempt-2-old` (or an exotic numeral like
+ * `queue:attempt-1e9`) neither inflates the count nor gets deleted by
+ * the cleanup that consumes `labels`.
  */
 export declare function readAttemptCount(base: string, labels: string[] | undefined): {
     count: number;
@@ -81,6 +85,14 @@ export declare class Queue {
     get attemptCap(): number;
     /** Removes every `<base>:attempt-N` label currently known on the PR. */
     private clearAttemptLabels;
+    /**
+     * Resets a PR's requeue-attempt counter. Called when the PR makes real
+     * progress — it merged, or its head changed (the author pushed) — so the
+     * budget never penalises progress-driven retries. Also strips the attempt
+     * labels from the in-memory `pr.labels` snapshot, so a `requeue` later in
+     * the same run starts counting from zero instead of the stale snapshot.
+     */
+    resetAttempts(pr: PR): Promise<void>;
     /** Returns open PRs with the queue label, sorted oldest first. */
     collect(limit: number): Promise<PR[]>;
     /** Transitions PRs from pending to active state. */
