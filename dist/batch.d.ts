@@ -1,5 +1,20 @@
 import { type Reporter } from "./reporter.js";
-/** GitOperator defines the interface for git operations. */
+/**
+ * GitOperator defines the interface for git operations.
+ *
+ * Error contract — LOAD-BEARING for the retry orchestration: the
+ * orchestrator routes on `err instanceof ConfigurationError` to decide
+ * between marking PRs failed (permanent, operator must fix) and requeueing
+ * them (transient, cap-bounded). Implementations MUST throw
+ * `ConfigurationError` (errors.ts) for failures that no retry can resolve:
+ *   - `createBranchFromRef`: missing worktree / shallow clone;
+ *   - `pushBranch`: pushes rejected for missing token scope (e.g. workflow
+ *     files without the `workflow` scope);
+ *   - `fastForwardMain`: branch-protection / ruleset rejections and
+ *     missing-permission errors updating `main`.
+ * An implementation that throws plain `Error` for those downgrades a
+ * permanent misconfiguration to a retried-until-the-cap transient.
+ */
 export interface GitOperator {
     createBranchFromRef(branch: string, baseRef: string): Promise<void>;
     mergeBranch(branch: string, sourceRef: string, commitMsg: string): Promise<boolean>;

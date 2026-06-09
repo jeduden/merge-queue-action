@@ -7,9 +7,14 @@ export interface PR {
   state?: "open" | "closed";
   createdAt: number; // unix timestamp for ordering
   /**
-   * Current label names on the PR. Optional because the issues-list
-   * code path filters by label and so callers don't need them; populated
-   * by `getPR` so callers can re-validate label state on a single PR.
+   * Current label names on the PR — LOAD-BEARING for the requeue cap.
+   * `readAttemptCount` derives the cross-run attempt counter from the
+   * `<base>:attempt-N` labels in this snapshot, so every `GitHubAPI`
+   * implementation MUST populate it on both the list path
+   * (`listPRsWithLabel`) and the single-PR path (`getPR`); an
+   * implementation that omits it silently resets every PR's budget and
+   * re-arms the unbounded-retry loop the cap exists to stop. Optional
+   * only because test fixtures construct partial PRs.
    */
   labels?: string[];
 }
@@ -172,12 +177,19 @@ export class Queue {
     return this.maxAttempts;
   }
 
-  /** Removes every `<base>:attempt-N` label currently known on the PR. */
-  private async clearAttemptLabels(pr: PR): Promise<void> {
-    const { labels } = readAttemptCount(this.label, pr.labels);
+  /**
+   * Removes the given attempt labels from the PR. Takes the parsed list
+   * (from a single `readAttemptCount` pass) rather than re-deriving it, so
+   * the labels removed remotely and any in-memory bookkeeping the caller
+   * does are guaranteed to come from the same parse.
+   */
+  private async clearAttemptLabels(
+    prNumber: number,
+    labels: string[],
+  ): Promise<void> {
     for (const l of labels) {
       try {
-        await this.api.removeLabel(pr.number, l);
+        await this.api.removeLabel(prNumber, l);
       } catch (err) {
         if (!isNotFoundError(err)) throw err;
       }
@@ -196,7 +208,7 @@ export class Queue {
     if (labels.length === 0) return;
     this.log(`Resetting requeue-attempt counter for PR #${pr.number}`);
     if (this.dryRun) return;
-    await this.clearAttemptLabels(pr);
+    await this.clearAttemptLabels(pr.number, labels);
     if (pr.labels) {
       pr.labels = pr.labels.filter((l) => !labels.includes(l));
     }
@@ -271,7 +283,8 @@ export class Queue {
     }
     // Reset the requeue-attempt counter: a PR leaving the queue (failed or,
     // later, re-added by the author) must start from a fresh budget.
-    await this.clearAttemptLabels(pr);
+    const { labels } = readAttemptCount(this.label, pr.labels);
+    await this.clearAttemptLabels(pr.number, labels);
   }
 
   /**
@@ -284,9 +297,17 @@ export class Queue {
    * that error classification fails to recognise can re-enter the queue at
    * most `maxAttempts` times before this turns it into the terminal
    * `failed` state, which the workflow's label trigger no longer matches.
+   *
+   * Action-layer callers must route through `requeueOrGiveUp` (action.ts)
+   * rather than calling this directly: a `false` return means the cap
+   * marked the PR failed, and only the wrapper posts the operator-facing
+   * "retry limit reached" comment — a direct call gives up silently.
    */
   async requeue(pr: PR): Promise<boolean> {
-    const { count } = readAttemptCount(this.label, pr.labels);
+    const { count, labels: staleAttempts } = readAttemptCount(
+      this.label,
+      pr.labels,
+    );
     const next = count + 1;
     if (next > this.maxAttempts) {
       this.log(
@@ -311,7 +332,7 @@ export class Queue {
     // The just-added label is not in the `pr.labels` snapshot, so the clear
     // below removes only the stale lower-numbered ones.
     await this.api.addLabel(pr.number, attemptLabel(this.label, next));
-    await this.clearAttemptLabels(pr);
+    await this.clearAttemptLabels(pr.number, staleAttempts);
     try {
       await this.api.removeLabel(
         pr.number,

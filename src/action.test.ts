@@ -73,8 +73,15 @@ function newMockAPI(): FullAPI & {
     createdLabels: [] as { name: string; color: string; desc: string }[],
     closedPRs: [] as number[],
 
-    async listPRsWithLabel(label: string, _limit: number): Promise<PR[]> {
-      return mock.prs.get(label) ?? [];
+    async listPRsWithLabel(label: string, limit: number): Promise<PR[]> {
+      // Mirror the real client: respect the limit and return FRESH objects
+      // per call — production PRs are parsed HTTP responses, never aliases
+      // of stored state, and callers mutate/sort/truncate what they get.
+      const all = (mock.prs.get(label) ?? []).map((p) => ({
+        ...p,
+        labels: p.labels?.slice(),
+      }));
+      return limit > 0 ? all.slice(0, limit) : all;
     },
     async addLabel(prNumber: number, label: string): Promise<void> {
       const labels = mock.labels.get(prNumber) ?? [];
@@ -118,10 +125,16 @@ function newMockAPI(): FullAPI & {
       mock.closedPRs.push(prNumber);
     },
     async getPR(prNumber: number): Promise<PR> {
-      // Search across all label sets for the PR
+      // Search across all label sets for the PR. Like the real client,
+      // return a FRESH object per call, with labels reflecting the mock's
+      // live label store (the seeded snapshot is only the fallback) — so
+      // label changes made during a run are visible to later fetches.
       for (const prs of mock.prs.values()) {
         const pr = prs.find((p) => p.number === prNumber);
-        if (pr) return pr;
+        if (pr) {
+          const live = mock.labels.get(prNumber);
+          return { ...pr, labels: (live ?? pr.labels)?.slice() };
+        }
       }
       throw new Error(`PR #${prNumber} not found`);
     },
@@ -1614,8 +1627,37 @@ describe("runProcess", () => {
     git.failOn = "fastForwardMain";
     const cfg = baseCfg({ dryRun: false });
 
-    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow();
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow("mock error");
     expect(api.labels.get(1)).toContain("queue");
+    // The batch branch must not leak when the fast-forward fails.
+    expect(git.deleted.length).toBeGreaterThan(0);
+  });
+
+  it("skips the explicit close when the merged PR is already closed", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    // After the fast-forward, GitHub reports the PR closed (the normal
+    // production outcome) — the action must not force-close it again.
+    let merged = false;
+    const origGetPR = api.getPR.bind(api);
+    api.getPR = async (n) => {
+      const pr = await origGetPR(n);
+      return merged ? { ...pr, state: "closed" as const } : pr;
+    };
+    const origFF = git.fastForwardMain.bind(git);
+    git.fastForwardMain = async (ref) => {
+      merged = true;
+      return origFF(ref);
+    };
+
+    await runProcess(api, git, cfg, nop);
+
+    expect(api.closedPRs).toEqual([]);
+    const c = api.comments.get(1) ?? [];
+    expect(c.some((s) => s.includes("— merged"))).toBe(true);
   });
 
   it("marks single PR as failed on CI failure", async () => {
@@ -1711,9 +1753,7 @@ describe("runProcess", () => {
     ).rejects.toThrow();
 
     expect(
-      logs.some((l) =>
-        l.includes("Warning: failed to requeue PR #1 after error"),
-      ),
+      logs.some((l) => l.includes("Warning: failed to requeue PR #1")),
     ).toBe(true);
   });
 
@@ -2287,6 +2327,34 @@ describe("runBisect", () => {
       logs.some((l) => l.includes("failed to mark culprit PR #1")),
     ).toBe(true);
     expect(api.labels.get(2)).toContain("queue");
+  });
+
+  it("does not re-fail conflicted PRs when a permanent observation failure hits the rest", async () => {
+    // PR 1 conflicts (excluded, already failed with a conflict comment);
+    // then locating the CI run 403s. The config-error treatment must skip
+    // the excluded PR — no second, contradictory comment on it.
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3)]);
+    const git = newMockGit();
+    git.conflictOn = "sha-1"; // left = [1,2]: PR 1 conflicts, PR 2 merges
+    const cfg = baseCfg({ batchPrs: "[1,2,3]", dryRun: false });
+    api.findWorkflowRun = async () => {
+      throw Object.assign(new Error("Resource not accessible by integration"), {
+        status: 403,
+      });
+    };
+
+    await expect(runBisect(api, git, cfg, nop)).rejects.toThrow(
+      "locating bisect CI run",
+    );
+
+    const c1 = api.comments.get(1) ?? [];
+    expect(c1.some((s) => s.includes("merge conflict"))).toBe(true);
+    expect(c1.some((s) => s.includes("action misconfigured"))).toBe(false);
+    for (const n of [2, 3]) {
+      const c = api.comments.get(n) ?? [];
+      expect(c.some((s) => s.includes("action misconfigured"))).toBe(true);
+    }
   });
 
   it("fails bisect candidates fast when locating the bisect CI run is forbidden (403)", async () => {

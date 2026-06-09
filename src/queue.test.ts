@@ -48,9 +48,14 @@ function newMockAPI(): GitHubAPI & {
     failOn: "",
     removeLabelErr: null as Error | null,
 
-    async listPRsWithLabel(label: string, _limit: number): Promise<PR[]> {
+    async listPRsWithLabel(label: string, limit: number): Promise<PR[]> {
       if (mock.failOn === "listPRsWithLabel") throw new Error("mock error");
-      return mock.prs.get(label) ?? [];
+      // Mirror the real client: respect the limit and return fresh objects.
+      const all = (mock.prs.get(label) ?? []).map((p) => ({
+        ...p,
+        labels: p.labels?.slice(),
+      }));
+      return limit > 0 ? all.slice(0, limit) : all;
     },
 
     async addLabel(prNumber: number, label: string): Promise<void> {
@@ -101,7 +106,8 @@ describe("Queue", () => {
     await q.activate([
       { number: 1, headRef: "", headSHA: "", title: "", createdAt: 100 },
     ]);
-    expect(q).toBeDefined();
+    // The nop log must not change behavior: the transition still happened.
+    expect(api.labels.get(1)).toContain("queue:active");
   });
 
   it("routes log output through custom log function", async () => {

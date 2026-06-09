@@ -102,24 +102,32 @@ function isPermanentRefUpdateError(err: unknown): boolean {
   if (status === 422) {
     const msg = errorMessage(err).toLowerCase();
     if (msg.includes("not a fast forward")) return false;
-    return (
-      msg.includes("reference does not exist") ||
-      // Classic branch protection (GH006).
-      msg.includes("protected branch") ||
-      msg.includes("required status check") ||
-      msg.includes("changes must be made through a pull request") ||
-      msg.includes("approving review") ||
-      msg.includes("gh006") ||
-      // Repository rulesets (GH013) — the successor to classic branch
-      // protection — reject with their own wordings.
-      msg.includes("repository rule") ||
-      msg.includes("protected ref") ||
-      msg.includes("verified signatures") ||
-      msg.includes("gh013")
-    );
+    return PERMANENT_REF_REJECTION_MARKERS.some((m) => msg.includes(m));
   }
   return false;
 }
+
+/**
+ * Lowercased substrings of GitHub's 422 messages that mark a PERMANENT
+ * ref-update rejection (vs. the transient "not a fast forward"). GitHub
+ * keeps adding wordings; extending this table (plus a matching
+ * gitops.test.ts case) is the expected maintenance path.
+ */
+const PERMANENT_REF_REJECTION_MARKERS = [
+  "reference does not exist",
+  // Classic branch protection (GH006).
+  "protected branch",
+  "required status check",
+  "changes must be made through a pull request",
+  "approving review",
+  "gh006",
+  // Repository rulesets (GH013) — the successor to classic branch
+  // protection — reject with their own wordings.
+  "repository rule",
+  "protected ref",
+  "verified signatures",
+  "gh013",
+];
 
 /**
  * GitOps implements GitOperator using a hybrid of the GitHub Git Data

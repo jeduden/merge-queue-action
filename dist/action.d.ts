@@ -44,6 +44,17 @@ export declare function parseBatchPrs(input: string): number[];
  * the documented invalid-input behavior.
  */
 export declare function parseMaxRequeues(raw: string): number;
+/** Default for the batch_size input (mirrored in action.yml / README). */
+export declare const DEFAULT_BATCH_SIZE = 5;
+/**
+ * Parses the batch_size input with the same strictness as
+ * `parseMaxRequeues`: "" → the default; canonical digits → the number
+ * ("0" means no batch limit, the pre-existing semantics); anything else →
+ * the default with the invalid value reported via `warn`. The lenient
+ * parseInt this replaces turned "five" into NaN — which disabled both the
+ * listing limit and the batch trim, silently batching the entire backlog.
+ */
+export declare function parseBatchSize(raw: string, warn?: (msg: string) => void): number;
 /**
  * Returns true for GitHub API errors that indicate a PERMANENT problem an
  * operator must fix — never resolved by a retry, so the PR must be marked

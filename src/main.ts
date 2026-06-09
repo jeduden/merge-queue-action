@@ -6,6 +6,7 @@ import { PRReporter } from "./reporter.js";
 import {
   eventTriggerLabeledPR,
   hasWritePermission,
+  parseBatchSize,
   parseMaxRequeues,
   runProcess,
   runBisect,
@@ -30,7 +31,7 @@ function loadInputs(): EntryInputs {
   return {
     token: core.getInput("token", { required: true }),
     ciWorkflow: core.getInput("ci_workflow", { required: true }),
-    batchSize: parseInt(core.getInput("batch_size") || "5", 10),
+    batchSize: parseBatchSize(core.getInput("batch_size"), core.warning),
     queueLabel: core.getInput("queue_label") || "queue",
     dryRun: core.getInput("dry_run") === "true",
     batchPrs: core.getInput("batch_prs") || "",

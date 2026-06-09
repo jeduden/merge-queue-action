@@ -1,5 +1,6 @@
 import * as github from "@actions/github";
-import type { PR, GitHubAPI, WorkflowAPI, WorkflowRunHandle, WorkflowRunResult } from "./queue.js";
+import type { PR, WorkflowRunHandle, WorkflowRunResult } from "./queue.js";
+import type { FullAPI } from "./action.js";
 type Octokit = ReturnType<typeof github.getOctokit>;
 type LogFunc = (msg: string) => void;
 /**
@@ -36,8 +37,14 @@ export declare function withRetry<T>(fn: () => Promise<T>, opts?: {
     log?: LogFunc;
     sleepFn?: (ms: number) => Promise<void>;
 }): Promise<T>;
-/** GitHubClient implements GitHubAPI and WorkflowAPI using the GitHub REST API. */
-export declare class GitHubClient implements GitHubAPI, WorkflowAPI {
+/**
+ * GitHubClient implements FullAPI (GitHubAPI + WorkflowAPI + the PR/actor
+ * lookups) using the GitHub REST API. Declaring the full interface here —
+ * not just at the runProcess call site — makes any signature drift surface
+ * on the drifted method instead of as an opaque assignability error in
+ * main.ts.
+ */
+export declare class GitHubClient implements FullAPI {
     readonly octokit: Octokit;
     readonly owner: string;
     readonly repo: string;
