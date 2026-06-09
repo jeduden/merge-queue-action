@@ -139,7 +139,7 @@ export function commentBisecting(
     "",
     `A larger batch failed CI. Bisection is isolating the culprit: this run tests up to **${leftCount} of ${totalCount}** candidate PRs on ${branchLink(ctx, batchBranch)}. [View current bisect CI run](${ciRunUrl}).`,
     "",
-    "**Next:** No action needed — you'll be notified when the culprit is isolated or this PR merges.",
+    "**Next:** No action needed — you'll be notified when the culprit is isolated, this PR merges, or this PR returns to the queue for a later batch.",
   ].join("\n");
 }
 

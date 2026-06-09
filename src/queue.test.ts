@@ -72,7 +72,10 @@ function newMockAPI(): GitHubAPI & {
       if (mock.failOn === "removeLabel") throw new Error("mock error");
       const labels = mock.labels.get(prNumber) ?? [];
       const idx = labels.indexOf(label);
-      if (idx >= 0) labels.splice(idx, 1);
+      // Mirror GitHub: removing a label the issue doesn't have is a 404
+      // ("Label does not exist") — activate's de-queue detection keys on it.
+      if (idx < 0) throw new Mock404Error();
+      labels.splice(idx, 1);
       mock.labels.set(prNumber, labels);
     },
 
@@ -270,6 +273,50 @@ describe("Activate", () => {
         { number: 1, headRef: "", headSHA: "", title: "", createdAt: 0 },
       ]),
     ).rejects.toThrow("server error");
+  });
+});
+
+describe("Activate de-queue honoring", () => {
+  const mkPR = (n: number): PR => ({
+    number: n,
+    headRef: "",
+    headSHA: "",
+    title: "",
+    createdAt: 0,
+  });
+
+  it("skips and rolls back a PR whose base label vanished (requireBaseLabel)", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, []); // base label already gone
+    const q = new Queue(api, "queue", false, nop);
+    const skipped = await q.activate([mkPR(1)], { requireBaseLabel: true });
+    expect(skipped).toEqual([1]);
+    expect(api.labels.get(1)).not.toContain("queue:active");
+  });
+
+  it("propagates a non-404 error from the :active rollback", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, []); // base gone → de-queue path
+    let removals = 0;
+    api.removeLabel = async (_n: number, label: string) => {
+      removals++;
+      if (label === "queue") throw new Mock404Error();
+      throw new Mock500Error(); // rollback of :active fails hard
+    };
+    const q = new Queue(api, "queue", false, nop);
+    await expect(
+      q.activate([mkPR(1)], { requireBaseLabel: true }),
+    ).rejects.toThrow("server error");
+    expect(removals).toBeGreaterThan(1);
+  });
+
+  it("tolerates a missing base label without the option (manual batch_prs path)", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, []);
+    const q = new Queue(api, "queue", false, nop);
+    const skipped = await q.activate([mkPR(1)]);
+    expect(skipped).toEqual([]);
+    expect(api.labels.get(1)).toContain("queue:active");
   });
 });
 
@@ -652,6 +699,26 @@ describe("Requeue counter durability", () => {
     // The bumped counter survived the failure — over-counted, never reset.
     expect(api.labels.get(1)).toContain("queue:attempt-3");
     expect(api.labels.get(1)).toContain("queue:attempt-2");
+  });
+
+  it("re-adds the base label BEFORE removing :active, so a mid-sequence failure never hides the PR", async () => {
+    // If the final base add came last (old order), a single failed call
+    // after the removals stranded the PR with only an attempt label —
+    // invisible to the trigger, collect, and the orphan sweep alike.
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:active"]);
+    const origRemove = api.removeLabel.bind(api);
+    api.removeLabel = async (n: number, label: string) => {
+      if (label === "queue:active") throw new Mock500Error();
+      return origRemove(n, label);
+    };
+    const q = new Queue(api, "queue", false, nop, 5);
+    await expect(
+      q.requeue(mkPR(1, ["queue:active"])),
+    ).rejects.toThrow("server error");
+    // The failure left the PR VISIBLE: base label and attempt stamp on.
+    expect(api.labels.get(1)).toContain("queue");
+    expect(api.labels.get(1)).toContain("queue:attempt-1");
   });
 
   it("markFailed adds the terminal label FIRST, so a cleanup failure cannot strip every queue label", async () => {

@@ -105,8 +105,19 @@ export declare class Queue {
     resetAttempts(pr: PR): Promise<void>;
     /** Returns open PRs with the queue label, sorted oldest first. */
     collect(limit: number): Promise<PR[]>;
-    /** Transitions PRs from pending to active state. */
-    activate(prs: PR[]): Promise<void>;
+    /**
+     * Transitions PRs from pending to active state. Returns the numbers of
+     * PRs that were SKIPPED because their base label disappeared between
+     * listing and activation — with `requireBaseLabel`, a 404 removing the
+     * base label is treated as the author de-queueing in that window, the
+     * `:active` label is rolled back, and the PR must not be batched.
+     * Without the option (the manual `batch_prs` path, which is documented
+     * to work on unlabelled PRs), a missing base label is tolerated as
+     * before and nothing is skipped.
+     */
+    activate(prs: PR[], opts?: {
+        requireBaseLabel?: boolean;
+    }): Promise<number[]>;
     /** Transitions a PR to the failed state. */
     markFailed(pr: PR, reason: string): Promise<void>;
     /**

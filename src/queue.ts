@@ -221,8 +221,22 @@ export class Queue {
     return prs;
   }
 
-  /** Transitions PRs from pending to active state. */
-  async activate(prs: PR[]): Promise<void> {
+  /**
+   * Transitions PRs from pending to active state. Returns the numbers of
+   * PRs that were SKIPPED because their base label disappeared between
+   * listing and activation — with `requireBaseLabel`, a 404 removing the
+   * base label is treated as the author de-queueing in that window, the
+   * `:active` label is rolled back, and the PR must not be batched.
+   * Without the option (the manual `batch_prs` path, which is documented
+   * to work on unlabelled PRs), a missing base label is tolerated as
+   * before and nothing is skipped.
+   */
+  async activate(
+    prs: PR[],
+    opts?: { requireBaseLabel?: boolean },
+  ): Promise<number[]> {
+    const requireBase = opts?.requireBaseLabel ?? false;
+    const skipped: number[] = [];
     for (const pr of prs) {
       this.log(`Activating PR #${pr.number}`);
       if (this.dryRun) continue;
@@ -237,6 +251,21 @@ export class Queue {
         );
       } catch (err) {
         if (!isNotFoundError(err)) throw err;
+        if (requireBase) {
+          this.log(
+            `PR #${pr.number} lost the "${this.label}" label before activation (de-queued by the author); skipping`,
+          );
+          try {
+            await this.api.removeLabel(
+              pr.number,
+              queueLabel(this.label, STATE_ACTIVE),
+            );
+          } catch (rollbackErr) {
+            if (!isNotFoundError(rollbackErr)) throw rollbackErr;
+          }
+          skipped.push(pr.number);
+          continue;
+        }
       }
       // Clear any lingering queue:failed label — a PR re-entering the queue
       // after a failure has the base label re-added by the author, but
@@ -251,6 +280,7 @@ export class Queue {
         if (!isNotFoundError(err)) throw err;
       }
     }
+    return skipped;
   }
 
   /** Transitions a PR to the failed state. */
@@ -323,15 +353,27 @@ export class Queue {
       `Requeuing PR #${pr.number} (attempt ${next}/${this.maxAttempts})`,
     );
     if (this.dryRun) return true;
-    // Stamp the NEW attempt label before any other label change. The order
-    // is load-bearing: `readAttemptCount` takes the max over attempt labels,
-    // so add-then-clear is monotone — an API failure mid-sequence can only
-    // leave the count over-stated (self-correcting), never erased. The
-    // reverse order (clear-then-add) would let a single failed call reset
-    // the budget and re-arm the unbounded-retry loop the cap exists to stop.
-    // The just-added label is not in the `pr.labels` snapshot, so the clear
-    // below removes only the stale lower-numbered ones.
+    // The order of the five label calls is load-bearing twice over:
+    //
+    //  1. Stamp the NEW attempt label first. `readAttemptCount` takes the
+    //     max over attempt labels, so add-then-clear is monotone — an API
+    //     failure mid-sequence can only leave the count over-stated
+    //     (self-correcting), never erased. The reverse (clear-then-add)
+    //     would let a single failed call reset the budget and re-arm the
+    //     unbounded-retry loop the cap exists to stop. The just-added
+    //     label is not in the `pr.labels` snapshot, so the later clear
+    //     removes only the stale lower-numbered ones.
+    //  2. Re-add the BASE label before any removal. Once the base label is
+    //     on, a crash or failed call at any later point leaves the PR
+    //     visible to both the `labeled` trigger and `collect` — whereas
+    //     removing `:active` first would let one unretried 5xx on the
+    //     final base add strand the PR with only an attempt label,
+    //     invisible to every pickup path, in a green run.
     await this.api.addLabel(pr.number, attemptLabel(this.label, next));
+    await this.api.addLabel(
+      pr.number,
+      queueLabel(this.label, STATE_PENDING),
+    );
     await this.clearAttemptLabels(pr.number, staleAttempts);
     try {
       await this.api.removeLabel(
@@ -349,10 +391,6 @@ export class Queue {
     } catch (err) {
       if (!isNotFoundError(err)) throw err;
     }
-    await this.api.addLabel(
-      pr.number,
-      queueLabel(this.label, STATE_PENDING),
-    );
     return true;
   }
 

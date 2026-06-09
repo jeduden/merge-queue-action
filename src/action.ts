@@ -1,6 +1,7 @@
 import {
   Queue,
   queueLabel,
+  readAttemptCount,
   STATE_ACTIVE,
   MAX_REQUEUE_ATTEMPTS,
   type PR,
@@ -291,7 +292,8 @@ function resolvePRs(
  * carrying `detail`. Shared by the permanent-failure handlers (batch
  * creation, CI dispatch, fast-forward) so a misconfiguration stops the queue
  * with one consistent treatment instead of requeueing. Callers pass an
- * already-filtered PR list (see `candidates`).
+ * already-filtered PR list (see `resolvePRs` / `activePRs`). `reason` is the
+ * run-log-only markFailed annotation; the PR comment always carries `detail`.
  */
 async function failAllWithConfigError(
   api: GitHubAPI,
@@ -300,10 +302,11 @@ async function failAllWithConfigError(
   prs: PR[],
   detail: string,
   log: (msg: string) => void,
+  reason = "action misconfigured",
 ): Promise<void> {
   for (const pr of prs) {
     try {
-      await q.markFailed(pr, "action misconfigured");
+      await q.markFailed(pr, reason);
     } catch (markErr) {
       log(`Warning: failed to mark PR #${pr.number} as failed: ${markErr}`);
     }
@@ -442,7 +445,9 @@ async function handleCIFailure(
     await gitOps.deleteBranch(result.branch);
   } catch (err) {
     const detail = errorMessage(err);
-    await reporter.withScope(prs.map((p) => p.number), () =>
+    // Scope to the PRs actually in the failed batch (conflict-ejected ones
+    // already carry a terminal comment).
+    await reporter.withScope(result.merged.map((mp) => mp.number), () =>
       reporter.warn(
         `failed to delete batch branch \`${result.branch}\` after CI failure: ${detail}`,
       ),
@@ -584,17 +589,73 @@ export async function runProcess(
       }
     }
   }
+  // Recover orphans of interrupted runs. The mandated concurrency group
+  // serializes runs, so any PR wearing `queue:active` when a fresh run
+  // starts is provably left over from a crashed/cancelled run (runner
+  // eviction, job timeout, a cancelled pending dispatch) — without this
+  // sweep such PRs are invisible to every pickup path forever. Requeue is
+  // cap-bounded, so a stuck orphan still converges to `queue:failed`.
+  if (!cfg.dryRun) {
+    try {
+      const actives = await api.listPRsWithLabel(
+        queueLabel(cfg.queueLabel, STATE_ACTIVE),
+        0,
+      );
+      for (const orphan of actives) {
+        if (prs.some((p) => p.number === orphan.number)) continue;
+        log(
+          `PR #${orphan.number} is queue:active with no run in flight (orphan of an interrupted run); requeueing`,
+        );
+        try {
+          await requeueOrGiveUp(
+            api,
+            q,
+            ctx,
+            orphan,
+            "recovered after an interrupted merge-queue run",
+            log,
+          );
+        } catch (err) {
+          log(`Warning: failed to requeue orphan PR #${orphan.number}: ${err}`);
+        }
+      }
+    } catch (err) {
+      log(`Warning: orphan sweep failed: ${errorMessage(err)}`);
+    }
+  }
+
   if (prs.length === 0) {
     log("No PRs in queue");
     return;
   }
   log(`Processing ${prs.length} PRs`);
 
-  // 2. Activate PRs and post the "picked up" comment
-  await q.activate(prs);
+  // 2. Activate PRs and post the "picked up" comment. On the label-driven
+  // path, a PR whose base label vanished between listing and activation was
+  // de-queued by the author — honor that and drop it from the batch. The
+  // manual batch_prs path is documented to work on unlabelled PRs, so the
+  // base label is not required there.
+  const skipped = await q.activate(prs, {
+    requireBaseLabel: !cfg.batchPrs,
+  });
+  if (skipped.length > 0) {
+    prs = prs.filter((p) => !skipped.includes(p.number));
+    if (prs.length === 0) {
+      log("All collected PRs were de-queued before activation");
+      return;
+    }
+  }
   if (!cfg.dryRun) {
     for (const pr of prs) {
-      await postComment(api, pr.number, commentPickedUp(ctx), log);
+      // Only the FIRST activation gets the "picked up" comment: a PR
+      // mid-retry already carries an attempt label, and re-posting the
+      // identical comment every cycle buries the thread (a capped PR
+      // would otherwise accumulate ~30 bot comments). The requeued
+      // comment from the previous cycle already said the queue will
+      // retry automatically.
+      if (readAttemptCount(cfg.queueLabel, pr.labels).count === 0) {
+        await postComment(api, pr.number, commentPickedUp(ctx), log);
+      }
     }
   }
 
@@ -615,7 +676,9 @@ export async function runProcess(
         await gitOps.deleteBranch(branch);
       } catch (err) {
         const detail = errorMessage(err);
-        await reporter.withScope(prs.map((p) => p.number), () =>
+        // Scope to still-active PRs: a conflict-ejected author already got
+        // a terminal comment and must not be told "the queue will continue".
+        await reporter.withScope(activePRs().map((p) => p.number), () =>
           reporter.warn(
             `failed to delete batch branch \`${branch}\`: ${detail}`,
           ),
@@ -651,9 +714,12 @@ export async function runProcess(
   for (const cp of result.conflicted) {
     const pr = prs.find((p) => p.number === cp.number);
     if (pr) {
+      // Exclude FIRST, unconditionally: if markFailed throws, the PR must
+      // still be out of this batch's further processing — the orphan sweep
+      // on the next run rescues its label state.
+      excluded.add(pr.number);
       try {
         await q.markFailed(pr, "merge conflict");
-        excluded.add(pr.number);
         if (!cfg.dryRun) {
           await postComment(
             api,
@@ -675,7 +741,7 @@ export async function runProcess(
         await gitOps.deleteBranch(result.branch);
       } catch (err) {
         const detail = errorMessage(err);
-        await reporter.withScope(prs.map((p) => p.number), () =>
+        await reporter.withScope(activePRs().map((p) => p.number), () =>
           reporter.warn(
             `failed to delete empty batch branch \`${result.branch}\`: ${detail}`,
           ),
@@ -700,7 +766,15 @@ export async function runProcess(
         // will not resolve without a config fix, so mark PRs failed instead
         // of requeueing them indefinitely.
         const detail = ciTriggerConfigDetail(cfg.ciWorkflow, err);
-        await failAllWithConfigError(api, q, ctx, activePRs(), detail, log);
+        await failAllWithConfigError(
+          api,
+          q,
+          ctx,
+          activePRs(),
+          detail,
+          log,
+          "CI workflow misconfigured",
+        );
       } else {
         await requeueAll(`failed to trigger CI: ${formatErrorForComment(err)}`);
       }
@@ -853,7 +927,27 @@ export async function runProcess(
         }
       }
       await cleanupBranch(result.branch);
-      await requeueAll("PR head changed while batch CI was running");
+      // Per-PR reasons: telling a batch-mate "PR head changed" reads as if
+      // THEIR head moved and sends them auditing their own branch.
+      const driftedNums = new Set(drifted.map((d) => d.number));
+      const driftedPRs = activePRs().filter((p) => driftedNums.has(p.number));
+      const siblingPRs = activePRs().filter((p) => !driftedNums.has(p.number));
+      await requeueMany(
+        api,
+        q,
+        ctx,
+        driftedPRs,
+        "new commits were pushed to this PR while batch CI ran; the stale batch result was discarded and the new head will be re-tested",
+        log,
+      );
+      await requeueMany(
+        api,
+        q,
+        ctx,
+        siblingPRs,
+        "another PR in the batch was updated while batch CI ran, invalidating the shared batch run; this PR will be re-tested in a fresh batch",
+        log,
+      );
       return;
     }
   }
@@ -981,14 +1075,30 @@ export async function runBisect(
   // Fetch only the specific PRs we are bisecting (avoids listing entire active queue)
   const prMap = new Map<number, PR>();
   for (const n of prNumbers) {
+    let pr: PR;
     try {
-      prMap.set(n, await api.getPR(n));
+      pr = await api.getPR(n);
     } catch {
       throw new Error(`bisect PR #${n} not found`);
     }
+    // A candidate can close between the dispatch and this run (merged by an
+    // interleaved batch, or closed by the author) — re-merging a closed
+    // PR's stale head would be wrong, so drop it from the bisection.
+    if (pr.state !== "open") {
+      log(`bisect PR #${n} is ${pr.state}; skipping`);
+      continue;
+    }
+    prMap.set(n, pr);
   }
 
-  const [left, right] = split(prNumbers);
+  // Bisect only the still-open candidates (closed ones were skipped while
+  // building prMap) — `prMap.get(n)!` below relies on this.
+  const openNumbers = prNumbers.filter((n) => prMap.has(n));
+  if (openNumbers.length === 0) {
+    log("No open PRs to bisect");
+    return;
+  }
+  const [left, right] = split(openNumbers);
   log(`Bisecting: left=${JSON.stringify(left)}, right=${JSON.stringify(right)}`);
 
   // Build batch from left half
@@ -1037,9 +1147,12 @@ export async function runBisect(
   for (const cp of result.conflicted) {
     const pr = prMap.get(cp.number);
     if (pr) {
+      // Exclude FIRST, unconditionally: if markFailed throws, the PR must
+      // still be out of further processing — the orphan sweep on the next
+      // run rescues its label state.
+      excluded.add(cp.number);
       try {
         await q.markFailed(pr, "merge conflict");
-        excluded.add(cp.number);
         if (!cfg.dryRun) {
           await postComment(
             api,
@@ -1074,7 +1187,7 @@ export async function runBisect(
         q,
         ctx,
         resolvePRs(right, prMap, excluded),
-        undefined,
+        "the other PRs in this bisection conflicted with main; this PR was not tested and returned to the queue",
         log,
       );
     }
@@ -1103,6 +1216,7 @@ export async function runBisect(
           resolvePRs(prNumbers, prMap, excluded),
           ciTriggerConfigDetail(cfg.ciWorkflow, err),
           log,
+          "CI workflow misconfigured",
         );
       } else {
         // Transient error — requeue all still-candidate PRs so they don't get stuck
@@ -1357,13 +1471,30 @@ export async function runBisect(
         q,
         ctx,
         resolvePRs(right, prMap, excluded),
-        undefined,
+        `PR #${mergedLeft[0]} was identified as the failing PR; this PR was not tested in that batch and returned to the queue`,
         log,
       );
     } else {
       // Split left further
       const leftJSON = JSON.stringify(mergedLeft);
       log(`Left half failed, splitting further: ${JSON.stringify(mergedLeft)}`);
+      // Requeue the right half BEFORE dispatching the follow-up bisect.
+      // The order is load-bearing: each requeue's label add fires a
+      // `labeled` run that takes the concurrency group's single PENDING
+      // slot — if the follow-up dispatch were already pending, the newer
+      // queued run would CANCEL it, stranding the left half in
+      // `queue:active`. Dispatching LAST makes the bisect run the newest
+      // pending entry; any cancelled labeled run is redundant (the
+      // right-half PRs keep their base labels and a later run collects
+      // them).
+      await requeueMany(
+        api,
+        q,
+        ctx,
+        resolvePRs(right, prMap, excluded),
+        "bisection continues on a smaller batch; this PR was not tested and returned to the queue",
+        log,
+      );
       if (!cfg.dryRun) {
         const wf = selfWorkflowFile();
         try {
@@ -1372,7 +1503,9 @@ export async function runBisect(
             bisect: "true",
           });
         } catch (err) {
-          const remaining = resolvePRs(prNumbers, prMap, excluded);
+          // The right half is already requeued; only the left PRs still
+          // need routing out of queue:active.
+          const remaining = resolvePRs(mergedLeft, prMap, excluded);
           if (isHttpConfigError(err)) {
             // Permanently rejected self-dispatch: requeueing would re-run
             // the identical failing batch each cycle.
@@ -1382,7 +1515,6 @@ export async function runBisect(
             );
             await failAllWithConfigError(api, q, ctx, remaining, detail, log);
           } else {
-            // Requeue non-excluded PRs on dispatch failure
             await requeueMany(
               api,
               q,
@@ -1397,15 +1529,6 @@ export async function runBisect(
           );
         }
       }
-      // Requeue right half since it hasn't been tested yet
-      await requeueMany(
-        api,
-        q,
-        ctx,
-        resolvePRs(right, prMap, excluded),
-        undefined,
-        log,
-      );
     }
   }
 }

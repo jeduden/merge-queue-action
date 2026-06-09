@@ -146,7 +146,7 @@ start workflows triggered by `pull_request: labeled`. In that case, use
 |-------|---------|
 | `queue` | PR is waiting to be processed |
 | `queue:active` | PR is currently in a batch |
-| `queue:failed` | PR failed CI, had a merge conflict, or hit the requeue cap |
+| `queue:failed` | PR failed CI, had a merge conflict, hit the requeue cap, or was stopped by a configuration error |
 | `queue:attempt-N` | Internal: how many times this PR has been requeued |
 
 ### Bounded retries (no infinite loops)
@@ -167,13 +167,21 @@ fails), every requeue is bounded by a per-PR attempt cap:
   with a run-log warning) without succeeding, the queue stops retrying
   it, moves it to `queue:failed`, and posts a "retry limit reached"
   comment instead of re-adding the `queue` label.
-- The counter resets whenever the PR makes real progress: it merges, its
-  head changes while batch CI runs (the author pushed), or it is marked
-  failed and later re-added by you — so a genuinely transient failure
-  that later succeeds is never penalised.
+- The counter resets whenever the PR makes real progress: it merges, any
+  batch member's head changes while batch CI runs (the push invalidates
+  the shared batch run, and none of those PRs failed — so the whole
+  batch's counters reset), or it is marked failed and later re-added by
+  you. A genuinely transient failure that later succeeds is never
+  penalised.
 
 This backstop bounds *every* failure path, including ones the action does
 not yet classify as permanent. Tune it with the `max_requeues` input.
+
+The queue also self-heals from interrupted runs: because the mandated
+concurrency group serializes runs, any PR still wearing `queue:active`
+when a fresh run starts must be left over from a crashed or cancelled
+run, and the new run requeues it automatically (cap-bounded) instead of
+leaving it stranded.
 
 ### How merging works in detail
 
