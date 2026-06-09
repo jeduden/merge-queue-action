@@ -215,18 +215,19 @@ async function postComment(
  * `q.requeue` directly, so a deterministic failure that slips past error
  * classification still cannot re-trigger the workflow forever. Returns
  * whether the PR was requeued (false ⇒ it was failed at the cap).
+ *
+ * Only called from non-dry-run paths: `requeueAll` returns early in
+ * dry-run, and the bisect requeue sites sit behind CI having actually run.
  */
 async function requeueOrGiveUp(
   api: GitHubAPI,
   q: Queue,
   ctx: CommentCtx,
-  dryRun: boolean,
   pr: PR,
   reason: string | undefined,
   log: (msg: string) => void,
 ): Promise<boolean> {
   const requeued = await q.requeue(pr);
-  if (dryRun) return requeued;
   if (requeued) {
     if (reason) {
       await postComment(api, pr.number, commentRequeued(ctx, reason), log);
@@ -448,7 +449,7 @@ export async function runProcess(
         // Routes through the attempt-cap chokepoint: a PR that has already
         // been requeued the maximum number of times is marked failed here
         // instead of looping again.
-        await requeueOrGiveUp(api, q, ctx, cfg.dryRun, pr, reason, log);
+        await requeueOrGiveUp(api, q, ctx, pr, reason, log);
       } catch (err) {
         log(
           `Warning: failed to requeue PR #${pr.number} after error: ${err}`,
@@ -755,7 +756,7 @@ async function handleBisectObservationFailure(
     const pr = prMap.get(n);
     if (!pr) continue;
     try {
-      await requeueOrGiveUp(api, q, ctx, false, pr, reason, log);
+      await requeueOrGiveUp(api, q, ctx, pr, reason, log);
     } catch (reqErr) {
       log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
     }
@@ -840,7 +841,6 @@ export async function runBisect(
             api,
             q,
             ctx,
-            false,
             pr,
             formatErrorForComment(err),
             log,
@@ -1057,7 +1057,6 @@ export async function runBisect(
                 api,
                 q,
                 ctx,
-                false,
                 prMap.get(n)!,
                 `failed to dispatch bisect for right half: ${formatErrorForComment(err)}`,
                 log,
@@ -1106,7 +1105,6 @@ export async function runBisect(
             api,
             q,
             ctx,
-            cfg.dryRun,
             prMap.get(n)!,
             undefined,
             log,
@@ -1135,7 +1133,6 @@ export async function runBisect(
                 api,
                 q,
                 ctx,
-                false,
                 prMap.get(n)!,
                 `failed to dispatch follow-up bisect: ${formatErrorForComment(err)}`,
                 log,
@@ -1156,7 +1153,6 @@ export async function runBisect(
             api,
             q,
             ctx,
-            cfg.dryRun,
             prMap.get(n)!,
             undefined,
             log,

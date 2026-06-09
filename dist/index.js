@@ -37956,11 +37956,12 @@ async function postComment(api, prNumber, body, log) {
  * `q.requeue` directly, so a deterministic failure that slips past error
  * classification still cannot re-trigger the workflow forever. Returns
  * whether the PR was requeued (false ⇒ it was failed at the cap).
+ *
+ * Only called from non-dry-run paths: `requeueAll` returns early in
+ * dry-run, and the bisect requeue sites sit behind CI having actually run.
  */
-async function requeueOrGiveUp(api, q, ctx, dryRun, pr, reason, log) {
+async function requeueOrGiveUp(api, q, ctx, pr, reason, log) {
     const requeued = await q.requeue(pr);
-    if (dryRun)
-        return requeued;
     if (requeued) {
         if (reason) {
             await postComment(api, pr.number, commentRequeued(ctx, reason), log);
@@ -38130,7 +38131,7 @@ async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
                 // Routes through the attempt-cap chokepoint: a PR that has already
                 // been requeued the maximum number of times is marked failed here
                 // instead of looping again.
-                await requeueOrGiveUp(api, q, ctx, cfg.dryRun, pr, reason, log);
+                await requeueOrGiveUp(api, q, ctx, pr, reason, log);
             }
             catch (err) {
                 log(`Warning: failed to requeue PR #${pr.number} after error: ${err}`);
@@ -38359,7 +38360,7 @@ async function handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prM
         if (!pr)
             continue;
         try {
-            await requeueOrGiveUp(api, q, ctx, false, pr, reason, log);
+            await requeueOrGiveUp(api, q, ctx, pr, reason, log);
         }
         catch (reqErr) {
             log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
@@ -38427,7 +38428,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
             // here can't loop forever).
             for (const [n, pr] of prMap) {
                 try {
-                    await requeueOrGiveUp(api, q, ctx, false, pr, formatErrorForComment(err), log);
+                    await requeueOrGiveUp(api, q, ctx, pr, formatErrorForComment(err), log);
                 }
                 catch (requeueErr) {
                     log(`Warning: failed to requeue PR #${n}: ${requeueErr}`);
@@ -38568,7 +38569,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
                 catch (err) {
                     for (const n of right) {
                         try {
-                            await requeueOrGiveUp(api, q, ctx, false, prMap.get(n), `failed to dispatch bisect for right half: ${formatErrorForComment(err)}`, log);
+                            await requeueOrGiveUp(api, q, ctx, prMap.get(n), `failed to dispatch bisect for right half: ${formatErrorForComment(err)}`, log);
                         }
                         catch (reqErr) {
                             log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
@@ -38600,7 +38601,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
             // Requeue right half (not yet tested)
             for (const n of right) {
                 try {
-                    await requeueOrGiveUp(api, q, ctx, cfg.dryRun, prMap.get(n), undefined, log);
+                    await requeueOrGiveUp(api, q, ctx, prMap.get(n), undefined, log);
                 }
                 catch (err) {
                     log(`Warning: failed to requeue PR #${n}: ${errorMessage(err)}`);
@@ -38625,7 +38626,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
                         if (excluded.has(n))
                             continue;
                         try {
-                            await requeueOrGiveUp(api, q, ctx, false, prMap.get(n), `failed to dispatch follow-up bisect: ${formatErrorForComment(err)}`, log);
+                            await requeueOrGiveUp(api, q, ctx, prMap.get(n), `failed to dispatch follow-up bisect: ${formatErrorForComment(err)}`, log);
                         }
                         catch (reqErr) {
                             log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
@@ -38637,7 +38638,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
             // Requeue right half since it hasn't been tested yet
             for (const n of right) {
                 try {
-                    await requeueOrGiveUp(api, q, ctx, cfg.dryRun, prMap.get(n), undefined, log);
+                    await requeueOrGiveUp(api, q, ctx, prMap.get(n), undefined, log);
                 }
                 catch (err) {
                     log(`Warning: failed to requeue PR #${n}: ${errorMessage(err)}`);
