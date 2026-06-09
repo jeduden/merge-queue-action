@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { Batch, type GitOperator, type BatchPR } from "./batch.js";
+import { ConfigurationError } from "./errors.js";
 
 function newMockGit(): GitOperator & {
   branches: string[];
@@ -171,6 +172,27 @@ describe("CreateAndMerge", () => {
       ]),
     ).rejects.toThrow("merging PR #1");
     expect(git.deleted).toContain("merge-queue/batch-err");
+  });
+
+  it("cleans up the batch branch and preserves the error type on a push failure", async () => {
+    // A push rejected because the token lacks `workflow` scope is a
+    // permanent ConfigurationError. createAndMerge must delete the leaked
+    // batch branch AND rethrow the SAME error instance, so its type
+    // survives and the orchestrator marks the PR failed instead of
+    // requeueing it (which would re-fire the `labeled` trigger forever).
+    const pushErr = new ConfigurationError("token lacks workflow scope");
+    const git = newMockGit();
+    git.pushBranch = async () => {
+      throw pushErr;
+    };
+    const b = new Batch(git, false, nop);
+    const err = await b
+      .createAndMerge("push", [
+        { number: 1, headRef: "f", headSHA: "sha-f", title: "T" },
+      ])
+      .catch((e: unknown) => e);
+    expect(err).toBe(pushErr);
+    expect(git.deleted).toContain("merge-queue/batch-push");
   });
 
   it("warns via Reporter when the cleanup deleteBranch also fails", async () => {

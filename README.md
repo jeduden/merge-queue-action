@@ -333,6 +333,15 @@ one of:
 
 Store the token as a repository secret (e.g. `MERGE_QUEUE_TOKEN`).
 
+> [!IMPORTANT]
+> If queued PRs can add or change files under `.github/workflows/`, the
+> token also needs the **`workflow` scope** (classic PAT) or
+> **`workflows: write`** permission (fine-grained PAT / GitHub App).
+> GitHub rejects any push that touches a workflow file when the token
+> lacks this, so the action would otherwise be unable to push the batch
+> branch. When that happens the affected PR is marked `queue:failed`
+> with an explanatory comment rather than being retried indefinitely.
+
 ### Conflicted PRs and label triggers
 
 The quick-start merge-queue workflow uses:

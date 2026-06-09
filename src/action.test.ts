@@ -995,6 +995,41 @@ describe("runProcess", () => {
     }
   });
 
+  it("marks PRs failed (no requeue) when pushBranch throws ConfigurationError", async () => {
+    // Regression for the retry loop: a batch whose PR edits a workflow
+    // file is rejected by GitHub because the token lacks `workflow`
+    // scope. That push can never succeed, so the PR must be marked
+    // failed — NOT requeued, which re-adds the `queue` label and
+    // re-fires the `pull_request: labeled` trigger in a tight loop.
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1)]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+
+    git.pushBranch = async () => {
+      throw new ConfigurationError(
+        "merge-queue-action could not push the batch branch because the token lacks the GitHub Actions workflow scope",
+      );
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow();
+
+    // Marked failed, not requeued — the loop stops.
+    expect(api.labels.get(1)).toContain("queue:failed");
+    expect(api.labels.get(1)).not.toContain("queue");
+    // Leaked batch branch cleaned up.
+    expect(git.deleted.length).toBeGreaterThan(0);
+    // Operator gets an actionable config-error comment.
+    const c = api.comments.get(1) ?? [];
+    expect(
+      c.find(
+        (s) =>
+          s.includes("action misconfigured") &&
+          s.includes("workflow scope"),
+      ),
+    ).toBeDefined();
+  });
+
   it("cleans up and requeues on CI trigger failure with a transient error", async () => {
     const api = newMockAPI();
     api.prs.set("queue", [makePR(1)]);

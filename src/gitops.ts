@@ -56,6 +56,27 @@ export function defaultExec(cwd?: string): Exec {
 }
 
 /**
+ * Detects the GitHub push rejection emitted when the authenticating token
+ * is not allowed to create or update a file under `.github/workflows/`.
+ * The exact wording depends on the token type:
+ *
+ *   - classic PAT / OAuth app: "... without `workflow` scope"
+ *   - GitHub App / fine-grained PAT: "... without `workflows` permission"
+ *
+ * All variants share the "refusing to allow … without … workflow… scope/
+ * permission" shape. This is a permanent authorization problem — retrying
+ * the push can never succeed — so callers surface it as a
+ * ConfigurationError rather than requeueing the PR (which would re-fire the
+ * `labeled` trigger in a tight loop).
+ */
+function isWorkflowScopePushRejection(stderr: string): boolean {
+  return (
+    /refusing to allow/i.test(stderr) &&
+    /without\s+[`'"]?workflows?[`'"]?\s+(?:scope|permission)/i.test(stderr)
+  );
+}
+
+/**
  * GitOps implements GitOperator using a hybrid of the GitHub Git Data
  * API (for branch creation, fast-forward and deletion) and local
  * `git merge` (for per-PR merges). Running the merge locally is what
@@ -649,7 +670,33 @@ export class GitOps implements GitOperator {
     // single-writer and disposable, so any concurrent update means
     // something has gone wrong and the push *should* fail loudly
     // rather than clobber the other writer.
-    await this.gitOrThrow(["push", "origin", `${branch}:refs/heads/${branch}`]);
+    const res = await this.git([
+      "push",
+      "origin",
+      `${branch}:refs/heads/${branch}`,
+    ]);
+    if (res.code === 0) return;
+
+    const detail = res.stderr.trim() || res.stdout.trim();
+    if (isWorkflowScopePushRejection(detail)) {
+      // Permanent: the token cannot push workflow-file changes, so no
+      // number of retries will help. Surfacing this as a
+      // ConfigurationError makes the orchestrator mark the PR failed
+      // instead of requeueing it — which is what turned a single bad PR
+      // into an unbounded run of failing merge-queue jobs.
+      throw new ConfigurationError(
+        "merge-queue-action could not push the batch branch because the " +
+          "token lacks permission to update GitHub Actions workflow files, " +
+          "and a queued PR creates or updates a file under " +
+          "`.github/workflows/`. Grant the token the `workflow` scope " +
+          "(classic PAT) or `workflows: write` permission (GitHub App or " +
+          "fine-grained PAT), or remove the workflow-file change from the " +
+          `queued PR. Git reported: ${detail}`,
+      );
+    }
+    throw new Error(
+      `git push origin ${branch}:refs/heads/${branch} failed (exit ${res.code}): ${detail}`,
+    );
   }
 
   async fastForwardMain(ref: string): Promise<string> {
