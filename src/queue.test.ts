@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   Queue,
   queueLabel,
+  attemptLabel,
+  readAttemptCount,
+  MAX_REQUEUE_ATTEMPTS,
   STATE_PENDING,
   STATE_ACTIVE,
   STATE_FAILED,
@@ -53,7 +56,9 @@ function newMockAPI(): GitHubAPI & {
     async addLabel(prNumber: number, label: string): Promise<void> {
       if (mock.failOn === "addLabel") throw new Error("mock error");
       const labels = mock.labels.get(prNumber) ?? [];
-      labels.push(label);
+      // GitHub's add-labels is idempotent (a label can't appear twice on an
+      // issue); mirror that so repeated requeues don't accumulate duplicates.
+      if (!labels.includes(label)) labels.push(label);
       mock.labels.set(prNumber, labels);
     },
 
@@ -449,6 +454,150 @@ describe("Requeue", () => {
         createdAt: 0,
       }),
     ).rejects.toThrow("server error");
+  });
+
+  it("returns true and re-adds the base label on a normal requeue", async () => {
+    const api = newMockAPI();
+    api.labels.set(3, ["queue:active"]);
+    const q = new Queue(api, "queue", false, nop);
+    const ok = await q.requeue({
+      number: 3,
+      headRef: "",
+      headSHA: "",
+      title: "",
+      createdAt: 0,
+      labels: ["queue:active"],
+    });
+    expect(ok).toBe(true);
+    expect(api.labels.get(3)).toContain("queue");
+  });
+});
+
+describe("Requeue attempt cap", () => {
+  const mkPR = (n: number, labels: string[]): PR => ({
+    number: n,
+    headRef: "",
+    headSHA: "",
+    title: "",
+    createdAt: 0,
+    labels,
+  });
+
+  it("stamps queue:attempt-1 on the first requeue", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:active"]);
+    const q = new Queue(api, "queue", false, nop, 5);
+    const ok = await q.requeue(mkPR(1, ["queue:active"]));
+    expect(ok).toBe(true);
+    expect(api.labels.get(1)).toContain("queue:attempt-1");
+    expect(api.labels.get(1)).toContain("queue");
+  });
+
+  it("reads the existing attempt count and bumps it, dropping the old label", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:active", "queue:attempt-2"]);
+    const q = new Queue(api, "queue", false, nop, 5);
+    const ok = await q.requeue(mkPR(1, ["queue:active", "queue:attempt-2"]));
+    expect(ok).toBe(true);
+    expect(api.labels.get(1)).toContain("queue:attempt-3");
+    expect(api.labels.get(1)).not.toContain("queue:attempt-2");
+  });
+
+  it("marks the PR failed (no requeue) once the cap is reached", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:active", "queue:attempt-3"]);
+    // cap = 3, already at attempt 3 → next would be 4 > 3 → give up
+    const q = new Queue(api, "queue", false, nop, 3);
+    const ok = await q.requeue(mkPR(1, ["queue:active", "queue:attempt-3"]));
+    expect(ok).toBe(false);
+    expect(api.labels.get(1)).toContain("queue:failed");
+    expect(api.labels.get(1)).not.toContain("queue"); // NOT requeued — loop stops
+    expect(api.labels.get(1)).not.toContain("queue:attempt-3"); // counter cleared
+  });
+
+  it("requeues exactly cap times then fails on the next attempt", async () => {
+    const api = newMockAPI();
+    const q = new Queue(api, "queue", false, nop, 3);
+    let labels = ["queue:active"];
+    const sync = () => {
+      labels = (api.labels.get(1) ?? []).slice();
+    };
+    api.labels.set(1, labels);
+    for (let i = 1; i <= 3; i++) {
+      const ok = await q.requeue(mkPR(1, labels));
+      expect(ok).toBe(true);
+      sync();
+      expect(api.labels.get(1)).toContain(`queue:attempt-${i}`);
+    }
+    // 4th requeue exceeds the cap of 3
+    const final = await q.requeue(mkPR(1, labels));
+    expect(final).toBe(false);
+    expect(api.labels.get(1)).toContain("queue:failed");
+    expect(api.labels.get(1)).not.toContain("queue");
+  });
+
+  it("ignores a 404 while clearing a stale attempt label", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:active", "queue:attempt-1"]);
+    api.removeLabelErr = new Mock404Error();
+    const q = new Queue(api, "queue", false, nop, 5);
+    const ok = await q.requeue(mkPR(1, ["queue:active", "queue:attempt-1"]));
+    expect(ok).toBe(true); // 404 swallowed; requeue proceeds
+  });
+
+  it("propagates a non-404 error while clearing a stale attempt label", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:active", "queue:attempt-1"]);
+    api.removeLabelErr = new Mock500Error();
+    const q = new Queue(api, "queue", false, nop, 5);
+    await expect(
+      q.requeue(mkPR(1, ["queue:active", "queue:attempt-1"])),
+    ).rejects.toThrow("server error");
+  });
+
+  it("markFailed clears the attempt counter so re-entry starts fresh", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:active", "queue:attempt-4"]);
+    const q = new Queue(api, "queue", false, nop);
+    await q.markFailed(mkPR(1, ["queue:active", "queue:attempt-4"]), "CI failed");
+    expect(api.labels.get(1)).toContain("queue:failed");
+    expect(api.labels.get(1)).not.toContain("queue:attempt-4");
+  });
+
+  it("falls back to the default cap when given a non-positive value", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:active"]);
+    const q = new Queue(api, "queue", false, nop, 0);
+    const ok = await q.requeue(mkPR(1, ["queue:active"]));
+    // default cap (10) is positive, so a first requeue still succeeds
+    expect(ok).toBe(true);
+    expect(MAX_REQUEUE_ATTEMPTS).toBeGreaterThan(0);
+  });
+});
+
+describe("readAttemptCount / attemptLabel", () => {
+  it("builds the attempt label", () => {
+    expect(attemptLabel("queue", 3)).toBe("queue:attempt-3");
+  });
+
+  it("returns 0 when no attempt label is present", () => {
+    expect(readAttemptCount("queue", ["queue", "queue:active"]).count).toBe(0);
+    expect(readAttemptCount("queue", undefined).count).toBe(0);
+  });
+
+  it("returns the highest attempt count and all attempt labels found", () => {
+    const r = readAttemptCount("queue", [
+      "queue",
+      "queue:attempt-2",
+      "queue:attempt-5",
+      "other",
+    ]);
+    expect(r.count).toBe(5);
+    expect(r.labels).toEqual(["queue:attempt-2", "queue:attempt-5"]);
+  });
+
+  it("ignores non-numeric attempt suffixes", () => {
+    expect(readAttemptCount("queue", ["queue:attempt-x"]).count).toBe(0);
   });
 });
 

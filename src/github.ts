@@ -83,6 +83,9 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
           createdAt: Math.floor(
             new Date(pr.created_at).getTime() / 1000,
           ),
+          // Carry the label set so the queue can read the requeue-attempt
+          // counter (`<base>:attempt-N`) without a second round-trip.
+          labels: issueLabels,
         });
 
         if (limit > 0 && result.length >= limit) {

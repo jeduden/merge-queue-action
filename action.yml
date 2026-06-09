@@ -24,6 +24,13 @@ inputs:
   queue_label:
     description: Label that enqueues a PR
     default: queue
+  max_requeues:
+    description: >-
+      Max times a single PR is requeued before the queue gives up and
+      marks it failed. Bounds every retry path so a deterministic failure
+      (e.g. a permission error or an always-failing check) cannot
+      re-trigger the workflow forever.
+    default: "10"
   dry_run:
     description: Log intent without mutating
     default: "false"

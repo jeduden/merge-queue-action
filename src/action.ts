@@ -26,6 +26,7 @@ import {
   commentBisecting,
   commentRequeued,
   commentConfigError,
+  commentGaveUp,
 } from "./comments.js";
 import { ConfigurationError } from "./errors.js";
 
@@ -35,6 +36,13 @@ export interface Config {
   queueLabel: string;
   dryRun: boolean;
   batchPrs: string;
+  /**
+   * Max times a single PR may be requeued before the queue gives up and
+   * marks it failed. Bounds every retry path so a deterministic failure
+   * cannot re-trigger the workflow forever. Defaults to
+   * `MAX_REQUEUE_ATTEMPTS` when unset.
+   */
+  maxRequeues?: number;
   /** Required by runProcess/runBisect; unused by runSetup. */
   commentCtx?: CommentCtx;
   /**
@@ -199,6 +207,41 @@ async function postComment(
   }
 }
 
+/**
+ * Requeues a PR, or — when it has hit the attempt cap — leaves it in the
+ * terminal failed state (set inside `Queue.requeue`) and posts a "gave up"
+ * comment. This is the single chokepoint that makes EVERY retry path
+ * bounded: callers must route requeues through here rather than calling
+ * `q.requeue` directly, so a deterministic failure that slips past error
+ * classification still cannot re-trigger the workflow forever. Returns
+ * whether the PR was requeued (false ⇒ it was failed at the cap).
+ */
+async function requeueOrGiveUp(
+  api: GitHubAPI,
+  q: Queue,
+  ctx: CommentCtx,
+  dryRun: boolean,
+  pr: PR,
+  reason: string | undefined,
+  log: (msg: string) => void,
+): Promise<boolean> {
+  const requeued = await q.requeue(pr);
+  if (dryRun) return requeued;
+  if (requeued) {
+    if (reason) {
+      await postComment(api, pr.number, commentRequeued(ctx, reason), log);
+    }
+  } else {
+    await postComment(
+      api,
+      pr.number,
+      commentGaveUp(ctx, q.attemptCap, reason),
+      log,
+    );
+  }
+  return requeued;
+}
+
 async function ensurePRClosedAfterMerge(
   api: FullAPI,
   prNumber: number,
@@ -312,7 +355,7 @@ export async function runProcess(
     log(`Actor ${actor} has "${perm}" permission, proceeding`);
   }
 
-  const q = new Queue(api, cfg.queueLabel, cfg.dryRun, log);
+  const q = new Queue(api, cfg.queueLabel, cfg.dryRun, log, cfg.maxRequeues);
   const b = new Batch(gitOps, cfg.dryRun, log, reporter);
 
   // 1. Collect queued PRs
@@ -402,19 +445,13 @@ export async function runProcess(
     for (const pr of prs) {
       if (excluded.has(pr.number)) continue;
       try {
-        await q.requeue(pr);
+        // Routes through the attempt-cap chokepoint: a PR that has already
+        // been requeued the maximum number of times is marked failed here
+        // instead of looping again.
+        await requeueOrGiveUp(api, q, ctx, cfg.dryRun, pr, reason, log);
       } catch (err) {
         log(
           `Warning: failed to requeue PR #${pr.number} after error: ${err}`,
-        );
-        continue;
-      }
-      if (reason) {
-        await postComment(
-          api,
-          pr.number,
-          commentRequeued(ctx, reason),
-          log,
         );
       }
     }
@@ -718,12 +755,10 @@ async function handleBisectObservationFailure(
     const pr = prMap.get(n);
     if (!pr) continue;
     try {
-      await q.requeue(pr);
+      await requeueOrGiveUp(api, q, ctx, false, pr, reason, log);
     } catch (reqErr) {
       log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
-      continue;
     }
-    await postComment(api, n, commentRequeued(ctx, reason), log);
   }
 }
 
@@ -749,7 +784,7 @@ export async function runBisect(
     return;
   }
 
-  const q = new Queue(api, cfg.queueLabel, cfg.dryRun, log);
+  const q = new Queue(api, cfg.queueLabel, cfg.dryRun, log, cfg.maxRequeues);
   const b = new Batch(gitOps, cfg.dryRun, log, reporter);
 
   // Fetch only the specific PRs we are bisecting (avoids listing entire active queue)
@@ -796,20 +831,23 @@ export async function runBisect(
         );
       }
     } else if (!cfg.dryRun) {
-      // Transient error — requeue all candidates so they aren't stuck in queue:active
+      // Transient error — requeue all candidates so they aren't stuck in
+      // queue:active (bounded by the attempt cap so a deterministic failure
+      // here can't loop forever).
       for (const [n, pr] of prMap) {
         try {
-          await q.requeue(pr);
+          await requeueOrGiveUp(
+            api,
+            q,
+            ctx,
+            false,
+            pr,
+            formatErrorForComment(err),
+            log,
+          );
         } catch (requeueErr) {
           log(`Warning: failed to requeue PR #${n}: ${requeueErr}`);
-          continue;
         }
-        await postComment(
-          api,
-          n,
-          commentRequeued(ctx, formatErrorForComment(err)),
-          log,
-        );
       }
     }
     throw err;
@@ -1015,20 +1053,18 @@ export async function runBisect(
         } catch (err) {
           for (const n of right) {
             try {
-              await q.requeue(prMap.get(n)!);
+              await requeueOrGiveUp(
+                api,
+                q,
+                ctx,
+                false,
+                prMap.get(n)!,
+                `failed to dispatch bisect for right half: ${formatErrorForComment(err)}`,
+                log,
+              );
             } catch (reqErr) {
               log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
-              continue;
             }
-            await postComment(
-              api,
-              n,
-              commentRequeued(
-                ctx,
-                `failed to dispatch bisect for right half: ${formatErrorForComment(err)}`,
-              ),
-              log,
-            );
           }
           throw new Error(
             `dispatching bisect for right half: ${formatErrorForComment(err)}`,
@@ -1066,7 +1102,15 @@ export async function runBisect(
       // Requeue right half (not yet tested)
       for (const n of right) {
         try {
-          await q.requeue(prMap.get(n)!);
+          await requeueOrGiveUp(
+            api,
+            q,
+            ctx,
+            cfg.dryRun,
+            prMap.get(n)!,
+            undefined,
+            log,
+          );
         } catch (err) {
           log(`Warning: failed to requeue PR #${n}: ${errorMessage(err)}`);
         }
@@ -1087,20 +1131,18 @@ export async function runBisect(
           for (const n of prNumbers) {
             if (excluded.has(n)) continue;
             try {
-              await q.requeue(prMap.get(n)!);
+              await requeueOrGiveUp(
+                api,
+                q,
+                ctx,
+                false,
+                prMap.get(n)!,
+                `failed to dispatch follow-up bisect: ${formatErrorForComment(err)}`,
+                log,
+              );
             } catch (reqErr) {
               log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
-              continue;
             }
-            await postComment(
-              api,
-              n,
-              commentRequeued(
-                ctx,
-                `failed to dispatch follow-up bisect: ${formatErrorForComment(err)}`,
-              ),
-              log,
-            );
           }
           throw new Error(
             `dispatching follow-up bisect: ${formatErrorForComment(err)}`,
@@ -1110,7 +1152,15 @@ export async function runBisect(
       // Requeue right half since it hasn't been tested yet
       for (const n of right) {
         try {
-          await q.requeue(prMap.get(n)!);
+          await requeueOrGiveUp(
+            api,
+            q,
+            ctx,
+            cfg.dryRun,
+            prMap.get(n)!,
+            undefined,
+            log,
+          );
         } catch (err) {
           log(`Warning: failed to requeue PR #${n}: ${errorMessage(err)}`);
         }

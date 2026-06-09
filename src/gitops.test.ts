@@ -673,6 +673,21 @@ describe("GitOps with injected exec", () => {
     expect(err).not.toBeInstanceOf(ConfigurationError);
   });
 
+  it("pushBranch surfaces stdout when a failed push wrote nothing to stderr", async () => {
+    const { octokit } = makeFakeOctokit();
+    const exec: Exec = async (args) => {
+      if (args[0] === "push") {
+        return { code: 1, stdout: "remote: error pushing refs", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    };
+    // biome-ignore lint/suspicious/noExplicitAny: test double
+    const ops = new GitOps(octokit as any, "o", "r", { exec });
+    const err = await ops.pushBranch("batch").catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(Error);
+    expect((err as Error).message).toContain("remote: error pushing refs");
+  });
+
   it("fastForwardMain uses refs API with force=false and returns SHA", async () => {
     const { octokit, calls } = makeFakeOctokit([
       { ref: "heads/batch", sha: "abc123" },

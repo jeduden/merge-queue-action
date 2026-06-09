@@ -36414,6 +36414,26 @@ function commentRequeued(ctx, reason) {
     ].join("\n");
 }
 /**
+ * Posted when the queue stops retrying a PR because it has been requeued the
+ * maximum number of times without succeeding. This is the circuit-breaker
+ * backstop: it fires for any failure — permanent or stubbornly transient —
+ * that survived `maxAttempts` requeues, so the queue can never retry a PR
+ * forever. Unlike `commentRequeued`, the operator must act before the PR is
+ * retried.
+ */
+function commentGaveUp(ctx, maxAttempts, lastReason) {
+    const lines = [
+        `🔴 ${BRAND} — gave up after ${maxAttempts} attempts`,
+        "",
+        `The merge queue requeued this PR ${maxAttempts} times without success and has stopped retrying to avoid an endless loop.`,
+    ];
+    if (lastReason) {
+        lines.push("", "Most recent error:", "", `> ${formatErrorForComment(lastReason)}`);
+    }
+    lines.push("", `[View merge queue run](${ctx.actionRunUrl}).`, "", `**Next:** Investigate the failure above, fix the underlying problem, then re-add the \`${ctx.queueLabel}\` label to try again.`);
+    return lines.join("\n");
+}
+/**
  * Posted when the merge queue action cannot proceed because the workflow is
  * misconfigured (e.g. missing `actions/checkout`, shallow clone, wrong CI
  * workflow name).  Unlike `commentRequeued`, this error will NOT resolve by
@@ -36624,6 +36644,9 @@ class GitHubClient {
                     title: pr.title,
                     state: pr.state,
                     createdAt: Math.floor(new Date(pr.created_at).getTime() / 1000),
+                    // Carry the label set so the queue can read the requeue-attempt
+                    // counter (`<base>:attempt-N`) without a second round-trip.
+                    labels: issueLabels,
                 });
                 if (limit > 0 && result.length >= limit) {
                     this.log(`listPRsWithLabel: reached limit=${limit}, returning ${result.length} PR(s)`);
@@ -37453,6 +37476,41 @@ class GitOps {
 const STATE_PENDING = "";
 const STATE_ACTIVE = "active";
 const STATE_FAILED = "failed";
+/**
+ * Default cap on how many times a single PR may be requeued before the queue
+ * gives up and marks it failed. This is the backstop that GUARANTEES a
+ * deterministic failure can never re-trigger the workflow forever: error
+ * classification (ConfigurationError, HTTP 404/422, …) can never be complete
+ * over an open-ended failure space, so a root-cause-agnostic attempt cap
+ * bounds every requeue path — including ones whose permanent failure slips
+ * past classification.
+ */
+const MAX_REQUEUE_ATTEMPTS = 10;
+const ATTEMPT_INFIX = ":attempt-";
+/** The attempt-counter label for a given count, e.g. `queue:attempt-3`. */
+function attemptLabel(base, n) {
+    return `${base}${ATTEMPT_INFIX}${n}`;
+}
+/**
+ * Reads the highest requeue-attempt count encoded in a PR's labels
+ * (`<base>:attempt-N`), returning 0 when none is present, alongside the
+ * concrete attempt-label names found so callers can clear them. Tolerates
+ * multiple/stale attempt labels by taking the max.
+ */
+function readAttemptCount(base, labels) {
+    const prefix = `${base}${ATTEMPT_INFIX}`;
+    let count = 0;
+    const found = [];
+    for (const l of labels ?? []) {
+        if (!l.startsWith(prefix))
+            continue;
+        found.push(l);
+        const n = Number(l.slice(prefix.length));
+        if (Number.isInteger(n) && n > count)
+            count = n;
+    }
+    return { count, labels: found };
+}
 /** Returns the full label string for a given state. */
 function queueLabel(base, state) {
     if (state === "")
@@ -37484,11 +37542,35 @@ class queue_Queue {
     label;
     dryRun;
     log;
-    constructor(api, label, dryRun, log) {
+    maxAttempts;
+    constructor(api, label, dryRun, log, maxAttempts = MAX_REQUEUE_ATTEMPTS) {
         this.api = api;
         this.label = label;
         this.dryRun = dryRun;
         this.log = log ?? (() => { });
+        // Guard against a misconfigured 0/negative cap silently disabling the
+        // backstop; fall back to the default so the loop stays bounded.
+        this.maxAttempts =
+            Number.isInteger(maxAttempts) && maxAttempts > 0
+                ? maxAttempts
+                : MAX_REQUEUE_ATTEMPTS;
+    }
+    /** The effective requeue cap (after validation), for comment text. */
+    get attemptCap() {
+        return this.maxAttempts;
+    }
+    /** Removes every `<base>:attempt-N` label currently known on the PR. */
+    async clearAttemptLabels(pr) {
+        const { labels } = readAttemptCount(this.label, pr.labels);
+        for (const l of labels) {
+            try {
+                await this.api.removeLabel(pr.number, l);
+            }
+            catch (err) {
+                if (!isNotFoundError(err))
+                    throw err;
+            }
+        }
     }
     /** Returns open PRs with the queue label, sorted oldest first. */
     async collect(limit) {
@@ -37542,13 +37624,38 @@ class queue_Queue {
             if (!isNotFoundError(err))
                 throw err;
         }
+        // Reset the requeue-attempt counter: a PR leaving the queue (failed or,
+        // later, re-added by the author) must start from a fresh budget.
+        await this.clearAttemptLabels(pr);
         await this.api.addLabel(pr.number, queueLabel(this.label, STATE_FAILED));
     }
-    /** Moves a PR back to pending state. */
+    /**
+     * Moves a PR back to pending state so the queue retries it — UNLESS it has
+     * already been requeued `maxAttempts` times, in which case it is marked
+     * failed instead. Returns `true` if the PR was requeued, `false` if the
+     * attempt cap was reached (the PR is now in the failed state).
+     *
+     * The cap is the root-cause-agnostic backstop: even a permanent failure
+     * that error classification fails to recognise can re-enter the queue at
+     * most `maxAttempts` times before this turns it into the terminal
+     * `failed` state, which the workflow's label trigger no longer matches.
+     */
     async requeue(pr) {
-        this.log(`Requeuing PR #${pr.number}`);
+        const { count } = readAttemptCount(this.label, pr.labels);
+        const next = count + 1;
+        if (next > this.maxAttempts) {
+            this.log(`PR #${pr.number} reached the requeue cap (${this.maxAttempts}); marking failed instead of requeueing`);
+            await this.markFailed(pr, `exceeded ${this.maxAttempts} requeue attempts`);
+            return false;
+        }
+        this.log(`Requeuing PR #${pr.number} (attempt ${next}/${this.maxAttempts})`);
         if (this.dryRun)
-            return;
+            return true;
+        // Bump the attempt counter: drop any prior attempt labels, add the new
+        // one. Done before re-adding the base label so the count is durable the
+        // moment the PR re-enters the queue.
+        await this.clearAttemptLabels(pr);
+        await this.api.addLabel(pr.number, attemptLabel(this.label, next));
         try {
             await this.api.removeLabel(pr.number, queueLabel(this.label, STATE_ACTIVE));
         }
@@ -37564,6 +37671,7 @@ class queue_Queue {
                 throw err;
         }
         await this.api.addLabel(pr.number, queueLabel(this.label, STATE_PENDING));
+        return true;
     }
     /** Creates the queue labels in the repository. */
     async setupLabels() {
@@ -37840,6 +37948,29 @@ async function postComment(api, prNumber, body, log) {
         log(`Warning: failed to comment on PR #${prNumber}: ${err}`);
     }
 }
+/**
+ * Requeues a PR, or — when it has hit the attempt cap — leaves it in the
+ * terminal failed state (set inside `Queue.requeue`) and posts a "gave up"
+ * comment. This is the single chokepoint that makes EVERY retry path
+ * bounded: callers must route requeues through here rather than calling
+ * `q.requeue` directly, so a deterministic failure that slips past error
+ * classification still cannot re-trigger the workflow forever. Returns
+ * whether the PR was requeued (false ⇒ it was failed at the cap).
+ */
+async function requeueOrGiveUp(api, q, ctx, dryRun, pr, reason, log) {
+    const requeued = await q.requeue(pr);
+    if (dryRun)
+        return requeued;
+    if (requeued) {
+        if (reason) {
+            await postComment(api, pr.number, commentRequeued(ctx, reason), log);
+        }
+    }
+    else {
+        await postComment(api, pr.number, commentGaveUp(ctx, q.attemptCap, reason), log);
+    }
+    return requeued;
+}
 async function ensurePRClosedAfterMerge(api, prNumber, log) {
     const attempts = 3;
     let confirmedOpen = false;
@@ -37917,7 +38048,7 @@ async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
         }
         log(`Actor ${actor} has "${perm}" permission, proceeding`);
     }
-    const q = new queue_Queue(api, cfg.queueLabel, cfg.dryRun, log);
+    const q = new queue_Queue(api, cfg.queueLabel, cfg.dryRun, log, cfg.maxRequeues);
     const b = new Batch(gitOps, cfg.dryRun, log, reporter);
     // 1. Collect queued PRs
     let prs;
@@ -37996,14 +38127,13 @@ async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
             if (excluded.has(pr.number))
                 continue;
             try {
-                await q.requeue(pr);
+                // Routes through the attempt-cap chokepoint: a PR that has already
+                // been requeued the maximum number of times is marked failed here
+                // instead of looping again.
+                await requeueOrGiveUp(api, q, ctx, cfg.dryRun, pr, reason, log);
             }
             catch (err) {
                 log(`Warning: failed to requeue PR #${pr.number} after error: ${err}`);
-                continue;
-            }
-            if (reason) {
-                await postComment(api, pr.number, commentRequeued(ctx, reason), log);
             }
         }
     };
@@ -38229,13 +38359,11 @@ async function handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prM
         if (!pr)
             continue;
         try {
-            await q.requeue(pr);
+            await requeueOrGiveUp(api, q, ctx, false, pr, reason, log);
         }
         catch (reqErr) {
             log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
-            continue;
         }
-        await postComment(api, n, commentRequeued(ctx, reason), log);
     }
 }
 async function runBisect(api, gitOps, cfg, log, reporterArg) {
@@ -38252,7 +38380,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
         log("No PRs to bisect");
         return;
     }
-    const q = new queue_Queue(api, cfg.queueLabel, cfg.dryRun, log);
+    const q = new queue_Queue(api, cfg.queueLabel, cfg.dryRun, log, cfg.maxRequeues);
     const b = new Batch(gitOps, cfg.dryRun, log, reporter);
     // Fetch only the specific PRs we are bisecting (avoids listing entire active queue)
     const prMap = new Map();
@@ -38294,16 +38422,16 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
             }
         }
         else if (!cfg.dryRun) {
-            // Transient error — requeue all candidates so they aren't stuck in queue:active
+            // Transient error — requeue all candidates so they aren't stuck in
+            // queue:active (bounded by the attempt cap so a deterministic failure
+            // here can't loop forever).
             for (const [n, pr] of prMap) {
                 try {
-                    await q.requeue(pr);
+                    await requeueOrGiveUp(api, q, ctx, false, pr, formatErrorForComment(err), log);
                 }
                 catch (requeueErr) {
                     log(`Warning: failed to requeue PR #${n}: ${requeueErr}`);
-                    continue;
                 }
-                await postComment(api, n, commentRequeued(ctx, formatErrorForComment(err)), log);
             }
         }
         throw err;
@@ -38440,13 +38568,11 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
                 catch (err) {
                     for (const n of right) {
                         try {
-                            await q.requeue(prMap.get(n));
+                            await requeueOrGiveUp(api, q, ctx, false, prMap.get(n), `failed to dispatch bisect for right half: ${formatErrorForComment(err)}`, log);
                         }
                         catch (reqErr) {
                             log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
-                            continue;
                         }
-                        await postComment(api, n, commentRequeued(ctx, `failed to dispatch bisect for right half: ${formatErrorForComment(err)}`), log);
                     }
                     throw new Error(`dispatching bisect for right half: ${formatErrorForComment(err)}`);
                 }
@@ -38474,7 +38600,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
             // Requeue right half (not yet tested)
             for (const n of right) {
                 try {
-                    await q.requeue(prMap.get(n));
+                    await requeueOrGiveUp(api, q, ctx, cfg.dryRun, prMap.get(n), undefined, log);
                 }
                 catch (err) {
                     log(`Warning: failed to requeue PR #${n}: ${errorMessage(err)}`);
@@ -38499,13 +38625,11 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
                         if (excluded.has(n))
                             continue;
                         try {
-                            await q.requeue(prMap.get(n));
+                            await requeueOrGiveUp(api, q, ctx, false, prMap.get(n), `failed to dispatch follow-up bisect: ${formatErrorForComment(err)}`, log);
                         }
                         catch (reqErr) {
                             log(`Warning: failed to requeue PR #${n}: ${reqErr}`);
-                            continue;
                         }
-                        await postComment(api, n, commentRequeued(ctx, `failed to dispatch follow-up bisect: ${formatErrorForComment(err)}`), log);
                     }
                     throw new Error(`dispatching follow-up bisect: ${formatErrorForComment(err)}`);
                 }
@@ -38513,7 +38637,7 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
             // Requeue right half since it hasn't been tested yet
             for (const n of right) {
                 try {
-                    await q.requeue(prMap.get(n));
+                    await requeueOrGiveUp(api, q, ctx, cfg.dryRun, prMap.get(n), undefined, log);
                 }
                 catch (err) {
                     log(`Warning: failed to requeue PR #${n}: ${errorMessage(err)}`);
@@ -38547,6 +38671,7 @@ function loadInputs() {
         gitUserEmail: getInput("git_user_email") ||
             "merge-queue@users.noreply.github.com",
         gitUserName: getInput("git_user_name") || "merge-queue-bot",
+        maxRequeues: parseInt(getInput("max_requeues") || "10", 10),
     };
 }
 function buildCommentCtx(owner, repo, queueLabel) {
@@ -38612,6 +38737,7 @@ async function run() {
         queueLabel: inputs.queueLabel,
         dryRun: inputs.dryRun,
         batchPrs: inputs.batchPrs,
+        maxRequeues: inputs.maxRequeues,
         commentCtx,
         triggerLabeledPR,
     };

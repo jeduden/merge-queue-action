@@ -8,6 +8,13 @@ export interface Config {
     queueLabel: string;
     dryRun: boolean;
     batchPrs: string;
+    /**
+     * Max times a single PR may be requeued before the queue gives up and
+     * marks it failed. Bounds every retry path so a deterministic failure
+     * cannot re-trigger the workflow forever. Defaults to
+     * `MAX_REQUEUE_ATTEMPTS` when unset.
+     */
+    maxRequeues?: number;
     /** Required by runProcess/runBisect; unused by runSetup. */
     commentCtx?: CommentCtx;
     /**

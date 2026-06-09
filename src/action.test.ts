@@ -77,7 +77,9 @@ function newMockAPI(): FullAPI & {
     },
     async addLabel(prNumber: number, label: string): Promise<void> {
       const labels = mock.labels.get(prNumber) ?? [];
-      labels.push(label);
+      // GitHub's add-labels is idempotent; mirror that so repeated
+      // requeues/attempt-label bumps don't accumulate duplicates.
+      if (!labels.includes(label)) labels.push(label);
       mock.labels.set(prNumber, labels);
     },
     async removeLabel(prNumber: number, label: string): Promise<void> {
@@ -1043,9 +1045,34 @@ describe("runProcess", () => {
     await expect(runProcess(api, git, cfg, nop)).rejects.toThrow(
       "triggering CI",
     );
-    // Transient error → branch cleaned up, PR requeued
+    // Transient error → branch cleaned up, PR requeued with attempt counter
     expect(git.deleted.length).toBeGreaterThan(0);
     expect(api.labels.get(1)).toContain("queue");
+    expect(api.labels.get(1)).toContain("queue:attempt-1");
+  });
+
+  it("gives up (marks failed, no requeue) once a PR hits the requeue cap", async () => {
+    // Backstop for the infinite-retry class: a stuck failure that error
+    // classification treats as transient must still stop after the cap,
+    // instead of re-adding the `queue` label and re-firing forever.
+    const api = newMockAPI();
+    const pr = { ...makePR(1), labels: ["queue:active", "queue:attempt-2"] };
+    api.prs.set("queue", [pr]);
+    api.labels.set(1, ["queue:active", "queue:attempt-2"]);
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false, maxRequeues: 2 }); // already at the cap
+    api.triggerWorkflow = async () => {
+      throw new Error("dispatch failed"); // transient-classified, but permanent here
+    };
+
+    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow();
+
+    // Cap reached → terminal failed state, NOT requeued → loop stops.
+    expect(api.labels.get(1)).toContain("queue:failed");
+    expect(api.labels.get(1)).not.toContain("queue");
+    expect(api.labels.get(1)).not.toContain("queue:attempt-2");
+    const c = api.comments.get(1) ?? [];
+    expect(c.find((s) => s.includes("gave up after 2 attempts"))).toBeDefined();
   });
 
   it("warns when markFailed throws during CI trigger 404 handling in runProcess", async () => {

@@ -246,6 +246,62 @@ describe("CreateAndMerge", () => {
     expect(warned[0].scope).toEqual([7]);
   });
 
+  it("warns via Reporter when deleteBranch also fails on the PUSH cleanup path", async () => {
+    // Twin of the merge-path cleanup test, but for the push branch: pushBranch
+    // throws (triggers cleanup) and the deleteBranch teardown ALSO throws. The
+    // Reporter.warn surfaces the teardown failure with an "after a push error"
+    // message, and the ORIGINAL push error still propagates (type preserved).
+    const pushErr = new ConfigurationError("token lacks workflow scope");
+    const git: GitOperator = {
+      async createBranchFromRef() {},
+      async mergeBranch() {
+        return true;
+      },
+      async pushBranch() {
+        throw pushErr;
+      },
+      async getHeadSHA() {
+        return "sha";
+      },
+      async fastForwardMain() {
+        return "sha";
+      },
+      async deleteBranch() {
+        throw new Error("boom-delete");
+      },
+    };
+    const warned: Array<{ msg: string; scope: number[] }> = [];
+    let scope: number[] = [];
+    const reporter = {
+      info: () => {},
+      async warn(msg: string) {
+        warned.push({ msg, scope: [...scope] });
+      },
+      async withScope<T>(prs: number[], fn: () => Promise<T>) {
+        const prev = scope;
+        scope = prs;
+        try {
+          return await fn();
+        } finally {
+          scope = prev;
+        }
+      },
+    };
+    const b = new Batch(git, false, nop, reporter);
+    const err = await b
+      .createAndMerge("push", [
+        { number: 9, headRef: "f", headSHA: "sha-f", title: "T" },
+      ])
+      .catch((e: unknown) => e);
+
+    // Original error instance (and its type) preserved.
+    expect(err).toBe(pushErr);
+    expect(warned).toHaveLength(1);
+    expect(warned[0].msg).toContain("after a push error");
+    expect(warned[0].msg).toContain("boom-delete");
+    expect(warned[0].scope).toEqual([9]);
+  });
+
   it("defaults log to a nop when undefined and still exercises log call sites", async () => {
     const git = newMockGit();
     // Passing undefined for log must not throw when Batch internally calls

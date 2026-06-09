@@ -141,7 +141,29 @@ start workflows triggered by `pull_request: labeled`. In that case, use
 |-------|---------|
 | `queue` | PR is waiting to be processed |
 | `queue:active` | PR is currently in a batch |
-| `queue:failed` | PR failed CI or had a merge conflict |
+| `queue:failed` | PR failed CI, had a merge conflict, or hit the requeue cap |
+| `queue:attempt-N` | Internal: how many times this PR has been requeued |
+
+### Bounded retries (no infinite loops)
+
+Transient problems — an API blip, a `main` that advanced mid-run, a CI
+run that couldn't be located — cause the queue to **requeue** the PR: it
+re-adds the `queue` label, and the next run retries. To guarantee a
+*permanent* failure can never requeue forever (a token missing a
+permission, branch protection rejecting the bot, a check that always
+fails), every requeue is bounded by a per-PR attempt cap:
+
+- Each requeue stamps the PR with a `queue:attempt-N` label.
+- Once a PR has been requeued **`max_requeues`** times (default **10**)
+  without succeeding, the queue stops retrying it, moves it to
+  `queue:failed`, and posts a "gave up after N attempts" comment instead
+  of re-adding the `queue` label.
+- The counter resets when the PR leaves the queue (merged, or marked
+  failed and then re-added by you), so a genuinely transient failure that
+  later succeeds is never penalised.
+
+This backstop bounds *every* failure path, including ones the action does
+not yet classify as permanent. Tune it with the `max_requeues` input.
 
 ### How merging works in detail
 
@@ -518,6 +540,7 @@ tested together in a single batch, reducing total CI runs.
 | `ci_workflow` | yes | — | Workflow file supporting `workflow_dispatch` (e.g. `.github/workflows/ci.yml`) |
 | `batch_size` | no | `5` | Max PRs per batch |
 | `queue_label` | no | `queue` | Label that enqueues a PR |
+| `max_requeues` | no | `10` | Max times a single PR is requeued before the queue gives up and marks it `queue:failed`. Bounds every retry path so a permanent failure can't re-trigger the workflow forever. See [Bounded retries](#bounded-retries-no-infinite-loops). |
 | `dry_run` | no | `false` | Log intent without mutating |
 | `batch_prs` | no | `""` | PR numbers to process explicitly. Accepts a JSON array (`[187]` or `[181,187]`) or a single integer string (`187`). When provided via `workflow_dispatch` in normal mode, those PRs are fetched directly without requiring the queue label — the recommended fallback for conflicted PRs. In bisect mode the action sets this automatically. |
 | `git_user_email` | no | `merge-queue@users.noreply.github.com` | `user.email` set on the local repo before merging |

@@ -22,6 +22,7 @@ interface EntryInputs {
   bisect: boolean;
   gitUserEmail: string;
   gitUserName: string;
+  maxRequeues: number;
 }
 
 function loadInputs(): EntryInputs {
@@ -37,6 +38,7 @@ function loadInputs(): EntryInputs {
       core.getInput("git_user_email") ||
       "merge-queue@users.noreply.github.com",
     gitUserName: core.getInput("git_user_name") || "merge-queue-bot",
+    maxRequeues: parseInt(core.getInput("max_requeues") || "10", 10),
   };
 }
 
@@ -122,6 +124,7 @@ async function run(): Promise<void> {
     queueLabel: inputs.queueLabel,
     dryRun: inputs.dryRun,
     batchPrs: inputs.batchPrs,
+    maxRequeues: inputs.maxRequeues,
     commentCtx,
     triggerLabeledPR,
   };
