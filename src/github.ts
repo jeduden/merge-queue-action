@@ -7,6 +7,7 @@ import type {
   WorkflowRunResult,
 } from "./queue.js";
 import { errorMessage } from "./reporter.js";
+import { isRateLimitedError } from "./errors.js";
 
 type Octokit = ReturnType<typeof github.getOctokit>;
 
@@ -19,10 +20,11 @@ function sleep(ms: number): Promise<void> {
 /**
  * Classifies a thrown value as a TRANSIENT GitHub API error worth retrying
  * in-process (before the caller falls back to a full workflow re-run):
- * 429 / 5xx, or a secondary-rate-limit 403 (retry-after, exhausted quota, or
- * a rate-limit message). Permanent errors (401/403-permission/404/422) are
- * NOT retryable — they propagate immediately so the orchestrator can mark
- * the PR failed.
+ * 429 / 5xx, or a rate-limit 403 (see `isRateLimitedError`). Permanent
+ * errors (401/403-permission/404/422) are NOT retryable — they propagate
+ * immediately so the orchestrator can mark the PR failed. Note octokit
+ * wraps network-level failures (ECONNRESET, DNS, aborts) in a status-500
+ * RequestError, so they are covered by the 5xx branch.
  */
 export function isRetryableHttpError(err: unknown): boolean {
   if (typeof err !== "object" || err === null || !("status" in err))
@@ -30,48 +32,53 @@ export function isRetryableHttpError(err: unknown): boolean {
   const status = (err as { status: number }).status;
   if (status === 429) return true;
   if (status >= 500 && status < 600) return true;
-  if (status === 403) {
-    const e = err as {
-      response?: { headers?: Record<string, unknown> };
-      message?: unknown;
-    };
-    const headers = e.response?.headers ?? {};
-    if (headers["retry-after"] != null) return true;
-    if (String(headers["x-ratelimit-remaining"]) === "0") return true;
-    const msg = typeof e.message === "string" ? e.message.toLowerCase() : "";
-    return (
-      msg.includes("rate limit") ||
-      msg.includes("secondary rate") ||
-      msg.includes("abuse")
-    );
-  }
+  if (status === 403) return isRateLimitedError(err);
   return false;
+}
+
+/**
+ * Retry predicate for NON-IDEMPOTENT requests (workflow dispatch): only
+ * throttle responses (429 / rate-limit 403), which GitHub rejects before
+ * processing, are safe to resend. A 5xx is ambiguous — the dispatch may
+ * have been registered before the error — and re-sending it would start a
+ * duplicate workflow run, so it propagates to the requeue path instead
+ * (which rebuilds the batch branch, making the orphan run harmless).
+ */
+export function isThrottleError(err: unknown): boolean {
+  if (typeof err !== "object" || err === null) return false;
+  if ("status" in err && (err as { status: number }).status === 429)
+    return true;
+  return isRateLimitedError(err);
 }
 
 /**
  * Runs `fn`, retrying transient GitHub API errors with exponential backoff.
  * A transient blip is absorbed in-run instead of failing the job and forcing
  * a full requeue; a permanent error (or one past `attempts`) propagates so
- * the caller classifies/requeues. `sleepFn` is injectable for tests.
+ * the caller classifies/requeues. `retryIf` narrows what counts as
+ * retryable (e.g. `isThrottleError` for non-idempotent requests);
+ * `sleepFn` is injectable for tests.
  */
 export async function withRetry<T>(
   fn: () => Promise<T>,
   opts: {
     attempts?: number;
     baseMs?: number;
+    retryIf?: (err: unknown) => boolean;
     log?: LogFunc;
     sleepFn?: (ms: number) => Promise<void>;
   } = {},
 ): Promise<T> {
   const attempts = opts.attempts ?? 4;
   const baseMs = opts.baseMs ?? 1000;
+  const retryIf = opts.retryIf ?? isRetryableHttpError;
   const log = opts.log ?? (() => {});
   const sleepFn = opts.sleepFn ?? sleep;
   for (let i = 0; ; i++) {
     try {
       return await fn();
     } catch (err) {
-      if (i >= attempts - 1 || !isRetryableHttpError(err)) throw err;
+      if (i >= attempts - 1 || !retryIf(err)) throw err;
       const delay = baseMs * 2 ** i;
       log(
         `Transient GitHub API error; retrying in ${delay}ms (attempt ${i + 1}/${attempts}): ${errorMessage(err)}`,
@@ -139,6 +146,15 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
         });
 
         const headRef = pr.head.label || pr.head.ref;
+        // Carry the label set so the queue can read the requeue-attempt
+        // counter (`<base>:attempt-N`) without a second round-trip. Taken
+        // from the pulls.get response (not the earlier issues listing) so
+        // it is the freshest snapshot available — same source as getPR.
+        const prLabels = (pr.labels ?? [])
+          .map((l: string | { name?: string }) =>
+            typeof l === "string" ? l : (l as { name?: string }).name ?? "",
+          )
+          .filter((n: string) => n !== "");
         result.push({
           number: pr.number,
           headRef,
@@ -148,9 +164,7 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
           createdAt: Math.floor(
             new Date(pr.created_at).getTime() / 1000,
           ),
-          // Carry the label set so the queue can read the requeue-attempt
-          // counter (`<base>:attempt-N`) without a second round-trip.
-          labels: issueLabels,
+          labels: prLabels,
         });
 
         if (limit > 0 && result.length >= limit) {
@@ -215,9 +229,12 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
     ref: string,
     inputs?: Record<string, string>,
   ): Promise<void> {
-    // Retry transient blips (429/5xx/rate-limit) in-run so a momentary glitch
-    // doesn't fail the dispatch and force a whole requeue cycle. A permanent
-    // error (404/422/403-permission) propagates immediately to be classified.
+    // Dispatch is non-idempotent: only throttle errors (rejected before
+    // processing) are retried in-run — a 5xx after GitHub registered the
+    // dispatch would start a DUPLICATE run if re-sent, which for the bisect
+    // self-dispatch means a whole duplicate bisect pass. Non-throttle
+    // failures propagate to the requeue path, which rebuilds the batch
+    // branch so any orphan run is harmless.
     await withRetry(
       () =>
         this.octokit.rest.actions.createWorkflowDispatch({
@@ -227,7 +244,7 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
           ref,
           inputs,
         }),
-      { log: this.log },
+      { retryIf: isThrottleError, log: this.log },
     );
   }
 
@@ -252,16 +269,25 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
       // Try querying by head_sha first if available (more reliable, no indexing delay)
       if (headSha) {
         try {
-          const { data: runs } =
-            await this.octokit.rest.actions.listWorkflowRuns({
-              owner: this.owner,
-              repo: this.repo,
-              workflow_id: workflowFile,
-              head_sha: headSha,
-              event: "workflow_dispatch",
-              created: `>=${createdAfter.toISOString()}`,
-              per_page: 1,
-            });
+          // Reads are idempotent: absorb transient blips in-run instead of
+          // aborting the whole 60-attempt poll (and requeueing the batch)
+          // on the first 502.
+          const runs = await withRetry(
+            async () => {
+              const { data } =
+                await this.octokit.rest.actions.listWorkflowRuns({
+                  owner: this.owner,
+                  repo: this.repo,
+                  workflow_id: workflowFile,
+                  head_sha: headSha,
+                  event: "workflow_dispatch",
+                  created: `>=${createdAfter.toISOString()}`,
+                  per_page: 1,
+                });
+              return data;
+            },
+            { log: this.log },
+          );
 
           if (i === 0 || i === 5 || i % 30 === 0) {
             this.log(
@@ -293,16 +319,22 @@ export class GitHubClient implements GitHubAPI, WorkflowAPI {
 
       // Fallback to branch-based query (may have indexing delays)
       try {
-        const { data: runs } =
-          await this.octokit.rest.actions.listWorkflowRuns({
-            owner: this.owner,
-            repo: this.repo,
-            workflow_id: workflowFile,
-            branch: ref,
-            event: "workflow_dispatch",
-            created: `>=${createdAfter.toISOString()}`,
-            per_page: 1,
-          });
+        const runs = await withRetry(
+          async () => {
+            const { data } =
+              await this.octokit.rest.actions.listWorkflowRuns({
+                owner: this.owner,
+                repo: this.repo,
+                workflow_id: workflowFile,
+                branch: ref,
+                event: "workflow_dispatch",
+                created: `>=${createdAfter.toISOString()}`,
+                per_page: 1,
+              });
+            return data;
+          },
+          { log: this.log },
+        );
 
         if (i === 0 || i === 5 || i % 30 === 0) {
           this.log(

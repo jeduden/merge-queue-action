@@ -688,32 +688,69 @@ describe("GitOps with injected exec", () => {
     expect((err as Error).message).toContain("remote: error pushing refs");
   });
 
-  it.each([401, 403, 404])(
-    "fastForwardMain throws ConfigurationError when updateRef is rejected (%s)",
-    async (status) => {
+  it.each([
+    [403, "Resource not accessible by integration"],
+    [404, "Not Found"],
+    // GitHub reports branch-protection rejections and missing refs as 422,
+    // sharing the status with the transient not-a-fast-forward case — the
+    // classifier must discriminate by message.
+    [422, "Reference does not exist"],
+    [422, "Changes must be made through a pull request (GH006)"],
+    [422, 'Required status check "ci" is expected.'],
+    [422, "At least 1 approving review is required"],
+    [422, "5 of 5 required status checks are expected (protected branch)"],
+  ])(
+    "fastForwardMain throws ConfigurationError when updateRef is rejected (%s %s)",
+    async (status, message) => {
       const { octokit } = makeFakeOctokit([{ ref: "heads/batch", sha: "abc123" }]);
       octokit.rest.git.updateRef = async () => {
-        throw Object.assign(new Error("rejected"), { status });
+        throw Object.assign(new Error(message), { status });
       };
       // biome-ignore lint/suspicious/noExplicitAny: test double
       const ops = new GitOps(octokit as any, "o", "r");
       const err = await ops.fastForwardMain("batch").catch((e: unknown) => e);
       expect(err).toBeInstanceOf(ConfigurationError);
       expect((err as Error).message).toMatch(/main/i);
+      // The operator-facing message carries GitHub's actual reason.
+      expect((err as Error).message).toContain(message);
     },
   );
 
-  it("fastForwardMain rethrows a transient 422 (main advanced, not a fast-forward)", async () => {
+  it.each([
+    // 401: an expired GitHub App installation token 401s after a long CI
+    // wait; the next run mints a fresh token, so hard-failing is wrong.
+    [401, "Bad credentials"],
+    // main advanced while CI ran — the next batch rebuilds from new main.
+    [422, "Update is not a fast forward"],
+    // an unrecognised 422 stays transient (the requeue cap bounds it).
+    [422, "Validation Failed"],
+    [500, "Server Error"],
+  ])(
+    "fastForwardMain rethrows transient updateRef failures (%s %s)",
+    async (status, message) => {
+      const { octokit } = makeFakeOctokit([{ ref: "heads/batch", sha: "abc123" }]);
+      octokit.rest.git.updateRef = async () => {
+        throw Object.assign(new Error(message), { status });
+      };
+      // biome-ignore lint/suspicious/noExplicitAny: test double
+      const ops = new GitOps(octokit as any, "o", "r");
+      const err = await ops.fastForwardMain("batch").catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(Error);
+      expect(err).not.toBeInstanceOf(ConfigurationError);
+    },
+  );
+
+  it("fastForwardMain treats a rate-limited 403 as transient", async () => {
     const { octokit } = makeFakeOctokit([{ ref: "heads/batch", sha: "abc123" }]);
     octokit.rest.git.updateRef = async () => {
-      throw Object.assign(new Error("Update is not a fast forward"), {
-        status: 422,
+      throw Object.assign(new Error("You have exceeded a secondary rate limit"), {
+        status: 403,
+        response: { headers: { "retry-after": "60" } },
       });
     };
     // biome-ignore lint/suspicious/noExplicitAny: test double
     const ops = new GitOps(octokit as any, "o", "r");
     const err = await ops.fastForwardMain("batch").catch((e: unknown) => e);
-    expect(err).toBeInstanceOf(Error);
     expect(err).not.toBeInstanceOf(ConfigurationError);
   });
 

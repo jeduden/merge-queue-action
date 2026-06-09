@@ -21,12 +21,17 @@ export declare function commentBisecting(ctx: CommentCtx, batchBranch: string, l
 export declare function commentOperatorWarning(ctx: CommentCtx, msg: string): string;
 export declare function commentRequeued(ctx: CommentCtx, reason: string): string;
 /**
- * Posted when the queue stops retrying a PR because it has been requeued the
- * maximum number of times without succeeding. This is the circuit-breaker
+ * Posted when the queue stops retrying a PR because it has reached the
+ * requeue-attempt limit without succeeding. This is the circuit-breaker
  * backstop: it fires for any failure — permanent or stubbornly transient —
- * that survived `maxAttempts` requeues, so the queue can never retry a PR
+ * that survived the retry budget, so the queue can never retry a PR
  * forever. Unlike `commentRequeued`, the operator must act before the PR is
  * retried.
+ *
+ * `lastReason` is rendered raw in a blockquote, exactly like
+ * `commentRequeued` renders the same string — callers (requeueOrGiveUp)
+ * already pass a one-line, `formatErrorForComment`-sanitised reason, and
+ * re-formatting here would truncate it a second time.
  */
 export declare function commentGaveUp(ctx: CommentCtx, maxAttempts: number, lastReason?: string): string;
 /**

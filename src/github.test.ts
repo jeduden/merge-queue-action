@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { isRetryableHttpError, withRetry } from "./github.js";
+import { isRetryableHttpError, isThrottleError, withRetry } from "./github.js";
+import { isRateLimitedError } from "./errors.js";
 
 const withStatus = (status: number, extra: object = {}) =>
   Object.assign(new Error("x"), { status, ...extra });
@@ -48,6 +49,46 @@ describe("isRetryableHttpError", () => {
 
   it("treats a 403 with a non-string message as non-retryable", () => {
     expect(isRetryableHttpError({ status: 403, message: 1 })).toBe(false);
+  });
+});
+
+describe("isRateLimitedError", () => {
+  it("rejects non-object values and plain errors", () => {
+    expect(isRateLimitedError(null)).toBe(false);
+    expect(isRateLimitedError("x")).toBe(false);
+    expect(isRateLimitedError(new Error("Forbidden"))).toBe(false);
+  });
+
+  it("accepts the three rate-limit signals", () => {
+    expect(
+      isRateLimitedError({ response: { headers: { "retry-after": "1" } } }),
+    ).toBe(true);
+    expect(
+      isRateLimitedError({
+        response: { headers: { "x-ratelimit-remaining": "0" } },
+      }),
+    ).toBe(true);
+    expect(
+      isRateLimitedError(new Error("You have exceeded a secondary rate limit")),
+    ).toBe(true);
+  });
+});
+
+describe("isThrottleError", () => {
+  it("accepts only throttle responses — safe to resend a non-idempotent request", () => {
+    expect(isThrottleError(withStatus(429))).toBe(true);
+    expect(
+      isThrottleError(
+        withStatus(403, { response: { headers: { "retry-after": "1" } } }),
+      ),
+    ).toBe(true);
+    // A 5xx is ambiguous (the dispatch may have been processed) — NOT safe.
+    expect(isThrottleError(withStatus(500))).toBe(false);
+    expect(isThrottleError(withStatus(502))).toBe(false);
+    // Plain permission 403 / permanent errors are not throttles.
+    expect(isThrottleError(withStatus(403))).toBe(false);
+    expect(isThrottleError(withStatus(404))).toBe(false);
+    expect(isThrottleError(null)).toBe(false);
   });
 });
 
@@ -107,6 +148,20 @@ describe("withRetry", () => {
       ),
     ).rejects.toThrow();
     expect(calls).toBe(3);
+  });
+
+  it("honors a custom retryIf predicate (dispatch: no retry on 5xx)", async () => {
+    let calls = 0;
+    await expect(
+      withRetry(
+        async () => {
+          calls++;
+          throw withStatus(502); // retryable by default, NOT a throttle
+        },
+        { attempts: 4, retryIf: isThrottleError, sleepFn: noSleep },
+      ),
+    ).rejects.toThrow();
+    expect(calls).toBe(1);
   });
 
   it("logs and backs off (exponentially) between retries", async () => {

@@ -174,6 +174,25 @@ describe("CreateAndMerge", () => {
     expect(git.deleted).toContain("merge-queue/batch-err");
   });
 
+  it("rethrows a ConfigurationError from mergeBranch unwrapped, after cleanup", async () => {
+    // A permanent misconfiguration thrown mid-merge must reach the
+    // orchestrator with its type intact (it routes to markFailed, not
+    // requeue) — the generic wrap would downgrade it to retried-forever.
+    const cfgErr = new ConfigurationError("worktree assertion failed");
+    const git = newMockGit();
+    git.mergeBranch = async () => {
+      throw cfgErr;
+    };
+    const b = new Batch(git, false, nop);
+    const err = await b
+      .createAndMerge("cfg", [
+        { number: 1, headRef: "f", headSHA: "sha-f", title: "T" },
+      ])
+      .catch((e: unknown) => e);
+    expect(err).toBe(cfgErr);
+    expect(git.deleted).toContain("merge-queue/batch-cfg");
+  });
+
   it("cleans up the batch branch and preserves the error type on a push failure", async () => {
     // A push rejected because the token lacks `workflow` scope is a
     // permanent ConfigurationError. createAndMerge must delete the leaked

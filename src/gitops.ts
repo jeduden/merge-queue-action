@@ -4,7 +4,7 @@ import { join, isAbsolute } from "node:path";
 import type * as github from "@actions/github";
 import type { GitOperator } from "./batch.js";
 import { errorMessage, silentReporter, type Reporter } from "./reporter.js";
-import { ConfigurationError } from "./errors.js";
+import { ConfigurationError, isRateLimitedError } from "./errors.js";
 
 type Octokit = ReturnType<typeof github.getOctokit>;
 
@@ -77,17 +77,41 @@ function isWorkflowScopePushRejection(stderr: string): boolean {
 }
 
 /**
- * Detects a PERMANENT failure updating a git ref via the API: 401 (bad
- * token), 403 (branch protection / restricted push / missing
- * `contents: write`), or 404 (ref/branch doesn't exist). A 422 is excluded —
- * for a `main` fast-forward it means "not a fast-forward" because `main`
- * advanced, which is transient and should requeue.
+ * Detects a PERMANENT failure updating `heads/main` via the refs API — one
+ * an operator must fix, where retrying just burns the requeue budget.
+ *
+ * GitHub's actual status mapping (verified against octokit issues and the
+ * API changelog) is unintuitive:
+ *   - Branch-protection rejections (required reviews/status checks,
+ *     "Changes must be made through a pull request" / GH006) and a missing
+ *     ref ("Reference does not exist") arrive as **422**, sharing the status
+ *     with the transient "Update is not a fast forward" (main advanced) —
+ *     so 422 must be discriminated by message.
+ *   - Token-permission failures ("Resource not accessible by integration")
+ *     arrive as **403**; a rate-limited 403 is transient.
+ *   - **401** is deliberately transient: an expired GitHub App installation
+ *     token 401s after a long CI wait, and the next run mints a fresh
+ *     token — the requeue cap bounds the genuinely-dead-credential case.
  */
 function isPermanentRefUpdateError(err: unknown): boolean {
   if (typeof err !== "object" || err === null || !("status" in err))
     return false;
   const status = (err as { status: number }).status;
-  return status === 401 || status === 403 || status === 404;
+  if (status === 403) return !isRateLimitedError(err);
+  if (status === 404) return true;
+  if (status === 422) {
+    const msg = errorMessage(err).toLowerCase();
+    if (msg.includes("not a fast forward")) return false;
+    return (
+      msg.includes("reference does not exist") ||
+      msg.includes("protected branch") ||
+      msg.includes("required status check") ||
+      msg.includes("changes must be made through a pull request") ||
+      msg.includes("approving review") ||
+      msg.includes("gh006")
+    );
+  }
+  return false;
 }
 
 /**
@@ -733,22 +757,23 @@ export class GitOps implements GitOperator {
       });
     } catch (err) {
       if (isPermanentRefUpdateError(err)) {
-        // 401/403/404 updating `main` will not resolve on retry: branch
-        // protection forbids the token from updating `main` (required
-        // reviews/checks or restricted push access), the token lacks
-        // `contents: write`, or the default branch isn't `main`. Surface as
-        // a ConfigurationError so the orchestrator marks the PR failed
-        // instead of requeueing it forever. A 422 (not-a-fast-forward,
-        // i.e. `main` advanced) is left transient: the next run rebuilds.
+        // Will not resolve on retry: branch protection forbids the token
+        // from updating `main` (required reviews/checks, pull-request-only
+        // pushes), the token lacks `contents: write`, or the repository's
+        // default branch isn't `main` ("Reference does not exist"). Surface
+        // as a ConfigurationError so the orchestrator marks the PR failed
+        // instead of requeueing it forever. A "not a fast forward" 422
+        // (`main` advanced) stays transient: the next run rebuilds.
         const status = (err as { status: number }).status;
         throw new ConfigurationError(
-          "merge-queue-action could not fast-forward `main` (HTTP " +
-            `${status}). This usually means branch protection forbids the ` +
-            "merge-queue token from updating `main` (required reviews, " +
-            "required status checks, or restricted push access), the token " +
-            "lacks `contents: write`, or the repository's default branch is " +
-            "not `main`. Grant the token push access to `main` (or add it to " +
-            "the branch-protection bypass/allow list).",
+          "merge-queue-action could not fast-forward `main` — GitHub " +
+            `reported (HTTP ${status}): ${errorMessage(err)}. This usually ` +
+            "means branch protection forbids the merge-queue token from " +
+            "updating `main` (required reviews, required status checks, or " +
+            "pull-request-only pushes), the token lacks `contents: write`, " +
+            "or the repository's default branch is not `main`. Grant the " +
+            "token push access to `main` (or add it to the " +
+            "branch-protection bypass/allow list).",
         );
       }
       throw err;
