@@ -173,7 +173,16 @@ export class Batch {
     if (this.dryRun) return "";
     const sha = await this.git.fastForwardMain(branch);
     this.log(`Deleting batch branch ${branch}`);
-    await this.git.deleteBranch(branch);
+    try {
+      await this.git.deleteBranch(branch);
+    } catch (err) {
+      // The merge to main already happened — a failed branch delete must
+      // not throw, or the caller would misclassify a SUCCESSFUL merge as
+      // a fast-forward failure and requeue freshly-merged PRs.
+      await this.reporter.warn(
+        `failed to delete batch branch \`${branch}\` after merging: ${errorMessage(err)}`,
+      );
+    }
     return sha;
   }
 }

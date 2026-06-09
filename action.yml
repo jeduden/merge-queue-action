@@ -24,6 +24,15 @@ inputs:
   queue_label:
     description: Label that enqueues a PR
     default: queue
+  ci_wait_minutes:
+    description: >-
+      How long (in minutes) to wait for the dispatched CI run on a batch
+      branch to complete before treating the wait as failed and requeueing
+      the batch. Size this above your slowest CI run: a too-small value
+      makes every batch time out and charges the requeue cap until the
+      PRs are marked failed without CI ever failing. Must be a positive
+      integer; invalid values fall back to the default with a warning.
+    default: "60"
   max_requeues:
     description: >-
       Max times a single PR is requeued before the queue gives up and
@@ -64,3 +73,7 @@ inputs:
 runs:
   using: node24
   main: dist/index.js
+  # Scrubs the token-embedded origin URL from .git/config after the job's
+  # other steps, so steps following this action cannot read the
+  # merge-queue token. Runs even when the main step failed.
+  post: dist/cleanup.js

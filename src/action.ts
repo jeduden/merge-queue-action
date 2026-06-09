@@ -119,6 +119,12 @@ export function parseMaxRequeues(raw: string): number {
   return /^\d+$/.test(trimmed) ? parseInt(trimmed, 10) : Number.NaN;
 }
 
+/**
+ * Max `queue:active` orphans rescued per run. Each rescue costs ~7 API
+ * calls; the rest keep their label and drain on subsequent runs.
+ */
+const ORPHAN_SWEEP_LIMIT = 20;
+
 /** Default for the batch_size input (mirrored in action.yml / README). */
 export const DEFAULT_BATCH_SIZE = 5;
 
@@ -141,6 +147,28 @@ export function parseBatchSize(
     `Invalid batch_size ("${raw}"); must be a non-negative integer — using default ${DEFAULT_BATCH_SIZE}`,
   );
   return DEFAULT_BATCH_SIZE;
+}
+
+/**
+ * Parses the ci_wait_minutes input with the house strictness: "" → the
+ * default; canonical digits ≥ 1 → the number; anything else → the default
+ * with a warning.
+ */
+export function parseCiWaitMinutes(
+  raw: string,
+  fallback: number,
+  warn: (msg: string) => void = () => {},
+): number {
+  const trimmed = raw.trim();
+  if (trimmed === "") return fallback;
+  if (/^\d+$/.test(trimmed)) {
+    const n = parseInt(trimmed, 10);
+    if (n >= 1) return n;
+  }
+  warn(
+    `Invalid ci_wait_minutes ("${raw}"); must be a positive integer — using default ${fallback}`,
+  );
+  return fallback;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -455,16 +483,24 @@ async function handleCIFailure(
   }
 
   if (result.merged.length === 1) {
-    // Single PR failed — mark it
+    // Single PR failed — mark it. Guarded so a label-API failure cannot
+    // escape into the caller's catch, whose requeue branch would put a
+    // known-failing PR back in the queue with a misleading comment.
     const pr = prs.find((p) => p.number === result.merged[0].number);
     if (pr) {
-      await q.markFailed(pr, "CI failed");
-      if (!cfg.dryRun) {
-        await postComment(
-          api,
-          pr.number,
-          commentCIFailed(ctx, ciRunUrl, false),
-          log,
+      try {
+        await q.markFailed(pr, "CI failed");
+        if (!cfg.dryRun) {
+          await postComment(
+            api,
+            pr.number,
+            commentCIFailed(ctx, ciRunUrl, false),
+            log,
+          );
+        }
+      } catch (markErr) {
+        log(
+          `Warning: failed to mark PR #${pr.number} as failed after CI failure: ${markErr}`,
         );
       }
     }
@@ -597,9 +633,14 @@ export async function runProcess(
   // cap-bounded, so a stuck orphan still converges to `queue:failed`.
   if (!cfg.dryRun) {
     try {
+      // Capped: each rescued orphan costs ~7 API calls, and orphans
+      // self-drain across runs (anything beyond the cap keeps its
+      // `:active` label and is swept by a later run) — so a pathological
+      // backlog spreads over a few runs instead of blowing the secondary
+      // rate limit in one.
       const actives = await api.listPRsWithLabel(
         queueLabel(cfg.queueLabel, STATE_ACTIVE),
-        0,
+        ORPHAN_SWEEP_LIMIT,
       );
       for (const orphan of actives) {
         if (prs.some((p) => p.number === orphan.number)) continue;
@@ -886,9 +927,16 @@ export async function runProcess(
   // 6. CI passed — merge to main
   if (!cfg.dryRun) {
     const drifted = [] as { number: number; snapshot: string; current: string }[];
+    const withdrawn: number[] = [];
     try {
       for (const mp of result.merged) {
         const current = await api.getPR(mp.number);
+        if (current.state !== "open") {
+          // Closed mid-CI: the strongest retraction signal — the batch
+          // must not ship this PR's commits.
+          withdrawn.push(mp.number);
+          continue;
+        }
         if (current.headSHA !== mp.headSHA) {
           drifted.push({
             number: mp.number,
@@ -906,11 +954,31 @@ export async function runProcess(
         `checking PR drift after CI: ${formatErrorForComment(err)}`,
       );
     }
-    if (drifted.length > 0) {
+    if (drifted.length > 0 || withdrawn.length > 0) {
       for (const d of drifted) {
         log(
           `PR #${d.number} head changed while CI ran (${d.snapshot} -> ${d.current}); skipping stale batch`,
         );
+      }
+      for (const n of withdrawn) {
+        log(`PR #${n} was closed while CI ran; discarding the batch`);
+        // Drop the withdrawn PR from the queue entirely: it is closed, so
+        // it must be neither merged nor requeued. Best-effort label
+        // cleanup; the PR being closed makes leftovers cosmetic.
+        excluded.add(n);
+        const pr = prs.find((p) => p.number === n);
+        if (pr) {
+          try {
+            await api.removeLabel(n, queueLabel(cfg.queueLabel, STATE_ACTIVE));
+          } catch {
+            /* best effort */
+          }
+          try {
+            await q.resetAttempts(pr);
+          } catch {
+            /* best effort */
+          }
+        }
       }
       // A new head means an author pushed — that's progress, not a failure,
       // so the requeue budget starts fresh for EVERY batch member: the
@@ -947,7 +1015,7 @@ export async function runProcess(
         q,
         ctx,
         siblingPRs,
-        "another PR in the batch was updated while batch CI ran, invalidating the shared batch run; this PR will be re-tested in a fresh batch",
+        "another PR in the batch was updated or closed while batch CI ran, invalidating the shared batch run; this PR will be re-tested in a fresh batch",
         log,
       );
       return;
@@ -1318,6 +1386,100 @@ export async function runBisect(
   }
 
   if (conclusion === "success") {
+    // Mirror runProcess's post-CI guard: heads may have moved (the CI
+    // result is stale) or PRs may have closed (retracted) while the
+    // bisect CI ran — without this check the stale heads would be
+    // fast-forwarded onto main and a closed PR's commits would ship.
+    if (!cfg.dryRun) {
+      const driftedLeft: number[] = [];
+      const closedLeft: number[] = [];
+      try {
+        for (const mp of result.merged) {
+          const current = await api.getPR(mp.number);
+          if (current.state !== "open") closedLeft.push(mp.number);
+          else if (current.headSHA !== mp.headSHA)
+            driftedLeft.push(mp.number);
+        }
+      } catch (err) {
+        await handleBisectObservationFailure(
+          api,
+          ctx,
+          q,
+          gitOps,
+          reporter,
+          prMap,
+          prNumbers,
+          excluded,
+          result.branch,
+          err,
+          `failed to verify PR state after bisect CI: ${formatErrorForComment(err)}`,
+          log,
+        );
+        throw new Error(
+          `checking PR state after bisect CI: ${formatErrorForComment(err)}`,
+        );
+      }
+      if (driftedLeft.length > 0 || closedLeft.length > 0) {
+        for (const n of driftedLeft) {
+          log(`PR #${n} head changed while bisect CI ran; discarding batch`);
+        }
+        for (const n of closedLeft) {
+          log(`PR #${n} was closed while bisect CI ran; discarding batch`);
+          excluded.add(n);
+          const pr = prMap.get(n);
+          if (pr) {
+            try {
+              await api.removeLabel(
+                n,
+                queueLabel(cfg.queueLabel, STATE_ACTIVE),
+              );
+            } catch {
+              /* best effort */
+            }
+            try {
+              await q.resetAttempts(pr);
+            } catch {
+              /* best effort */
+            }
+          }
+        }
+        try {
+          await gitOps.deleteBranch(result.branch);
+        } catch (delErr) {
+          const candidateNums = prNumbers.filter((n) => !excluded.has(n));
+          await reporter.withScope(candidateNums, () =>
+            reporter.warn(
+              `failed to delete stale bisect branch \`${result.branch}\`: ${errorMessage(delErr)}`,
+            ),
+          );
+        }
+        // The whole bisection chain is stale: reset budgets (progress, not
+        // failure) and requeue every remaining candidate.
+        const remaining = resolvePRs(
+          [...mergedLeft, ...right],
+          prMap,
+          excluded,
+        );
+        for (const pr of remaining) {
+          try {
+            await q.resetAttempts(pr);
+          } catch (resetErr) {
+            log(
+              `Warning: failed to reset attempt counter for PR #${pr.number}: ${resetErr}`,
+            );
+          }
+        }
+        await requeueMany(
+          api,
+          q,
+          ctx,
+          remaining,
+          "a PR in this bisection was updated or closed while its CI ran; bisection will restart from the queue",
+          log,
+        );
+        return;
+      }
+    }
     // Left half passes — merge it to main
     log("Left half passed, merging to main");
     let mergeSha = "";

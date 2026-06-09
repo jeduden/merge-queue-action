@@ -81,7 +81,7 @@ describe("PRReporter", () => {
     expect(poster.calls[0].body).toContain(ctx.actionRunUrl);
   });
 
-  it("multi-line warn bodies survive the blockquote (every line prefixed with `> `)", async () => {
+  it("multi-line warn bodies are fenced as inert code (no Markdown rendering)", async () => {
     const poster = makePoster();
     const r = new PRReporter({
       poster,
@@ -89,17 +89,23 @@ describe("PRReporter", () => {
       log: () => {},
       dryRun: false,
     });
-    const multiLine = "first line\nsecond line\nthird line";
+    const multiLine = "first line\nsecond @everyone line\n[evil](https://x) line";
     await r.withScope([42], async () => {
       await r.warn(multiLine);
     });
     const body = poster.calls[0].body;
-    // Every line of the multi-line input must be inside the
-    // blockquote; without the fix, only "first line" would be
-    // blockquoted and the rest would render as prose.
-    expect(body).toContain("> first line");
-    expect(body).toContain("> second line");
-    expect(body).toContain("> third line");
+    // The whole body sits inside one tilde fence: subprocess output must
+    // render inert — no @mention notifications, no links — and every
+    // line must be inside the fence.
+    const fenceStart = body.indexOf("~~~text");
+    const fenceEnd = body.indexOf("~~~", fenceStart + 7);
+    expect(fenceStart).toBeGreaterThanOrEqual(0);
+    expect(fenceEnd).toBeGreaterThan(fenceStart);
+    for (const line of multiLine.split("\n")) {
+      const at = body.indexOf(line);
+      expect(at).toBeGreaterThan(fenceStart);
+      expect(at).toBeLessThan(fenceEnd);
+    }
   });
 
   it("CRLF and lone CR in warn bodies are normalised so comments don't render with stray `\\r`", async () => {
@@ -119,10 +125,9 @@ describe("PRReporter", () => {
     });
     const body = poster.calls[0].body;
     expect(body).not.toContain("\r");
-    expect(body).toContain("> windows line");
-    expect(body).toContain("> unix line");
-    expect(body).toContain("> mac line");
-    expect(body).toContain("> final line");
+    for (const line of ["windows line", "unix line", "mac line", "final line"]) {
+      expect(body).toContain(line);
+    }
   });
 
   it("very long warn bodies are truncated so comments don't blow up the thread", async () => {

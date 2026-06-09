@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_BATCH_SIZE,
   parseBatchSize,
+  parseCiWaitMinutes,
   parseMaxRequeues,
 } from "./action.js";
+import { tokenlessOriginUrl } from "./cleanup.js";
+import { ciWaitAttempts, DEFAULT_CI_WAIT_MINUTES } from "./github.js";
 import { MAX_REQUEUE_ATTEMPTS } from "./queue.js";
 
 describe("parseMaxRequeues", () => {
@@ -51,5 +54,57 @@ describe("parseBatchSize", () => {
     );
     expect(warned).toHaveLength(2);
     expect(warned[0]).toContain("Invalid batch_size");
+  });
+});
+
+describe("tokenlessOriginUrl", () => {
+  it("builds the token-less URL from env values", () => {
+    expect(
+      tokenlessOriginUrl("https://github.com", "owner/repo"),
+    ).toBe("https://github.com/owner/repo.git");
+    // Trailing slashes on the server URL don't double up.
+    expect(
+      tokenlessOriginUrl("https://ghe.example.com/", "o/r"),
+    ).toBe("https://ghe.example.com/o/r.git");
+  });
+
+  it("defaults the server and bails without a repository", () => {
+    expect(tokenlessOriginUrl(undefined, "o/r")).toBe(
+      "https://github.com/o/r.git",
+    );
+    expect(tokenlessOriginUrl("https://github.com", undefined)).toBeUndefined();
+  });
+});
+
+describe("formatErrorForComment injection hardening", () => {
+  it("renders untrusted fragments as inline code so mentions and links stay inert", async () => {
+    const { formatErrorForComment } = await import("./comments.js");
+    const out = formatErrorForComment(
+      new Error("conflict in [evil](https://x) @everyone path"),
+    );
+    expect(out.startsWith("`")).toBe(true);
+    expect(out.endsWith("`")).toBe(true);
+    // Inner backticks were stripped, so the span cannot be closed early.
+    expect(out.slice(1, -1)).not.toContain("`");
+  });
+});
+
+describe("parseCiWaitMinutes / ciWaitAttempts", () => {
+  it("parses canonical minutes and falls back loudly on garbage", () => {
+    expect(parseCiWaitMinutes("", 60)).toBe(60);
+    expect(parseCiWaitMinutes("90", 60)).toBe(90);
+    const warned: string[] = [];
+    expect(parseCiWaitMinutes("0", 60, (m) => warned.push(m))).toBe(60);
+    expect(parseCiWaitMinutes("an hour", 60, (m) => warned.push(m))).toBe(60);
+    expect(warned).toHaveLength(2);
+  });
+
+  it("converts minutes to 10s poll attempts with a sane floor", () => {
+    expect(ciWaitAttempts(60)).toBe(360);
+    expect(ciWaitAttempts(90)).toBe(540);
+    expect(ciWaitAttempts(1)).toBe(6);
+    // Non-finite / sub-minute values fall back to the default budget.
+    expect(ciWaitAttempts(Number.NaN)).toBe(DEFAULT_CI_WAIT_MINUTES * 6);
+    expect(ciWaitAttempts(0)).toBe(DEFAULT_CI_WAIT_MINUTES * 6);
   });
 });

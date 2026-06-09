@@ -1,12 +1,13 @@
 import * as core from "@actions/core";
 import * as github from "@actions/github";
-import { GitHubClient } from "./github.js";
+import { DEFAULT_CI_WAIT_MINUTES, GitHubClient } from "./github.js";
 import { GitOps } from "./gitops.js";
 import { PRReporter } from "./reporter.js";
 import {
   eventTriggerLabeledPR,
   hasWritePermission,
   parseBatchSize,
+  parseCiWaitMinutes,
   parseMaxRequeues,
   runProcess,
   runBisect,
@@ -25,6 +26,7 @@ interface EntryInputs {
   gitUserEmail: string;
   gitUserName: string;
   maxRequeues: number;
+  ciWaitMinutes: number;
 }
 
 function loadInputs(): EntryInputs {
@@ -45,6 +47,11 @@ function loadInputs(): EntryInputs {
     // Anything non-canonical becomes NaN, which Queue's constructor
     // rejects loudly and replaces with the default.
     maxRequeues: parseMaxRequeues(core.getInput("max_requeues")),
+    ciWaitMinutes: parseCiWaitMinutes(
+      core.getInput("ci_wait_minutes"),
+      DEFAULT_CI_WAIT_MINUTES,
+      core.warning,
+    ),
   };
 }
 
@@ -82,7 +89,9 @@ async function run(): Promise<void> {
   }
   const { owner, repo } = github.context.repo;
   const log = core.info;
-  const client = new GitHubClient(inputs.token, owner, repo, log);
+  const client = new GitHubClient(inputs.token, owner, repo, log, {
+    ciWaitMinutes: inputs.ciWaitMinutes,
+  });
   const commentCtx = buildCommentCtx(owner, repo, inputs.queueLabel);
   const reporter = new PRReporter({
     poster: client,

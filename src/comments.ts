@@ -33,9 +33,14 @@ export function formatErrorForComment(err: unknown, maxLen = 200): string {
   // empty or whitespace-only, fall back so requeue comments don't render
   // as a blank blockquote.
   const safeOneLine = oneLine || "unknown error";
-  return safeOneLine.length > maxLen
-    ? `${safeOneLine.slice(0, maxLen - 1)}…`
-    : safeOneLine;
+  const capped =
+    safeOneLine.length > maxLen
+      ? `${safeOneLine.slice(0, maxLen - 1)}…`
+      : safeOneLine;
+  // Inline code neutralizes Markdown in the untrusted fragment: an
+  // `@mention` or `[label](url)` smuggled into git/API error text would
+  // otherwise render (and notify) inside a trusted bot comment.
+  return `\`${capped}\``;
 }
 
 function branchLink(ctx: CommentCtx, branch: string): string {
@@ -165,17 +170,20 @@ export function commentOperatorWarning(ctx: CommentCtx, msg: string): string {
   const normalised = msg.replace(/\r\n?/g, "\n");
   const trimmed =
     normalised.length > MAX ? `${normalised.slice(0, MAX - 1)}…` : normalised;
-  const quoted = trimmed
-    .split("\n")
-    .map((line) => `> ${line}`)
-    .join("\n");
+  // Tilde-fenced code block: renders the raw subprocess/API output inert
+  // (no @mentions, no links) — a backtick in the content cannot close a
+  // tilde fence, and tilde runs are broken up so the content cannot
+  // close it either.
+  const fenced = ["~~~text", trimmed.replace(/~{3,}/g, "~ ~ ~"), "~~~"].join(
+    "\n",
+  );
   return [
     "<!-- merge-queue:warning -->",
     `⚠️ ${BRAND} — queue warning`,
     "",
     "The merge queue hit a non-fatal issue while processing this PR:",
     "",
-    quoted,
+    fenced,
     "",
     `[View merge queue run](${ctx.actionRunUrl}).`,
     "",

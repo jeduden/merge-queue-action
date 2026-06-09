@@ -285,6 +285,14 @@ so you don't need to pass `token:` to `actions/checkout` or add a
 separate "Configure git" step. The token used is whatever you pass
 as the `token` input (typically `secrets.MERGE_QUEUE_TOKEN`).
 
+A post-step (declared in `action.yml`, runs even if the main step
+failed) resets `origin` back to the token-less URL, so steps placed
+*after* this action in the same job cannot read the merge-queue token
+out of `.git/config`. Steps placed *before* the action remain inside
+the trust boundary described under
+[Token requirements](#token-requirements) and the security notes in
+[Custom merge drivers](#custom-merge-drivers).
+
 Override the identity via the `git_user_email` / `git_user_name`
 inputs if you need a different author on the merge commits.
 
@@ -558,6 +566,7 @@ tested together in a single batch, reducing total CI runs.
 | `ci_workflow` | yes | — | Workflow file supporting `workflow_dispatch` (e.g. `.github/workflows/ci.yml`) |
 | `batch_size` | no | `5` | Max PRs per batch |
 | `queue_label` | no | `queue` | Label that enqueues a PR |
+| `ci_wait_minutes` | no | `60` | Minutes to wait for the batch CI run to complete before requeueing. Size above your slowest CI run — a too-small value times out every batch and burns the requeue cap without CI ever failing. |
 | `max_requeues` | no | `10` | Max times a single PR is requeued before the queue gives up and marks it `queue:failed`. Bounds every retry path so a permanent failure can't re-trigger the workflow forever. Must be a positive integer; invalid values fall back to the default with a run-log warning. See [Bounded retries](#bounded-retries-no-infinite-loops). |
 | `dry_run` | no | `false` | Log intent without mutating |
 | `batch_prs` | no | `""` | PR numbers to process explicitly. Accepts a JSON array (`[187]` or `[181,187]`) or a single integer string (`187`). When provided via `workflow_dispatch` in normal mode, those PRs are fetched directly without requiring the queue label — the recommended fallback for conflicted PRs. In bisect mode the action sets this automatically. |

@@ -294,20 +294,53 @@ describe("Activate de-queue honoring", () => {
     expect(api.labels.get(1)).not.toContain("queue:active");
   });
 
-  it("propagates a non-404 error from the :active rollback", async () => {
+  it("logs and still skips when the :active rollback fails", async () => {
+    // Throwing here would abort the run and leave the de-queued PR
+    // looking like a crash orphan — which the next run's sweep would
+    // re-enter against the author's intent. Swallow, log, skip.
     const api = newMockAPI();
     api.labels.set(1, []); // base gone → de-queue path
-    let removals = 0;
     api.removeLabel = async (_n: number, label: string) => {
-      removals++;
       if (label === "queue") throw new Mock404Error();
       throw new Mock500Error(); // rollback of :active fails hard
     };
+    const logs: string[] = [];
+    const q = new Queue(api, "queue", false, (m) => logs.push(m));
+    const skipped = await q.activate([mkPR(1)], { requireBaseLabel: true });
+    expect(skipped).toEqual([1]);
+    expect(
+      logs.some((l) => l.includes("failed to roll back queue:active")),
+    ).toBe(true);
+  });
+
+  it("logs and still skips when clearing the de-queued PR's counter fails", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:attempt-7"]);
+    api.removeLabel = async (_n: number, label: string) => {
+      if (label === "queue") throw new Mock404Error(); // de-queue signal
+      if (label === "queue:active") return; // rollback ok
+      throw new Mock500Error(); // attempt clear fails
+    };
+    const logs: string[] = [];
+    const q = new Queue(api, "queue", false, (m) => logs.push(m));
+    const pr = { ...mkPR(1), labels: ["queue:attempt-7"] };
+    const skipped = await q.activate([pr], { requireBaseLabel: true });
+    expect(skipped).toEqual([1]);
+    expect(
+      logs.some((l) => l.includes("failed to clear attempt labels")),
+    ).toBe(true);
+  });
+
+  it("clears the attempt counter when skipping a de-queued PR", async () => {
+    // A de-queue is a queue exit: re-adding the label later must start
+    // with the documented fresh budget.
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:attempt-7"]);
     const q = new Queue(api, "queue", false, nop);
-    await expect(
-      q.activate([mkPR(1)], { requireBaseLabel: true }),
-    ).rejects.toThrow("server error");
-    expect(removals).toBeGreaterThan(1);
+    const pr = { ...mkPR(1), labels: ["queue:attempt-7"] };
+    const skipped = await q.activate([pr], { requireBaseLabel: true });
+    expect(skipped).toEqual([1]);
+    expect(api.labels.get(1)).not.toContain("queue:attempt-7");
   });
 
   it("tolerates a missing base label without the option (manual batch_prs path)", async () => {

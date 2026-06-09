@@ -1218,6 +1218,56 @@ describe("runProcess", () => {
     expect(api.labels.get(1)).toContain("queue:attempt-1");
   });
 
+  it("never merges a PR that was closed while batch CI ran", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue", [makePR(1), makePR(2)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    api.getPR = async (n) =>
+      n === 1
+        ? { ...makePR(1), state: "closed" as const }
+        : makePR(n);
+
+    await runProcess(api, git, cfg, nop);
+
+    expect(git.ffRef).toBe(""); // batch discarded, nothing shipped
+    // Closed PR dropped without requeue or "merged" comment.
+    const c1 = api.comments.get(1) ?? [];
+    expect(c1.some((s) => s.includes("— merged"))).toBe(false);
+    expect(api.labels.get(1) ?? []).not.toContain("queue");
+    // The sibling is requeued with the batch-invalidated reason.
+    expect(api.labels.get(2)).toContain("queue");
+    const c2 = api.comments.get(2) ?? [];
+    expect(
+      c2.some((s) => s.includes("updated or closed while batch CI ran")),
+    ).toBe(true);
+  });
+
+  it("tolerates label-cleanup failures while dropping a closed PR from a batch", async () => {
+    const api = newMockAPI();
+    const pr1 = { ...makePR(1), labels: ["queue", "queue:attempt-2"] };
+    api.prs.set("queue", [pr1, makePR(2)]);
+    api.labels.set(1, ["queue", "queue:attempt-2"]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+    api.getPR = async (n) =>
+      n === 1 ? { ...makePR(1), state: "closed" as const } : makePR(n);
+    const origRemove = api.removeLabel.bind(api);
+    api.removeLabel = async (n, label) => {
+      if (n === 1 && (label === "queue:active" || label === "queue:attempt-2"))
+        throw Object.assign(new Error("boom"), { status: 500 });
+      return origRemove(n, label);
+    };
+
+    await runProcess(api, git, cfg, nop);
+
+    expect(git.ffRef).toBe("");
+    // Sibling still rescued despite PR 1's label-API failures.
+    expect(api.labels.get(2)).toContain("queue");
+  });
+
   it("resets the attempt counter of non-drifted batch-mates too on drift", async () => {
     // Drift is nobody's failure: PR 2 didn't push, but it didn't fail
     // either — its budget must not burn down because PR 1's author pushed.
@@ -1262,14 +1312,20 @@ describe("runProcess", () => {
       return origAdd(n, label);
     };
 
-    await expect(runProcess(api, git, cfg, nop)).rejects.toThrow();
+    const logs: string[] = [];
+    await runProcess(api, git, cfg, (m) => logs.push(m));
 
     const c = api.comments.get(1) ?? [];
     expect(
       c.some((s) => s.includes("could not dispatch its own bisection run")),
     ).toBe(false);
-    // Generic transient treatment instead: requeued.
-    expect(api.labels.get(1)).toContain("queue");
+    // The guarded markFailed logs instead of escaping — the known-failing
+    // PR is NOT requeued (a retry would re-fail identically); the next
+    // run's orphan sweep rescues its label state.
+    expect(
+      logs.some((l) => l.includes("failed to mark PR #1 as failed after CI failure")),
+    ).toBe(true);
+    expect(api.labels.get(1) ?? []).not.toContain("queue");
   });
 
   it("clears the attempt counter when a PR merges", async () => {
@@ -2465,6 +2521,181 @@ describe("runBisect", () => {
     // Transient → requeued with the attempt counter, not stranded or failed.
     expect(api.labels.get(1)).toContain("queue");
     expect(api.labels.get(1)).toContain("queue:attempt-1");
+  });
+
+  it("discards a stale bisect batch when a left PR's head drifts during CI", async () => {
+    // The CI result tested the OLD head — merging it would ship stale code
+    // and strand the PR's new commits.
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2,3]", dryRun: false });
+    let activated = false;
+    const origGetPR = api.getPR.bind(api);
+    api.getPR = async (n) => {
+      const pr = await origGetPR(n);
+      // After the batch is built, PR 1's head moves.
+      return activated && n === 1 ? { ...pr, headSHA: "sha-moved" } : pr;
+    };
+    const origMerge = git.mergeBranch.bind(git);
+    git.mergeBranch = async (b, ref, m) => {
+      activated = true;
+      return origMerge(b, ref, m);
+    };
+
+    await runBisect(api, git, cfg, nop);
+
+    // No fast-forward happened; everyone requeued with a fresh budget.
+    expect(git.ffRef).toBe("");
+    for (const n of [1, 2, 3]) {
+      expect(api.labels.get(n)).toContain("queue");
+      expect(api.labels.get(n)).toContain("queue:attempt-1");
+      const c = api.comments.get(n) ?? [];
+      expect(
+        c.some((s) => s.includes("bisection will restart from the queue")),
+      ).toBe(true);
+    }
+  });
+
+  it("requeues bisect candidates when the post-CI state check itself fails", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2]", dryRun: false });
+    let activated = false;
+    const origGetPR = api.getPR.bind(api);
+    api.getPR = async (n) => {
+      if (activated) throw new Error("getPR blew up");
+      return origGetPR(n);
+    };
+    const origMerge = git.mergeBranch.bind(git);
+    git.mergeBranch = async (b, ref, m) => {
+      activated = true;
+      return origMerge(b, ref, m);
+    };
+
+    await expect(runBisect(api, git, cfg, nop)).rejects.toThrow(
+      "checking PR state after bisect CI",
+    );
+    expect(git.ffRef).toBe(""); // nothing shipped on an unverified state
+    for (const n of [1, 2]) {
+      expect(api.labels.get(n)).toContain("queue");
+    }
+  });
+
+  it("tolerates label-cleanup failures while dropping a closed bisect PR", async () => {
+    const api = newMockAPI();
+    const pr1 = { ...makePR(1), labels: ["queue:active", "queue:attempt-2"] };
+    api.prs.set("queue:active", [pr1, makePR(2), makePR(3)]);
+    api.labels.set(1, ["queue:active", "queue:attempt-2"]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    git.deleteBranch = async () => {
+      throw new Error("delete refused"); // stale-branch delete warn arm
+    };
+    const cfg = baseCfg({ batchPrs: "[1,2,3]", dryRun: false });
+    let activated = false;
+    const origGetPR = api.getPR.bind(api);
+    api.getPR = async (n) => {
+      const pr = await origGetPR(n);
+      return activated && n === 1
+        ? { ...{ ...pr, labels: ["queue:active", "queue:attempt-2"] }, state: "closed" as const }
+        : pr;
+    };
+    const origMerge = git.mergeBranch.bind(git);
+    git.mergeBranch = async (b, ref, m) => {
+      activated = true;
+      return origMerge(b, ref, m);
+    };
+    // All label ops for the CLOSED PR fail; the rest must still be rescued.
+    const origRemove = api.removeLabel.bind(api);
+    api.removeLabel = async (n, label) => {
+      if (n === 1)
+        throw Object.assign(new Error("boom"), { status: 500 });
+      return origRemove(n, label);
+    };
+    const logs: string[] = [];
+
+    await runBisect(api, git, cfg, (m) => logs.push(m));
+
+    expect(git.ffRef).toBe("");
+    expect(
+      logs.some((l) => l.includes("failed to delete stale bisect branch")),
+    ).toBe(true);
+    for (const n of [2, 3]) {
+      expect(api.labels.get(n)).toContain("queue");
+    }
+  });
+
+  it("warns when resetting a counter fails during the stale-bisect rescue", async () => {
+    const api = newMockAPI();
+    const pr2 = { ...makePR(2), labels: ["queue:active", "queue:attempt-3"] };
+    api.prs.set("queue:active", [makePR(1), pr2, makePR(3)]);
+    api.labels.set(2, ["queue:active", "queue:attempt-3"]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2,3]", dryRun: false });
+    let activated = false;
+    const origGetPR = api.getPR.bind(api);
+    api.getPR = async (n) => {
+      const pr = await origGetPR(n);
+      return activated && n === 1 ? { ...pr, headSHA: "sha-moved" } : pr;
+    };
+    const origMerge = git.mergeBranch.bind(git);
+    git.mergeBranch = async (b, ref, m) => {
+      activated = true;
+      return origMerge(b, ref, m);
+    };
+    let failedOnce = false;
+    const origRemove = api.removeLabel.bind(api);
+    api.removeLabel = async (n, label) => {
+      if (label === "queue:attempt-3" && !failedOnce) {
+        failedOnce = true;
+        throw Object.assign(new Error("boom"), { status: 500 });
+      }
+      return origRemove(n, label);
+    };
+    const logs: string[] = [];
+
+    await runBisect(api, git, cfg, (m) => logs.push(m));
+
+    expect(
+      logs.some((l) => l.includes("failed to reset attempt counter for PR #2")),
+    ).toBe(true);
+    // Still requeued (over-counted, never lost).
+    expect(api.labels.get(2)).toContain("queue");
+  });
+
+  it("never merges a left PR that was closed during bisect CI", async () => {
+    const api = newMockAPI();
+    api.prs.set("queue:active", [makePR(1), makePR(2), makePR(3)]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ batchPrs: "[1,2,3]", dryRun: false });
+    let activated = false;
+    const origGetPR = api.getPR.bind(api);
+    api.getPR = async (n) => {
+      const pr = await origGetPR(n);
+      return activated && n === 1
+        ? { ...pr, state: "closed" as const }
+        : pr;
+    };
+    const origMerge = git.mergeBranch.bind(git);
+    git.mergeBranch = async (b, ref, m) => {
+      activated = true;
+      return origMerge(b, ref, m);
+    };
+
+    await runBisect(api, git, cfg, nop);
+
+    expect(git.ffRef).toBe(""); // retracted commits did not ship
+    // The closed PR is dropped (no requeue); the rest are requeued.
+    expect(api.labels.get(1) ?? []).not.toContain("queue");
+    for (const n of [2, 3]) {
+      expect(api.labels.get(n)).toContain("queue");
+    }
   });
 
   it("rescues the untested RIGHT half too when bisect fast-forward fails", async () => {

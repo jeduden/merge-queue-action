@@ -36283,9 +36283,13 @@ function formatErrorForComment(err, maxLen = 200) {
     // empty or whitespace-only, fall back so requeue comments don't render
     // as a blank blockquote.
     const safeOneLine = oneLine || "unknown error";
-    return safeOneLine.length > maxLen
+    const capped = safeOneLine.length > maxLen
         ? `${safeOneLine.slice(0, maxLen - 1)}…`
         : safeOneLine;
+    // Inline code neutralizes Markdown in the untrusted fragment: an
+    // `@mention` or `[label](url)` smuggled into git/API error text would
+    // otherwise render (and notify) inside a trusted bot comment.
+    return `\`${capped}\``;
 }
 function branchLink(ctx, branch) {
     // Encode each path segment; preserve `/` so nested branch names like
@@ -36383,17 +36387,18 @@ function commentOperatorWarning(ctx, msg) {
     // also means the cap counts characters of normalised text.
     const normalised = msg.replace(/\r\n?/g, "\n");
     const trimmed = normalised.length > MAX ? `${normalised.slice(0, MAX - 1)}…` : normalised;
-    const quoted = trimmed
-        .split("\n")
-        .map((line) => `> ${line}`)
-        .join("\n");
+    // Tilde-fenced code block: renders the raw subprocess/API output inert
+    // (no @mentions, no links) — a backtick in the content cannot close a
+    // tilde fence, and tilde runs are broken up so the content cannot
+    // close it either.
+    const fenced = ["~~~text", trimmed.replace(/~{3,}/g, "~ ~ ~"), "~~~"].join("\n");
     return [
         "<!-- merge-queue:warning -->",
         `⚠️ ${BRAND} — queue warning`,
         "",
         "The merge queue hit a non-fatal issue while processing this PR:",
         "",
-        quoted,
+        fenced,
         "",
         `[View merge queue run](${ctx.actionRunUrl}).`,
         "",
@@ -36511,6 +36516,18 @@ function errorMessage(err) {
     catch {
         return "unknown error";
     }
+}
+/**
+ * Renders an untrusted text fragment (git stderr, API error bodies) as
+ * inline code for embedding in PR-comment prose. Inline code neutralizes
+ * Markdown — `@mentions` stop notifying and `[label](url)` stops being a
+ * link — so attacker-influenced output can't inject either into a trusted
+ * bot comment. Internal backticks are stripped (they would close the
+ * span) and whitespace is collapsed to keep the fragment a single span.
+ */
+function safeInline(text) {
+    const oneLine = text.replace(/`/g, "'").replace(/\s+/g, " ").trim();
+    return `\`${oneLine || "unknown error"}\``;
 }
 /**
  * `silentReporter` discards everything (no log, no comment). Use
@@ -36691,6 +36708,18 @@ function isThrottleError(err) {
         return isRateLimitedError(err);
     return false;
 }
+/** Default minutes to wait for a dispatched CI run to complete. */
+const DEFAULT_CI_WAIT_MINUTES = 60;
+/**
+ * Poll attempts (10s apart) for a given CI wait budget. Floors at one
+ * minute so a typo can't reduce the wait below a useful minimum.
+ */
+function ciWaitAttempts(minutes) {
+    const m = Number.isFinite(minutes) && minutes >= 1
+        ? minutes
+        : DEFAULT_CI_WAIT_MINUTES;
+    return Math.round(m * 6);
+}
 /**
  * Runs `fn`, retrying transient GitHub API errors with exponential backoff.
  * A transient blip is absorbed in-run instead of failing the job and forcing
@@ -36730,11 +36759,13 @@ class GitHubClient {
     owner;
     repo;
     log;
-    constructor(token, owner, repo, log) {
+    waitAttempts;
+    constructor(token, owner, repo, log, opts) {
         this.octokit = getOctokit(token);
         this.owner = owner;
         this.repo = repo;
         this.log = log ?? (() => { });
+        this.waitAttempts = ciWaitAttempts(opts?.ciWaitMinutes ?? DEFAULT_CI_WAIT_MINUTES);
     }
     async listPRsWithLabel(label, limit) {
         const result = [];
@@ -36847,7 +36878,10 @@ class GitHubClient {
         const maxAttempts = 60;
         // Log search parameters for debugging
         this.log(`[findWorkflowRun] Searching for workflow run: workflow=${workflowFile}, ref=${ref}, headSha=${headSha || "undefined"}, createdAfter=${createdAfter.toISOString()}`);
-        // Poll up to ~10 min for the run to appear. Check immediately first,
+        // Poll for the run to appear: 60 attempts × 10s sleeps ≈ 10 min of
+        // waiting, plus up to ~7s of in-attempt withRetry backoff per query
+        // under sustained transient errors (worst case ~17-24 min wall clock —
+        // attempts are bounded, wall time is not). Check immediately first,
         // then sleep between attempts so we can post the "CI running" comment
         // the moment GitHub registers the dispatched run.
         for (let i = 0; i < maxAttempts; i++) {
@@ -36928,8 +36962,15 @@ class GitHubClient {
         throw new Error("timed out waiting for workflow run to appear");
     }
     async waitForWorkflowRun(runId) {
-        const maxAttempts = 360;
-        // Poll up to ~1h for completion.
+        // Sized by the ci_wait_minutes input: a repo whose CI legitimately
+        // outlasts the wait would otherwise time out every cycle, charging
+        // the attempt cap until every PR is failed without CI ever failing.
+        const maxAttempts = this.waitAttempts;
+        // Poll for completion: 360 attempts × 10s sleeps ≈ 1h of waiting,
+        // plus up to ~7s/attempt of withRetry backoff under sustained
+        // transient errors (worst case ≈ 1h42m wall clock). Size any
+        // workflow-level timeout-minutes against the worst case, not the
+        // sleep budget.
         for (let i = 0; i < maxAttempts; i++) {
             // Retry transient errors so a blip mid-poll doesn't abort the wait
             // (and strand the batch); a permanent error still propagates.
@@ -37631,7 +37672,7 @@ class GitOps {
                 "`.github/workflows/`. Grant the token the `workflow` scope " +
                 "(classic PAT) or `workflows: write` permission (GitHub App or " +
                 "fine-grained PAT), or remove the workflow-file change from the " +
-                `queued PR. Git reported: ${detail}`);
+                `queued PR. Git reported: ${safeInline(detail)}`);
         }
         throw new Error(`git push origin ${branch}:refs/heads/${branch} failed (exit ${res.code}): ${detail}`);
     }
@@ -37663,7 +37704,7 @@ class GitOps {
                 // (`main` advanced) stays transient: the next run rebuilds.
                 const status = err.status;
                 throw new ConfigurationError("merge-queue-action could not fast-forward `main` — GitHub " +
-                    `reported (HTTP ${status}): ${errorMessage(err)}. This usually ` +
+                    `reported (HTTP ${status}): ${safeInline(errorMessage(err))}. This usually ` +
                     "means branch protection forbids the merge-queue token from " +
                     "updating `main` (required reviews, required status checks, or " +
                     "pull-request-only pushes), the token lacks `contents: write`, " +
@@ -37849,12 +37890,26 @@ class queue_Queue {
                     throw err;
                 if (requireBase) {
                     this.log(`PR #${pr.number} lost the "${this.label}" label before activation (de-queued by the author); skipping`);
+                    // Best-effort rollback: a failed :active removal must not abort
+                    // the run (the throw would leave THIS de-queued PR looking like
+                    // a crash orphan, and the next run's sweep would re-enter it
+                    // against the author's intent). Log and move on instead.
                     try {
                         await this.api.removeLabel(pr.number, queueLabel(this.label, STATE_ACTIVE));
                     }
                     catch (rollbackErr) {
-                        if (!isNotFoundError(rollbackErr))
-                            throw rollbackErr;
+                        if (!isNotFoundError(rollbackErr)) {
+                            this.log(`Warning: failed to roll back queue:active on de-queued PR #${pr.number}: ${rollbackErr}`);
+                        }
+                    }
+                    // A de-queue is a queue exit: clear the attempt counter so a
+                    // later re-add starts with the documented fresh budget.
+                    const { labels } = readAttemptCount(this.label, pr.labels);
+                    try {
+                        await this.clearAttemptLabels(pr.number, labels);
+                    }
+                    catch (clearErr) {
+                        this.log(`Warning: failed to clear attempt labels on de-queued PR #${pr.number}: ${clearErr}`);
                     }
                     skipped.push(pr.number);
                     continue;
@@ -38108,7 +38163,15 @@ class Batch {
             return "";
         const sha = await this.git.fastForwardMain(branch);
         this.log(`Deleting batch branch ${branch}`);
-        await this.git.deleteBranch(branch);
+        try {
+            await this.git.deleteBranch(branch);
+        }
+        catch (err) {
+            // The merge to main already happened — a failed branch delete must
+            // not throw, or the caller would misclassify a SUCCESSFUL merge as
+            // a fast-forward failure and requeue freshly-merged PRs.
+            await this.reporter.warn(`failed to delete batch branch \`${branch}\` after merging: ${errorMessage(err)}`);
+        }
         return sha;
     }
 }
@@ -38182,6 +38245,11 @@ function parseMaxRequeues(raw) {
         return MAX_REQUEUE_ATTEMPTS;
     return /^\d+$/.test(trimmed) ? parseInt(trimmed, 10) : Number.NaN;
 }
+/**
+ * Max `queue:active` orphans rescued per run. Each rescue costs ~7 API
+ * calls; the rest keep their label and drain on subsequent runs.
+ */
+const ORPHAN_SWEEP_LIMIT = 20;
 /** Default for the batch_size input (mirrored in action.yml / README). */
 const DEFAULT_BATCH_SIZE = 5;
 /**
@@ -38200,6 +38268,23 @@ function parseBatchSize(raw, warn = () => { }) {
         return parseInt(trimmed, 10);
     warn(`Invalid batch_size ("${raw}"); must be a non-negative integer — using default ${DEFAULT_BATCH_SIZE}`);
     return DEFAULT_BATCH_SIZE;
+}
+/**
+ * Parses the ci_wait_minutes input with the house strictness: "" → the
+ * default; canonical digits ≥ 1 → the number; anything else → the default
+ * with a warning.
+ */
+function parseCiWaitMinutes(raw, fallback, warn = () => { }) {
+    const trimmed = raw.trim();
+    if (trimmed === "")
+        return fallback;
+    if (/^\d+$/.test(trimmed)) {
+        const n = parseInt(trimmed, 10);
+        if (n >= 1)
+            return n;
+    }
+    warn(`Invalid ci_wait_minutes ("${raw}"); must be a positive integer — using default ${fallback}`);
+    return fallback;
 }
 function action_sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -38434,12 +38519,19 @@ async function handleCIFailure(api, cfg, ctx, q, gitOps, reporter, prs, result, 
         await reporter.withScope(result.merged.map((mp) => mp.number), () => reporter.warn(`failed to delete batch branch \`${result.branch}\` after CI failure: ${detail}`));
     }
     if (result.merged.length === 1) {
-        // Single PR failed — mark it
+        // Single PR failed — mark it. Guarded so a label-API failure cannot
+        // escape into the caller's catch, whose requeue branch would put a
+        // known-failing PR back in the queue with a misleading comment.
         const pr = prs.find((p) => p.number === result.merged[0].number);
         if (pr) {
-            await q.markFailed(pr, "CI failed");
-            if (!cfg.dryRun) {
-                await postComment(api, pr.number, commentCIFailed(ctx, ciRunUrl, false), log);
+            try {
+                await q.markFailed(pr, "CI failed");
+                if (!cfg.dryRun) {
+                    await postComment(api, pr.number, commentCIFailed(ctx, ciRunUrl, false), log);
+                }
+            }
+            catch (markErr) {
+                log(`Warning: failed to mark PR #${pr.number} as failed after CI failure: ${markErr}`);
             }
         }
         return;
@@ -38548,7 +38640,12 @@ async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
     // cap-bounded, so a stuck orphan still converges to `queue:failed`.
     if (!cfg.dryRun) {
         try {
-            const actives = await api.listPRsWithLabel(queueLabel(cfg.queueLabel, STATE_ACTIVE), 0);
+            // Capped: each rescued orphan costs ~7 API calls, and orphans
+            // self-drain across runs (anything beyond the cap keeps its
+            // `:active` label and is swept by a later run) — so a pathological
+            // backlog spreads over a few runs instead of blowing the secondary
+            // rate limit in one.
+            const actives = await api.listPRsWithLabel(queueLabel(cfg.queueLabel, STATE_ACTIVE), ORPHAN_SWEEP_LIMIT);
             for (const orphan of actives) {
                 if (prs.some((p) => p.number === orphan.number))
                     continue;
@@ -38773,9 +38870,16 @@ async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
     // 6. CI passed — merge to main
     if (!cfg.dryRun) {
         const drifted = [];
+        const withdrawn = [];
         try {
             for (const mp of result.merged) {
                 const current = await api.getPR(mp.number);
+                if (current.state !== "open") {
+                    // Closed mid-CI: the strongest retraction signal — the batch
+                    // must not ship this PR's commits.
+                    withdrawn.push(mp.number);
+                    continue;
+                }
                 if (current.headSHA !== mp.headSHA) {
                     drifted.push({
                         number: mp.number,
@@ -38790,9 +38894,31 @@ async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
             await requeueAll(`failed to verify PR state after CI: ${formatErrorForComment(err)}`);
             throw new Error(`checking PR drift after CI: ${formatErrorForComment(err)}`);
         }
-        if (drifted.length > 0) {
+        if (drifted.length > 0 || withdrawn.length > 0) {
             for (const d of drifted) {
                 log(`PR #${d.number} head changed while CI ran (${d.snapshot} -> ${d.current}); skipping stale batch`);
+            }
+            for (const n of withdrawn) {
+                log(`PR #${n} was closed while CI ran; discarding the batch`);
+                // Drop the withdrawn PR from the queue entirely: it is closed, so
+                // it must be neither merged nor requeued. Best-effort label
+                // cleanup; the PR being closed makes leftovers cosmetic.
+                excluded.add(n);
+                const pr = prs.find((p) => p.number === n);
+                if (pr) {
+                    try {
+                        await api.removeLabel(n, queueLabel(cfg.queueLabel, STATE_ACTIVE));
+                    }
+                    catch {
+                        /* best effort */
+                    }
+                    try {
+                        await q.resetAttempts(pr);
+                    }
+                    catch {
+                        /* best effort */
+                    }
+                }
             }
             // A new head means an author pushed — that's progress, not a failure,
             // so the requeue budget starts fresh for EVERY batch member: the
@@ -38817,7 +38943,7 @@ async function runProcess(api, gitOps, cfg, log, actor, reporterArg) {
             const driftedPRs = activePRs().filter((p) => driftedNums.has(p.number));
             const siblingPRs = activePRs().filter((p) => !driftedNums.has(p.number));
             await requeueMany(api, q, ctx, driftedPRs, "new commits were pushed to this PR while batch CI ran; the stale batch result was discarded and the new head will be re-tested", log);
-            await requeueMany(api, q, ctx, siblingPRs, "another PR in the batch was updated while batch CI ran, invalidating the shared batch run; this PR will be re-tested in a fresh batch", log);
+            await requeueMany(api, q, ctx, siblingPRs, "another PR in the batch was updated or closed while batch CI ran, invalidating the shared batch run; this PR will be re-tested in a fresh batch", log);
             return;
         }
     }
@@ -39056,6 +39182,71 @@ async function runBisect(api, gitOps, cfg, log, reporterArg) {
         conclusion = runResult.conclusion;
     }
     if (conclusion === "success") {
+        // Mirror runProcess's post-CI guard: heads may have moved (the CI
+        // result is stale) or PRs may have closed (retracted) while the
+        // bisect CI ran — without this check the stale heads would be
+        // fast-forwarded onto main and a closed PR's commits would ship.
+        if (!cfg.dryRun) {
+            const driftedLeft = [];
+            const closedLeft = [];
+            try {
+                for (const mp of result.merged) {
+                    const current = await api.getPR(mp.number);
+                    if (current.state !== "open")
+                        closedLeft.push(mp.number);
+                    else if (current.headSHA !== mp.headSHA)
+                        driftedLeft.push(mp.number);
+                }
+            }
+            catch (err) {
+                await handleBisectObservationFailure(api, ctx, q, gitOps, reporter, prMap, prNumbers, excluded, result.branch, err, `failed to verify PR state after bisect CI: ${formatErrorForComment(err)}`, log);
+                throw new Error(`checking PR state after bisect CI: ${formatErrorForComment(err)}`);
+            }
+            if (driftedLeft.length > 0 || closedLeft.length > 0) {
+                for (const n of driftedLeft) {
+                    log(`PR #${n} head changed while bisect CI ran; discarding batch`);
+                }
+                for (const n of closedLeft) {
+                    log(`PR #${n} was closed while bisect CI ran; discarding batch`);
+                    excluded.add(n);
+                    const pr = prMap.get(n);
+                    if (pr) {
+                        try {
+                            await api.removeLabel(n, queueLabel(cfg.queueLabel, STATE_ACTIVE));
+                        }
+                        catch {
+                            /* best effort */
+                        }
+                        try {
+                            await q.resetAttempts(pr);
+                        }
+                        catch {
+                            /* best effort */
+                        }
+                    }
+                }
+                try {
+                    await gitOps.deleteBranch(result.branch);
+                }
+                catch (delErr) {
+                    const candidateNums = prNumbers.filter((n) => !excluded.has(n));
+                    await reporter.withScope(candidateNums, () => reporter.warn(`failed to delete stale bisect branch \`${result.branch}\`: ${errorMessage(delErr)}`));
+                }
+                // The whole bisection chain is stale: reset budgets (progress, not
+                // failure) and requeue every remaining candidate.
+                const remaining = resolvePRs([...mergedLeft, ...right], prMap, excluded);
+                for (const pr of remaining) {
+                    try {
+                        await q.resetAttempts(pr);
+                    }
+                    catch (resetErr) {
+                        log(`Warning: failed to reset attempt counter for PR #${pr.number}: ${resetErr}`);
+                    }
+                }
+                await requeueMany(api, q, ctx, remaining, "a PR in this bisection was updated or closed while its CI ran; bisection will restart from the queue", log);
+                return;
+            }
+        }
         // Left half passes — merge it to main
         log("Left half passed, merging to main");
         let mergeSha = "";
@@ -39240,6 +39431,7 @@ function loadInputs() {
         // Anything non-canonical becomes NaN, which Queue's constructor
         // rejects loudly and replaces with the default.
         maxRequeues: parseMaxRequeues(getInput("max_requeues")),
+        ciWaitMinutes: parseCiWaitMinutes(getInput("ci_wait_minutes"), DEFAULT_CI_WAIT_MINUTES, warning),
     };
 }
 function buildCommentCtx(owner, repo, queueLabel) {
@@ -39271,7 +39463,9 @@ async function run() {
     }
     const { owner, repo } = github_context.repo;
     const log = info;
-    const client = new GitHubClient(inputs.token, owner, repo, log);
+    const client = new GitHubClient(inputs.token, owner, repo, log, {
+        ciWaitMinutes: inputs.ciWaitMinutes,
+    });
     const commentCtx = buildCommentCtx(owner, repo, inputs.queueLabel);
     const reporter = new PRReporter({
         poster: client,

@@ -55,6 +55,21 @@ export function isThrottleError(err: unknown): boolean {
   return false;
 }
 
+/** Default minutes to wait for a dispatched CI run to complete. */
+export const DEFAULT_CI_WAIT_MINUTES = 60;
+
+/**
+ * Poll attempts (10s apart) for a given CI wait budget. Floors at one
+ * minute so a typo can't reduce the wait below a useful minimum.
+ */
+export function ciWaitAttempts(minutes: number): number {
+  const m =
+    Number.isFinite(minutes) && minutes >= 1
+      ? minutes
+      : DEFAULT_CI_WAIT_MINUTES;
+  return Math.round(m * 6);
+}
+
 /**
  * Runs `fn`, retrying transient GitHub API errors with exponential backoff.
  * A transient blip is absorbed in-run instead of failing the job and forcing
@@ -104,12 +119,22 @@ export class GitHubClient implements FullAPI {
   public readonly owner: string;
   public readonly repo: string;
   private readonly log: LogFunc;
+  private readonly waitAttempts: number;
 
-  constructor(token: string, owner: string, repo: string, log?: LogFunc) {
+  constructor(
+    token: string,
+    owner: string,
+    repo: string,
+    log?: LogFunc,
+    opts?: { ciWaitMinutes?: number },
+  ) {
     this.octokit = github.getOctokit(token);
     this.owner = owner;
     this.repo = repo;
     this.log = log ?? (() => {});
+    this.waitAttempts = ciWaitAttempts(
+      opts?.ciWaitMinutes ?? DEFAULT_CI_WAIT_MINUTES,
+    );
   }
 
   async listPRsWithLabel(label: string, limit: number): Promise<PR[]> {
@@ -272,7 +297,10 @@ export class GitHubClient implements FullAPI {
       `[findWorkflowRun] Searching for workflow run: workflow=${workflowFile}, ref=${ref}, headSha=${headSha || "undefined"}, createdAfter=${createdAfter.toISOString()}`,
     );
 
-    // Poll up to ~10 min for the run to appear. Check immediately first,
+    // Poll for the run to appear: 60 attempts × 10s sleeps ≈ 10 min of
+    // waiting, plus up to ~7s of in-attempt withRetry backoff per query
+    // under sustained transient errors (worst case ~17-24 min wall clock —
+    // attempts are bounded, wall time is not). Check immediately first,
     // then sleep between attempts so we can post the "CI running" comment
     // the moment GitHub registers the dispatched run.
     for (let i = 0; i < maxAttempts; i++) {
@@ -380,9 +408,16 @@ export class GitHubClient implements FullAPI {
   }
 
   async waitForWorkflowRun(runId: number): Promise<WorkflowRunResult> {
-    const maxAttempts = 360;
+    // Sized by the ci_wait_minutes input: a repo whose CI legitimately
+    // outlasts the wait would otherwise time out every cycle, charging
+    // the attempt cap until every PR is failed without CI ever failing.
+    const maxAttempts = this.waitAttempts;
 
-    // Poll up to ~1h for completion.
+    // Poll for completion: 360 attempts × 10s sleeps ≈ 1h of waiting,
+    // plus up to ~7s/attempt of withRetry backoff under sustained
+    // transient errors (worst case ≈ 1h42m wall clock). Size any
+    // workflow-level timeout-minutes against the worst case, not the
+    // sleep budget.
     for (let i = 0; i < maxAttempts; i++) {
       // Retry transient errors so a blip mid-poll doesn't abort the wait
       // (and strand the batch); a permanent error still propagates.

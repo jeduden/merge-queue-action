@@ -3,7 +3,7 @@ import { stat } from "node:fs/promises";
 import { join, isAbsolute } from "node:path";
 import type * as github from "@actions/github";
 import type { GitOperator } from "./batch.js";
-import { errorMessage, silentReporter, type Reporter } from "./reporter.js";
+import { errorMessage, safeInline, silentReporter, type Reporter } from "./reporter.js";
 import { ConfigurationError, isRateLimitedError } from "./errors.js";
 
 type Octokit = ReturnType<typeof github.getOctokit>;
@@ -744,7 +744,7 @@ export class GitOps implements GitOperator {
           "`.github/workflows/`. Grant the token the `workflow` scope " +
           "(classic PAT) or `workflows: write` permission (GitHub App or " +
           "fine-grained PAT), or remove the workflow-file change from the " +
-          `queued PR. Git reported: ${detail}`,
+          `queued PR. Git reported: ${safeInline(detail)}`,
       );
     }
     throw new Error(
@@ -782,7 +782,7 @@ export class GitOps implements GitOperator {
         const status = (err as { status: number }).status;
         throw new ConfigurationError(
           "merge-queue-action could not fast-forward `main` — GitHub " +
-            `reported (HTTP ${status}): ${errorMessage(err)}. This usually ` +
+            `reported (HTTP ${status}): ${safeInline(errorMessage(err))}. This usually ` +
             "means branch protection forbids the merge-queue token from " +
             "updating `main` (required reviews, required status checks, or " +
             "pull-request-only pushes), the token lacks `contents: write`, " +

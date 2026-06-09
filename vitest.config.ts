@@ -7,6 +7,7 @@ export default defineConfig({
       include: ["src/**/*.ts"],
       exclude: [
         "src/main.ts",
+        "src/cleanup.ts",
         "src/github.ts",
         "src/gitops.ts",
       ],

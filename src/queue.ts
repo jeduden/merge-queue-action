@@ -255,13 +255,31 @@ export class Queue {
           this.log(
             `PR #${pr.number} lost the "${this.label}" label before activation (de-queued by the author); skipping`,
           );
+          // Best-effort rollback: a failed :active removal must not abort
+          // the run (the throw would leave THIS de-queued PR looking like
+          // a crash orphan, and the next run's sweep would re-enter it
+          // against the author's intent). Log and move on instead.
           try {
             await this.api.removeLabel(
               pr.number,
               queueLabel(this.label, STATE_ACTIVE),
             );
           } catch (rollbackErr) {
-            if (!isNotFoundError(rollbackErr)) throw rollbackErr;
+            if (!isNotFoundError(rollbackErr)) {
+              this.log(
+                `Warning: failed to roll back queue:active on de-queued PR #${pr.number}: ${rollbackErr}`,
+              );
+            }
+          }
+          // A de-queue is a queue exit: clear the attempt counter so a
+          // later re-add starts with the documented fresh budget.
+          const { labels } = readAttemptCount(this.label, pr.labels);
+          try {
+            await this.clearAttemptLabels(pr.number, labels);
+          } catch (clearErr) {
+            this.log(
+              `Warning: failed to clear attempt labels on de-queued PR #${pr.number}: ${clearErr}`,
+            );
           }
           skipped.push(pr.number);
           continue;

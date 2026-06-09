@@ -56,6 +56,12 @@ export declare const DEFAULT_BATCH_SIZE = 5;
  */
 export declare function parseBatchSize(raw: string, warn?: (msg: string) => void): number;
 /**
+ * Parses the ci_wait_minutes input with the house strictness: "" → the
+ * default; canonical digits ≥ 1 → the number; anything else → the default
+ * with a warning.
+ */
+export declare function parseCiWaitMinutes(raw: string, fallback: number, warn?: (msg: string) => void): number;
+/**
  * Returns true for GitHub API errors that indicate a PERMANENT problem an
  * operator must fix — never resolved by a retry, so the PR must be marked
  * failed rather than requeued:

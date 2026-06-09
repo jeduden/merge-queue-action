@@ -22,6 +22,13 @@ export declare function isRetryableHttpError(err: unknown): boolean;
  * (which rebuilds the batch branch, making the orphan run harmless).
  */
 export declare function isThrottleError(err: unknown): boolean;
+/** Default minutes to wait for a dispatched CI run to complete. */
+export declare const DEFAULT_CI_WAIT_MINUTES = 60;
+/**
+ * Poll attempts (10s apart) for a given CI wait budget. Floors at one
+ * minute so a typo can't reduce the wait below a useful minimum.
+ */
+export declare function ciWaitAttempts(minutes: number): number;
 /**
  * Runs `fn`, retrying transient GitHub API errors with exponential backoff.
  * A transient blip is absorbed in-run instead of failing the job and forcing
@@ -49,7 +56,10 @@ export declare class GitHubClient implements FullAPI {
     readonly owner: string;
     readonly repo: string;
     private readonly log;
-    constructor(token: string, owner: string, repo: string, log?: LogFunc);
+    private readonly waitAttempts;
+    constructor(token: string, owner: string, repo: string, log?: LogFunc, opts?: {
+        ciWaitMinutes?: number;
+    });
     listPRsWithLabel(label: string, limit: number): Promise<PR[]>;
     addLabel(prNumber: number, label: string): Promise<void>;
     removeLabel(prNumber: number, label: string): Promise<void>;
