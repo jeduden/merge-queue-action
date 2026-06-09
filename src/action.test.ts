@@ -1190,6 +1190,34 @@ describe("runProcess", () => {
     ).toBe(true);
   });
 
+  it("does not reset the counter of a conflict-ejected PR on drift", async () => {
+    // PR 2 conflicts (ejected/terminal); PR 1 drifts. The whole-batch
+    // reset must skip the ejected PR.
+    const api = newMockAPI();
+    const pr1 = { ...makePR(1), labels: ["queue"] };
+    const pr2 = { ...makePR(2), labels: ["queue", "queue:attempt-4"] };
+    api.prs.set("queue", [pr1, pr2]);
+    api.labels.set(1, ["queue"]);
+    api.labels.set(2, ["queue", "queue:attempt-4"]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    git.conflictOn = "sha-2";
+    const cfg = baseCfg({ dryRun: false });
+    api.getPR = async (n) =>
+      n === 1 ? { ...makePR(1), headSHA: "sha-moved" } : makePR(n);
+
+    await runProcess(api, git, cfg, nop);
+
+    // Ejected PR keeps its terminal failed state — not requeued by the
+    // drift handling (its counter was cleared by markFailed, per the
+    // fresh-budget-on-re-add contract).
+    expect(api.labels.get(2)).toContain("queue:failed");
+    expect(api.labels.get(2)).not.toContain("queue");
+    // Drifted PR is requeued with a fresh budget.
+    expect(api.labels.get(1)).toContain("queue");
+    expect(api.labels.get(1)).toContain("queue:attempt-1");
+  });
+
   it("resets the attempt counter of non-drifted batch-mates too on drift", async () => {
     // Drift is nobody's failure: PR 2 didn't push, but it didn't fail
     // either — its budget must not burn down because PR 1's author pushed.
@@ -1462,6 +1490,28 @@ describe("runProcess", () => {
     ).toBe(true);
     // The other orphan was still rescued.
     expect(api.labels.get(9)).toContain("queue");
+  });
+
+  it("does not sweep a PR that is part of the current batch", async () => {
+    // A PR can carry both labels briefly (stale state from a crashed run
+    // that the author then re-labelled) — the sweep must not requeue a PR
+    // this very run is about to process.
+    const api = newMockAPI();
+    const pr = { ...makePR(1), labels: ["queue", "queue:active"] };
+    api.prs.set("queue", [pr]);
+    api.prs.set("queue:active", [pr]);
+    api.labels.set(1, ["queue", "queue:active"]);
+    api.ciConclusion = "success";
+    const git = newMockGit();
+    const cfg = baseCfg({ dryRun: false });
+
+    await runProcess(api, git, cfg, nop);
+
+    const c = api.comments.get(1) ?? [];
+    expect(
+      c.some((s) => s.includes("recovered after an interrupted merge-queue run")),
+    ).toBe(false);
+    expect(c.some((s) => s.includes("— merged"))).toBe(true);
   });
 
   it("warns and proceeds when the orphan sweep itself fails", async () => {

@@ -662,8 +662,10 @@ export async function runProcess(
   const excluded = new Set<number>();
   const activePRs = () => prs.filter((p) => !excluded.has(p.number));
 
+  // Only ever invoked from non-dry-run paths: the drift block and the CI
+  // catches sit inside `if (!cfg.dryRun)`, and createAndMerge/completeMerge
+  // cannot throw in dry-run (their git calls are skipped).
   const requeueAll = async (reason?: string): Promise<void> => {
-    if (cfg.dryRun) return;
     // Routes through the attempt-cap chokepoint: a PR that has already
     // been requeued the maximum number of times is marked failed there
     // instead of looping again.
