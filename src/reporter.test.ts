@@ -5,6 +5,7 @@ import {
   loggingReporter,
   silentReporter,
   type CommentPoster,
+  safeInline,
 } from "./reporter.js";
 import type { CommentCtx } from "./comments.js";
 
@@ -414,5 +415,17 @@ describe("errorMessage", () => {
     // than propagating out of an error-handling path.
     expect(() => errorMessage(exotic)).not.toThrow();
     expect(errorMessage(exotic)).toBe("unknown error");
+  });
+});
+
+describe("safeInline", () => {
+  it("wraps untrusted fragments as inline code and survives empty input", () => {
+    expect(safeInline("touch [evil](https://x) @everyone")).toBe(
+      "`touch [evil](https://x) @everyone`",
+    );
+    // Backticks are stripped so the span cannot be closed early.
+    expect(safeInline("a `b` c")).toBe("`a 'b' c`");
+    // Empty/whitespace input degrades to a readable placeholder.
+    expect(safeInline("   ")).toBe("`unknown error`");
   });
 });
