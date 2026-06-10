@@ -3,7 +3,7 @@ import { stat } from "node:fs/promises";
 import { join, isAbsolute } from "node:path";
 import type * as github from "@actions/github";
 import type { GitOperator } from "./batch.js";
-import { errorMessage, silentReporter, type Reporter } from "./reporter.js";
+import { errorMessage, safeInline, silentReporter, type Reporter } from "./reporter.js";
 import { ConfigurationError, isRateLimitedError } from "./errors.js";
 
 type Octokit = ReturnType<typeof github.getOctokit>;
@@ -102,17 +102,32 @@ function isPermanentRefUpdateError(err: unknown): boolean {
   if (status === 422) {
     const msg = errorMessage(err).toLowerCase();
     if (msg.includes("not a fast forward")) return false;
-    return (
-      msg.includes("reference does not exist") ||
-      msg.includes("protected branch") ||
-      msg.includes("required status check") ||
-      msg.includes("changes must be made through a pull request") ||
-      msg.includes("approving review") ||
-      msg.includes("gh006")
-    );
+    return PERMANENT_REF_REJECTION_MARKERS.some((m) => msg.includes(m));
   }
   return false;
 }
+
+/**
+ * Lowercased substrings of GitHub's 422 messages that mark a PERMANENT
+ * ref-update rejection (vs. the transient "not a fast forward"). GitHub
+ * keeps adding wordings; extending this table (plus a matching
+ * gitops.test.ts case) is the expected maintenance path.
+ */
+const PERMANENT_REF_REJECTION_MARKERS = [
+  "reference does not exist",
+  // Classic branch protection (GH006).
+  "protected branch",
+  "required status check",
+  "changes must be made through a pull request",
+  "approving review",
+  "gh006",
+  // Repository rulesets (GH013) — the successor to classic branch
+  // protection — reject with their own wordings.
+  "repository rule",
+  "protected ref",
+  "verified signatures",
+  "gh013",
+];
 
 /**
  * GitOps implements GitOperator using a hybrid of the GitHub Git Data
@@ -729,7 +744,7 @@ export class GitOps implements GitOperator {
           "`.github/workflows/`. Grant the token the `workflow` scope " +
           "(classic PAT) or `workflows: write` permission (GitHub App or " +
           "fine-grained PAT), or remove the workflow-file change from the " +
-          `queued PR. Git reported: ${detail}`,
+          `queued PR. Git reported: ${safeInline(detail)}`,
       );
     }
     throw new Error(
@@ -767,7 +782,7 @@ export class GitOps implements GitOperator {
         const status = (err as { status: number }).status;
         throw new ConfigurationError(
           "merge-queue-action could not fast-forward `main` — GitHub " +
-            `reported (HTTP ${status}): ${errorMessage(err)}. This usually ` +
+            `reported (HTTP ${status}): ${safeInline(errorMessage(err))}. This usually ` +
             "means branch protection forbids the merge-queue token from " +
             "updating `main` (required reviews, required status checks, or " +
             "pull-request-only pushes), the token lacks `contents: write`, " +

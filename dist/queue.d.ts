@@ -7,9 +7,14 @@ export interface PR {
     state?: "open" | "closed";
     createdAt: number;
     /**
-     * Current label names on the PR. Optional because the issues-list
-     * code path filters by label and so callers don't need them; populated
-     * by `getPR` so callers can re-validate label state on a single PR.
+     * Current label names on the PR — LOAD-BEARING for the requeue cap.
+     * `readAttemptCount` derives the cross-run attempt counter from the
+     * `<base>:attempt-N` labels in this snapshot, so every `GitHubAPI`
+     * implementation MUST populate it on both the list path
+     * (`listPRsWithLabel`) and the single-PR path (`getPR`); an
+     * implementation that omits it silently resets every PR's budget and
+     * re-arms the unbounded-retry loop the cap exists to stop. Optional
+     * only because test fixtures construct partial PRs.
      */
     labels?: string[];
 }
@@ -83,7 +88,12 @@ export declare class Queue {
     constructor(api: GitHubAPI, label: string, dryRun: boolean, log?: LogFunc, maxAttempts?: number);
     /** The effective requeue cap (after validation), for comment text. */
     get attemptCap(): number;
-    /** Removes every `<base>:attempt-N` label currently known on the PR. */
+    /**
+     * Removes the given attempt labels from the PR. Takes the parsed list
+     * (from a single `readAttemptCount` pass) rather than re-deriving it, so
+     * the labels removed remotely and any in-memory bookkeeping the caller
+     * does are guaranteed to come from the same parse.
+     */
     private clearAttemptLabels;
     /**
      * Resets a PR's requeue-attempt counter. Called when the PR makes real
@@ -95,8 +105,19 @@ export declare class Queue {
     resetAttempts(pr: PR): Promise<void>;
     /** Returns open PRs with the queue label, sorted oldest first. */
     collect(limit: number): Promise<PR[]>;
-    /** Transitions PRs from pending to active state. */
-    activate(prs: PR[]): Promise<void>;
+    /**
+     * Transitions PRs from pending to active state. Returns the numbers of
+     * PRs that were SKIPPED because their base label disappeared between
+     * listing and activation — with `requireBaseLabel`, a 404 removing the
+     * base label is treated as the author de-queueing in that window, the
+     * `:active` label is rolled back, and the PR must not be batched.
+     * Without the option (the manual `batch_prs` path, which is documented
+     * to work on unlabelled PRs), a missing base label is tolerated as
+     * before and nothing is skipped.
+     */
+    activate(prs: PR[], opts?: {
+        requireBaseLabel?: boolean;
+    }): Promise<number[]>;
     /** Transitions a PR to the failed state. */
     markFailed(pr: PR, reason: string): Promise<void>;
     /**
@@ -109,6 +130,11 @@ export declare class Queue {
      * that error classification fails to recognise can re-enter the queue at
      * most `maxAttempts` times before this turns it into the terminal
      * `failed` state, which the workflow's label trigger no longer matches.
+     *
+     * Action-layer callers must route through `requeueOrGiveUp` (action.ts)
+     * rather than calling this directly: a `false` return means the cap
+     * marked the PR failed, and only the wrapper posts the operator-facing
+     * "retry limit reached" comment — a direct call gives up silently.
      */
     requeue(pr: PR): Promise<boolean>;
     /** Creates the queue labels in the repository. */

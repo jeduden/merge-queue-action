@@ -48,9 +48,14 @@ function newMockAPI(): GitHubAPI & {
     failOn: "",
     removeLabelErr: null as Error | null,
 
-    async listPRsWithLabel(label: string, _limit: number): Promise<PR[]> {
+    async listPRsWithLabel(label: string, limit: number): Promise<PR[]> {
       if (mock.failOn === "listPRsWithLabel") throw new Error("mock error");
-      return mock.prs.get(label) ?? [];
+      // Mirror the real client: respect the limit and return fresh objects.
+      const all = (mock.prs.get(label) ?? []).map((p) => ({
+        ...p,
+        labels: p.labels?.slice(),
+      }));
+      return limit > 0 ? all.slice(0, limit) : all;
     },
 
     async addLabel(prNumber: number, label: string): Promise<void> {
@@ -67,7 +72,10 @@ function newMockAPI(): GitHubAPI & {
       if (mock.failOn === "removeLabel") throw new Error("mock error");
       const labels = mock.labels.get(prNumber) ?? [];
       const idx = labels.indexOf(label);
-      if (idx >= 0) labels.splice(idx, 1);
+      // Mirror GitHub: removing a label the issue doesn't have is a 404
+      // ("Label does not exist") — activate's de-queue detection keys on it.
+      if (idx < 0) throw new Mock404Error();
+      labels.splice(idx, 1);
       mock.labels.set(prNumber, labels);
     },
 
@@ -101,7 +109,8 @@ describe("Queue", () => {
     await q.activate([
       { number: 1, headRef: "", headSHA: "", title: "", createdAt: 100 },
     ]);
-    expect(q).toBeDefined();
+    // The nop log must not change behavior: the transition still happened.
+    expect(api.labels.get(1)).toContain("queue:active");
   });
 
   it("routes log output through custom log function", async () => {
@@ -264,6 +273,83 @@ describe("Activate", () => {
         { number: 1, headRef: "", headSHA: "", title: "", createdAt: 0 },
       ]),
     ).rejects.toThrow("server error");
+  });
+});
+
+describe("Activate de-queue honoring", () => {
+  const mkPR = (n: number): PR => ({
+    number: n,
+    headRef: "",
+    headSHA: "",
+    title: "",
+    createdAt: 0,
+  });
+
+  it("skips and rolls back a PR whose base label vanished (requireBaseLabel)", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, []); // base label already gone
+    const q = new Queue(api, "queue", false, nop);
+    const skipped = await q.activate([mkPR(1)], { requireBaseLabel: true });
+    expect(skipped).toEqual([1]);
+    expect(api.labels.get(1)).not.toContain("queue:active");
+  });
+
+  it("logs and still skips when the :active rollback fails", async () => {
+    // Throwing here would abort the run and leave the de-queued PR
+    // looking like a crash orphan — which the next run's sweep would
+    // re-enter against the author's intent. Swallow, log, skip.
+    const api = newMockAPI();
+    api.labels.set(1, []); // base gone → de-queue path
+    api.removeLabel = async (_n: number, label: string) => {
+      if (label === "queue") throw new Mock404Error();
+      throw new Mock500Error(); // rollback of :active fails hard
+    };
+    const logs: string[] = [];
+    const q = new Queue(api, "queue", false, (m) => logs.push(m));
+    const skipped = await q.activate([mkPR(1)], { requireBaseLabel: true });
+    expect(skipped).toEqual([1]);
+    expect(
+      logs.some((l) => l.includes("failed to roll back queue:active")),
+    ).toBe(true);
+  });
+
+  it("logs and still skips when clearing the de-queued PR's counter fails", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:attempt-7"]);
+    api.removeLabel = async (_n: number, label: string) => {
+      if (label === "queue") throw new Mock404Error(); // de-queue signal
+      if (label === "queue:active") return; // rollback ok
+      throw new Mock500Error(); // attempt clear fails
+    };
+    const logs: string[] = [];
+    const q = new Queue(api, "queue", false, (m) => logs.push(m));
+    const pr = { ...mkPR(1), labels: ["queue:attempt-7"] };
+    const skipped = await q.activate([pr], { requireBaseLabel: true });
+    expect(skipped).toEqual([1]);
+    expect(
+      logs.some((l) => l.includes("failed to clear attempt labels")),
+    ).toBe(true);
+  });
+
+  it("clears the attempt counter when skipping a de-queued PR", async () => {
+    // A de-queue is a queue exit: re-adding the label later must start
+    // with the documented fresh budget.
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:attempt-7"]);
+    const q = new Queue(api, "queue", false, nop);
+    const pr = { ...mkPR(1), labels: ["queue:attempt-7"] };
+    const skipped = await q.activate([pr], { requireBaseLabel: true });
+    expect(skipped).toEqual([1]);
+    expect(api.labels.get(1)).not.toContain("queue:attempt-7");
+  });
+
+  it("tolerates a missing base label without the option (manual batch_prs path)", async () => {
+    const api = newMockAPI();
+    api.labels.set(1, []);
+    const q = new Queue(api, "queue", false, nop);
+    const skipped = await q.activate([mkPR(1)]);
+    expect(skipped).toEqual([]);
+    expect(api.labels.get(1)).toContain("queue:active");
   });
 });
 
@@ -646,6 +732,26 @@ describe("Requeue counter durability", () => {
     // The bumped counter survived the failure — over-counted, never reset.
     expect(api.labels.get(1)).toContain("queue:attempt-3");
     expect(api.labels.get(1)).toContain("queue:attempt-2");
+  });
+
+  it("re-adds the base label BEFORE removing :active, so a mid-sequence failure never hides the PR", async () => {
+    // If the final base add came last (old order), a single failed call
+    // after the removals stranded the PR with only an attempt label —
+    // invisible to the trigger, collect, and the orphan sweep alike.
+    const api = newMockAPI();
+    api.labels.set(1, ["queue:active"]);
+    const origRemove = api.removeLabel.bind(api);
+    api.removeLabel = async (n: number, label: string) => {
+      if (label === "queue:active") throw new Mock500Error();
+      return origRemove(n, label);
+    };
+    const q = new Queue(api, "queue", false, nop, 5);
+    await expect(
+      q.requeue(mkPR(1, ["queue:active"])),
+    ).rejects.toThrow("server error");
+    // The failure left the PR VISIBLE: base label and attempt stamp on.
+    expect(api.labels.get(1)).toContain("queue");
+    expect(api.labels.get(1)).toContain("queue:attempt-1");
   });
 
   it("markFailed adds the terminal label FIRST, so a cleanup failure cannot strip every queue label", async () => {

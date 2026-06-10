@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { isRetryableHttpError, isThrottleError, withRetry } from "./github.js";
+import {
+  GitHubClient,
+  isRetryableHttpError,
+  isThrottleError,
+  withRetry,
+} from "./github.js";
 import { isRateLimitedError } from "./errors.js";
 
 const withStatus = (status: number, extra: object = {}) =>
@@ -82,9 +87,17 @@ describe("isThrottleError", () => {
         withStatus(403, { response: { headers: { "retry-after": "1" } } }),
       ),
     ).toBe(true);
-    // A 5xx is ambiguous (the dispatch may have been processed) — NOT safe.
+    // A 5xx is ambiguous (the dispatch may have been processed) — NOT safe,
+    // even when its headers happen to show an exhausted rate-limit quota.
     expect(isThrottleError(withStatus(500))).toBe(false);
     expect(isThrottleError(withStatus(502))).toBe(false);
+    expect(
+      isThrottleError(
+        withStatus(500, {
+          response: { headers: { "x-ratelimit-remaining": "0" } },
+        }),
+      ),
+    ).toBe(false);
     // Plain permission 403 / permanent errors are not throttles.
     expect(isThrottleError(withStatus(403))).toBe(false);
     expect(isThrottleError(withStatus(404))).toBe(false);
@@ -186,4 +199,83 @@ describe("withRetry", () => {
     expect(slept).toEqual([10, 20]); // exponential: 10*2^0, 10*2^1
     expect(logs.some((l) => l.includes("retrying"))).toBe(true);
   });
+});
+
+describe("GitHubClient retry wiring", () => {
+  // Pins WHICH predicate each call site uses — the predicates are unit
+  // tested above, but without these, swapping triggerWorkflow back to the
+  // permissive predicate (re-enabling duplicate dispatches) or dropping
+  // findWorkflowRun's retry would pass the whole suite.
+  function clientWith(
+    overrides: Partial<Record<string, (...args: never[]) => unknown>>,
+  ) {
+    const client = new GitHubClient("test-token", "o", "r");
+    Object.assign(client.octokit.rest.actions, overrides);
+    return client;
+  }
+
+  it("does NOT retry a 5xx on workflow dispatch (non-idempotent)", async () => {
+    let calls = 0;
+    const client = clientWith({
+      createWorkflowDispatch: async () => {
+        calls++;
+        throw Object.assign(new Error("Bad gateway"), { status: 502 });
+      },
+    });
+    await expect(
+      client.triggerWorkflow(".github/workflows/ci.yml", "main"),
+    ).rejects.toThrow("Bad gateway");
+    expect(calls).toBe(1);
+  });
+
+  it("retries a rate-limited 403 on workflow dispatch", async () => {
+    let calls = 0;
+    const client = clientWith({
+      createWorkflowDispatch: async () => {
+        calls++;
+        if (calls < 2) {
+          throw Object.assign(new Error("secondary rate limit"), {
+            status: 403,
+            response: { headers: { "retry-after": "0" } },
+          });
+        }
+        return { data: {} };
+      },
+    });
+    // withRetry's first backoff inside triggerWorkflow is 1000ms (not
+    // injectable from here); wait it out with a real timer.
+    const promise = client.triggerWorkflow(".github/workflows/ci.yml", "main");
+    await new Promise((r) => setTimeout(r, 1100));
+    await promise;
+    expect(calls).toBe(2);
+  }, 10_000);
+
+  it("retries a 5xx while locating the dispatched run (idempotent read)", async () => {
+    let calls = 0;
+    const client = clientWith({
+      listWorkflowRuns: async () => {
+        calls++;
+        if (calls < 2) {
+          throw Object.assign(new Error("Bad gateway"), { status: 502 });
+        }
+        return {
+          data: {
+            workflow_runs: [
+              { id: 7, status: "queued", conclusion: null, html_url: "u" },
+            ],
+          },
+        };
+      },
+    });
+    const promise = client.findWorkflowRun(
+      ".github/workflows/ci.yml",
+      "merge-queue/batch-x",
+      new Date(),
+      "headsha",
+    );
+    await new Promise((r) => setTimeout(r, 1100));
+    const handle = await promise;
+    expect(handle.runId).toBe(7);
+    expect(calls).toBe(2);
+  }, 10_000);
 });

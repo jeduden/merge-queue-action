@@ -1,12 +1,14 @@
 import * as core from "@actions/core";
 import * as github from "@actions/github";
-import { GitHubClient } from "./github.js";
+import { DEFAULT_CI_WAIT_MINUTES, GitHubClient } from "./github.js";
 import { GitOps } from "./gitops.js";
-import { MAX_REQUEUE_ATTEMPTS } from "./queue.js";
 import { PRReporter } from "./reporter.js";
 import {
   eventTriggerLabeledPR,
   hasWritePermission,
+  parseBatchSize,
+  parseCiWaitMinutes,
+  parseMaxRequeues,
   runProcess,
   runBisect,
   type Config,
@@ -24,13 +26,14 @@ interface EntryInputs {
   gitUserEmail: string;
   gitUserName: string;
   maxRequeues: number;
+  ciWaitMinutes: number;
 }
 
 function loadInputs(): EntryInputs {
   return {
     token: core.getInput("token", { required: true }),
     ciWorkflow: core.getInput("ci_workflow", { required: true }),
-    batchSize: parseInt(core.getInput("batch_size") || "5", 10),
+    batchSize: parseBatchSize(core.getInput("batch_size"), core.warning),
     queueLabel: core.getInput("queue_label") || "queue",
     dryRun: core.getInput("dry_run") === "true",
     batchPrs: core.getInput("batch_prs") || "",
@@ -39,9 +42,15 @@ function loadInputs(): EntryInputs {
       core.getInput("git_user_email") ||
       "merge-queue@users.noreply.github.com",
     gitUserName: core.getInput("git_user_name") || "merge-queue-bot",
-    maxRequeues: parseInt(
-      core.getInput("max_requeues") || String(MAX_REQUEUE_ATTEMPTS),
-      10,
+    // Strict parse: parseInt would silently accept numeric-prefix garbage
+    // ("1O" → 1), contradicting the documented invalid-input fallback.
+    // Anything non-canonical becomes NaN, which Queue's constructor
+    // rejects loudly and replaces with the default.
+    maxRequeues: parseMaxRequeues(core.getInput("max_requeues")),
+    ciWaitMinutes: parseCiWaitMinutes(
+      core.getInput("ci_wait_minutes"),
+      DEFAULT_CI_WAIT_MINUTES,
+      core.warning,
     ),
   };
 }
@@ -80,7 +89,9 @@ async function run(): Promise<void> {
   }
   const { owner, repo } = github.context.repo;
   const log = core.info;
-  const client = new GitHubClient(inputs.token, owner, repo, log);
+  const client = new GitHubClient(inputs.token, owner, repo, log, {
+    ciWaitMinutes: inputs.ciWaitMinutes,
+  });
   const commentCtx = buildCommentCtx(owner, repo, inputs.queueLabel);
   const reporter = new PRReporter({
     poster: client,

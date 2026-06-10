@@ -265,6 +265,31 @@ describe("CreateAndMerge", () => {
     expect(warned[0].scope).toEqual([7]);
   });
 
+  it("returns the merge SHA and warns (not throws) when the post-merge branch delete fails", async () => {
+    // The fast-forward already landed on main — throwing here would make
+    // the caller misclassify a SUCCESSFUL merge as a failure and requeue
+    // freshly-merged PRs.
+    const git = newMockGit();
+    git.deleteBranch = async () => {
+      throw new Error("delete refused");
+    };
+    const warned: string[] = [];
+    const reporter = {
+      info: () => {},
+      async warn(msg: string) {
+        warned.push(msg);
+      },
+      async withScope<T>(_prs: number[], fn: () => Promise<T>) {
+        return fn();
+      },
+    };
+    const b = new Batch(git, false, nop, reporter);
+    const sha = await b.completeMerge("merge-queue/batch-ok");
+    expect(sha).toBe("abc123");
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toContain("after merging");
+  });
+
   it("warns via Reporter when deleteBranch also fails on the PUSH cleanup path", async () => {
     // Twin of the merge-path cleanup test, but for the push branch: pushBranch
     // throws (triggers cleanup) and the deleteBranch teardown ALSO throws. The

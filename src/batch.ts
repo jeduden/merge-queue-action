@@ -1,7 +1,22 @@
 import { errorMessage, silentReporter, type Reporter } from "./reporter.js";
 import { ConfigurationError } from "./errors.js";
 
-/** GitOperator defines the interface for git operations. */
+/**
+ * GitOperator defines the interface for git operations.
+ *
+ * Error contract — LOAD-BEARING for the retry orchestration: the
+ * orchestrator routes on `err instanceof ConfigurationError` to decide
+ * between marking PRs failed (permanent, operator must fix) and requeueing
+ * them (transient, cap-bounded). Implementations MUST throw
+ * `ConfigurationError` (errors.ts) for failures that no retry can resolve:
+ *   - `createBranchFromRef`: missing worktree / shallow clone;
+ *   - `pushBranch`: pushes rejected for missing token scope (e.g. workflow
+ *     files without the `workflow` scope);
+ *   - `fastForwardMain`: branch-protection / ruleset rejections and
+ *     missing-permission errors updating `main`.
+ * An implementation that throws plain `Error` for those downgrades a
+ * permanent misconfiguration to a retried-until-the-cap transient.
+ */
 export interface GitOperator {
   createBranchFromRef(branch: string, baseRef: string): Promise<void>;
   mergeBranch(
@@ -158,7 +173,16 @@ export class Batch {
     if (this.dryRun) return "";
     const sha = await this.git.fastForwardMain(branch);
     this.log(`Deleting batch branch ${branch}`);
-    await this.git.deleteBranch(branch);
+    try {
+      await this.git.deleteBranch(branch);
+    } catch (err) {
+      // The merge to main already happened — a failed branch delete must
+      // not throw, or the caller would misclassify a SUCCESSFUL merge as
+      // a fast-forward failure and requeue freshly-merged PRs.
+      await this.reporter.warn(
+        `failed to delete batch branch \`${branch}\` after merging: ${errorMessage(err)}`,
+      );
+    }
     return sha;
   }
 }

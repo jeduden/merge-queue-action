@@ -43,6 +43,19 @@ export function errorMessage(err: unknown): string {
   }
 }
 
+/**
+ * Renders an untrusted text fragment (git stderr, API error bodies) as
+ * inline code for embedding in PR-comment prose. Inline code neutralizes
+ * Markdown — `@mentions` stop notifying and `[label](url)` stops being a
+ * link — so attacker-influenced output can't inject either into a trusted
+ * bot comment. Internal backticks are stripped (they would close the
+ * span) and whitespace is collapsed to keep the fragment a single span.
+ */
+export function safeInline(text: string): string {
+  const oneLine = text.replace(/`/g, "'").replace(/\s+/g, " ").trim();
+  return `\`${oneLine || "unknown error"}\``;
+}
+
 /** Minimal comment-poster interface — lets tests mock without pulling in the full GitHubAPI. */
 export interface CommentPoster {
   comment(prNumber: number, body: string): Promise<void>;

@@ -1,5 +1,6 @@
 import * as github from "@actions/github";
-import type { PR, GitHubAPI, WorkflowAPI, WorkflowRunHandle, WorkflowRunResult } from "./queue.js";
+import type { PR, WorkflowRunHandle, WorkflowRunResult } from "./queue.js";
+import type { FullAPI } from "./action.js";
 type Octokit = ReturnType<typeof github.getOctokit>;
 type LogFunc = (msg: string) => void;
 /**
@@ -21,6 +22,13 @@ export declare function isRetryableHttpError(err: unknown): boolean;
  * (which rebuilds the batch branch, making the orphan run harmless).
  */
 export declare function isThrottleError(err: unknown): boolean;
+/** Default minutes to wait for a dispatched CI run to complete. */
+export declare const DEFAULT_CI_WAIT_MINUTES = 60;
+/**
+ * Poll attempts (10s apart) for a given CI wait budget. Floors at one
+ * minute so a typo can't reduce the wait below a useful minimum.
+ */
+export declare function ciWaitAttempts(minutes: number): number;
 /**
  * Runs `fn`, retrying transient GitHub API errors with exponential backoff.
  * A transient blip is absorbed in-run instead of failing the job and forcing
@@ -36,13 +44,22 @@ export declare function withRetry<T>(fn: () => Promise<T>, opts?: {
     log?: LogFunc;
     sleepFn?: (ms: number) => Promise<void>;
 }): Promise<T>;
-/** GitHubClient implements GitHubAPI and WorkflowAPI using the GitHub REST API. */
-export declare class GitHubClient implements GitHubAPI, WorkflowAPI {
+/**
+ * GitHubClient implements FullAPI (GitHubAPI + WorkflowAPI + the PR/actor
+ * lookups) using the GitHub REST API. Declaring the full interface here —
+ * not just at the runProcess call site — makes any signature drift surface
+ * on the drifted method instead of as an opaque assignability error in
+ * main.ts.
+ */
+export declare class GitHubClient implements FullAPI {
     readonly octokit: Octokit;
     readonly owner: string;
     readonly repo: string;
     private readonly log;
-    constructor(token: string, owner: string, repo: string, log?: LogFunc);
+    private readonly waitAttempts;
+    constructor(token: string, owner: string, repo: string, log?: LogFunc, opts?: {
+        ciWaitMinutes?: number;
+    });
     listPRsWithLabel(label: string, limit: number): Promise<PR[]>;
     addLabel(prNumber: number, label: string): Promise<void>;
     removeLabel(prNumber: number, label: string): Promise<void>;

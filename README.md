@@ -146,7 +146,7 @@ start workflows triggered by `pull_request: labeled`. In that case, use
 |-------|---------|
 | `queue` | PR is waiting to be processed |
 | `queue:active` | PR is currently in a batch |
-| `queue:failed` | PR failed CI, had a merge conflict, or hit the requeue cap |
+| `queue:failed` | PR failed CI, had a merge conflict, hit the requeue cap, or was stopped by a configuration error |
 | `queue:attempt-N` | Internal: how many times this PR has been requeued |
 
 ### Bounded retries (no infinite loops)
@@ -159,21 +159,29 @@ permission, branch protection rejecting the bot, a check that always
 fails), every requeue is bounded by a per-PR attempt cap:
 
 - Each requeue stamps the PR with a `queue:attempt-N` label. These
-  labels are created on the fly (with a default color) — they don't need
-  pre-creating, and deleting one from a PR that is still queued resets
-  that PR's counter.
+  labels are created on the fly (GitHub assigns each a random color) —
+  they don't need pre-creating, and deleting one from a PR that is still
+  queued resets that PR's counter.
 - Once a PR has been requeued **`max_requeues`** times (default **10**;
   must be a positive integer — invalid values fall back to the default
   with a run-log warning) without succeeding, the queue stops retrying
   it, moves it to `queue:failed`, and posts a "retry limit reached"
   comment instead of re-adding the `queue` label.
-- The counter resets whenever the PR makes real progress: it merges, its
-  head changes while batch CI runs (the author pushed), or it is marked
-  failed and later re-added by you — so a genuinely transient failure
-  that later succeeds is never penalised.
+- The counter resets whenever the PR makes real progress: it merges, any
+  batch member's head changes while batch CI runs (the push invalidates
+  the shared batch run, and none of those PRs failed — so the whole
+  batch's counters reset), or it is marked failed and later re-added by
+  you. A genuinely transient failure that later succeeds is never
+  penalised.
 
 This backstop bounds *every* failure path, including ones the action does
 not yet classify as permanent. Tune it with the `max_requeues` input.
+
+The queue also self-heals from interrupted runs: because the mandated
+concurrency group serializes runs, any PR still wearing `queue:active`
+when a fresh run starts must be left over from a crashed or cancelled
+run, and the new run requeues it automatically (cap-bounded) instead of
+leaving it stranded.
 
 ### How merging works in detail
 
@@ -276,6 +284,14 @@ https://x-access-token:<token>@…` against the checked-out worktree,
 so you don't need to pass `token:` to `actions/checkout` or add a
 separate "Configure git" step. The token used is whatever you pass
 as the `token` input (typically `secrets.MERGE_QUEUE_TOKEN`).
+
+A post-step (declared in `action.yml`, runs even if the main step
+failed) resets `origin` back to the token-less URL, so steps placed
+*after* this action in the same job cannot read the merge-queue token
+out of `.git/config`. Steps placed *before* the action remain inside
+the trust boundary described under
+[Token requirements](#token-requirements) and the security notes in
+[Custom merge drivers](#custom-merge-drivers).
 
 Override the identity via the `git_user_email` / `git_user_name`
 inputs if you need a different author on the merge commits.
@@ -550,6 +566,7 @@ tested together in a single batch, reducing total CI runs.
 | `ci_workflow` | yes | — | Workflow file supporting `workflow_dispatch` (e.g. `.github/workflows/ci.yml`) |
 | `batch_size` | no | `5` | Max PRs per batch |
 | `queue_label` | no | `queue` | Label that enqueues a PR |
+| `ci_wait_minutes` | no | `60` | Minutes to wait for the batch CI run to complete before requeueing. Size above your slowest CI run — a too-small value times out every batch and burns the requeue cap without CI ever failing. |
 | `max_requeues` | no | `10` | Max times a single PR is requeued before the queue gives up and marks it `queue:failed`. Bounds every retry path so a permanent failure can't re-trigger the workflow forever. Must be a positive integer; invalid values fall back to the default with a run-log warning. See [Bounded retries](#bounded-retries-no-infinite-loops). |
 | `dry_run` | no | `false` | Log intent without mutating |
 | `batch_prs` | no | `""` | PR numbers to process explicitly. Accepts a JSON array (`[187]` or `[181,187]`) or a single integer string (`187`). When provided via `workflow_dispatch` in normal mode, those PRs are fetched directly without requiring the queue label — the recommended fallback for conflicted PRs. In bisect mode the action sets this automatically. |
